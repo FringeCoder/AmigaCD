@@ -8,8 +8,8 @@ attached to the MiSTer, instead of from a CHD/CUE image on the SD card.
 | Role | Repo | Branch |
 |---|---|---|
 | Physical disc userspace | [`Anime0t4ku/Main_MiSTer_Physical_Disc`](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc) | `master` |
-| CD32/CDTV userspace driver | [`kblood/Main_MiSTer-cd32-cdtv`](https://github.com/kblood/Main_MiSTer-cd32-cdtv) | `master` |
-| CD32/CDTV core RTL | [`kblood/Minimig-AGA-cd32-cdtv-native-akiko`](https://github.com/kblood/Minimig-AGA-cd32-cdtv-native-akiko) | `cd32-native-mvp` |
+| CD32/CDTV userspace driver | [`kblood/Main_MiSTer-cd32-cdtv`](https://github.com/kblood/Main_MiSTer-cd32-cdtv) | `amiga-console` |
+| CD32/CDTV core RTL | [`kblood/Minimig-AGA-cd32-cdtv-native-akiko`](https://github.com/kblood/Minimig-AGA-cd32-cdtv-native-akiko) | `amiga-console` |
 
 Fetch them into `upstream/` with `scripts/fetch-upstream.sh` (not tracked).
 
@@ -43,4 +43,7 @@ See [`docs/integration-plan.md`](docs/integration-plan.md) for the step-by-step 
 
 ## Status
 
-Planning. Nothing built yet.
+This repo *is* Main_MiSTer @ `amiga-console`, with the physical-disc module
+grafted on. Phases 0 and 1 of the plan are done; phase 2 is what makes it
+actually work. Nothing has been compiled yet -- there is no working build
+toolchain on this machine.
