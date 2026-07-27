@@ -22,6 +22,7 @@
 #include "ide.h"
 #include "support/minimig/akiko_cd32.h"
 #include "support/minimig/cdtv_cd.h"
+#include "support/physical_disc/physical_disc.h"
 
 #if 0
 #define dbg_printf     printf
@@ -370,6 +371,93 @@ static const char* load_chd_file(drive_t *drv, const char *chdfile)
 	}
 
 	return chdfile;
+}
+
+
+// Mount a physical CD-ROM drive as this drive's media.
+//
+// physical_disc_load_toc fills a cd.h toc_t, so this is the same
+// toc_t -> drive_t/track_t translation load_chd_file does above, minus
+// everything CHD-specific. Physical tracks are always raw 2352 with
+// chd_offset 0, which is why cdrom_read_raw_sector's phys branch can read
+// straight through with no per-track arithmetic.
+//
+// Safe to call on an already-mounted physical drive: physical_disc_open
+// returns early when the same device is open, so this re-reads the TOC
+// without re-spinning the drive.
+//
+// Returns the sentinel on success (callers only test for non-NULL and pass
+// the value on as a display name), 0 on failure.
+static const char* load_physical_disc(drive_t *drv)
+{
+	toc_t tmpTOC = { };
+
+	if (physical_disc_open(NULL)) return 0;
+	if (physical_disc_load_toc(&tmpTOC))
+	{
+		physical_disc_close();
+		printf("\x1b[32mIDE: no readable physical disc\n\x1b[0m");
+		return 0;
+	}
+
+	if (tmpTOC.last < 1)
+	{
+		physical_disc_close();
+		return 0;
+	}
+
+	memset(drv->track, 0, sizeof(drv->track));
+	drv->track_cnt = 0;
+	drv->data_num = 0;
+	uint32_t total_sector_size = 0;
+
+	for (int i = 0; i < tmpTOC.last; i++)
+	{
+		cd_track_t *src = &tmpTOC.tracks[i];
+		track_t *trk = &drv->track[i];
+		trk->number = i + 1;
+		trk->sectorSize = src->sector_size;              // always 2352
+		// TT_CDDA == 0 -> audio, anything else -> data. The Akiko and CDTV
+		// bridges classify tracks purely by (attr & 0x40), same as the CHD path.
+		if (src->type) trk->attr = 0x40;
+		trk->mode2 = 0;                                  // moot: reads are raw 2352
+		trk->chd_offset = 0;
+		trk->start = src->start;
+		trk->length = src->end - src->start;
+		drv->track_cnt++;
+		total_sector_size += trk->length * trk->sectorSize;
+	}
+
+	// Lead-out sentinel. akiko_build_toc, the OOB guard in
+	// akiko_handle_sec_req and cdtv cmd_play all treat track[track_cnt - 1]
+	// as lead-out and take the disc end from its start.
+	track_t *lead_out = &drv->track[drv->track_cnt];
+	lead_out->number = drv->track_cnt + 1;
+	lead_out->attr = 0;
+	lead_out->start = tmpTOC.tracks[tmpTOC.last - 1].end;
+	lead_out->length = 0;
+	drv->track_cnt++;
+
+	drv->total_sectors = total_sector_size / 512;
+	drv->chd_total_size = total_sector_size;
+
+	// First data track, matching load_chd_file / load_cue_file.
+	for (uint8_t i = 0; i < drv->track_cnt; i++)
+	{
+		if (drv->track[i].attr == 0x40)
+		{
+			drv->data_num = i;
+			break;
+		}
+	}
+
+	drv->phys = 1;
+	drv->chd_f = NULL;
+
+	printf("\x1b[32mIDE: physical disc mounted, %u track(s), lead-out lba=%u\n\x1b[0m",
+		drv->track_cnt - 1, lead_out->start);
+
+	return PHYSICAL_DISC_SENTINEL;
 }
 
 
@@ -1163,6 +1251,16 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 {
 	if (!drive || !buf) return -1;
 
+	// Physical drive: READ CD already hands back the exact 2352-byte raw
+	// frame (flags 0xF8 for data, 0x10 for audio), so there is no per-track
+	// sizing and no sync-header synthesis to do. On failure physical_disc
+	// has already zero-filled buf; we still report -1 so the caller's
+	// retry/hold logic runs.
+	if (drive->phys)
+	{
+		return physical_disc_read_sector((int)lba, buf, NULL) ? -1 : 0;
+	}
+
 	bool is_index0 = false;
 	track_t *track = get_track_from_lba(drive, lba, is_index0);
 	if (!track) return -1;
@@ -1820,6 +1918,12 @@ void cdrom_reply(ide_config *ide, uint8_t error, uint8_t asc_code, uint8_t ascq_
 void cdrom_close_chd(drive_t *drv)
 {
 
+	if (drv->phys)
+	{
+		physical_disc_close();
+		drv->phys = 0;
+	}
+
 	if (drv->chd_f)
 	{
 		chd_close(drv->chd_f);
@@ -1854,6 +1958,53 @@ const char* cdrom_parse(uint32_t num, const char *filename)
 	// Holding the CHD open across reset preserves both the parser and (more
 	// importantly) the OS page cache for the file descriptor.
 	static char last_path[2][2][1024] = {};
+
+	// Physical CD-ROM drive. Handled ahead of the normal path bookkeeping
+	// because there is no file to getFullPath, and because a re-mount must
+	// not tear the drive down and re-spin it. load_physical_disc re-reads
+	// the TOC on every call, so a disc swap followed by a re-mount picks up
+	// the new geometry for free.
+	if (filename && !strcmp(filename, PHYSICAL_DISC_SENTINEL))
+	{
+		drive_t *d = &ide_inst[num].drive[drv];
+
+		if (!d->phys)
+		{
+			// Coming from file-backed media (or cold): drop it first.
+			cdrom_close_chd(d);
+			for (uint8_t i = 0; i < sizeof(d->track) / sizeof(track_t); i++)
+			{
+				if (d->track[i].f.opened()) FileClose(&d->track[i].f);
+			}
+		}
+
+		d->mcr_flag = true;
+		d->playing = 0;
+		d->paused = 0;
+		d->play_start_lba = 0;
+		d->play_end_lba = 0;
+
+		res = load_physical_disc(d);
+		if (!res)
+		{
+			last_path[num][drv][0] = '\0';
+			akiko_cd32_set_cd_path("");
+			cdtv_cd_set_cd_path("");
+			return 0;
+		}
+
+		strncpy(last_path[num][drv], PHYSICAL_DISC_SENTINEL,
+		        sizeof(last_path[0][0]) - 1);
+		last_path[num][drv][sizeof(last_path[0][0]) - 1] = '\0';
+
+		// TODO(phase 4): per-game NVRAM is keyed off the image path, so every
+		// physical disc currently shares one .nvr. Replace the sentinel here
+		// with physical_disc_disc_label()/_serial() once that lands.
+		akiko_cd32_set_cd_path(PHYSICAL_DISC_SENTINEL);
+		cdtv_cd_set_cd_path(PHYSICAL_DISC_SENTINEL);
+		return res;
+	}
+
 	const char *cmp_filename = filename ? filename : "";
 	bool same_path = filename && filename[0]
 	                 && !strcmp(last_path[num][drv], cmp_filename)

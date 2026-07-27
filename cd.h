@@ -43,6 +43,10 @@ typedef struct
 	int end;
 	int last;
 	int sectorSize;
+	// Media is a physical CD-ROM drive (support/physical_disc), not a file.
+	// When set, chd_f and every tracks[].f are NULL/closed and all reads go
+	// through physical_disc_read_*() instead of seeking a file.
+	int phys;
 	chd_file *chd_f;
 	int chd_hunksize;
 	cd_track_t tracks[100];

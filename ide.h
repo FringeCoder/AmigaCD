@@ -88,6 +88,10 @@ struct drive_t
 	uint8_t  placeholder;
 	uint8_t  allow_placeholder;
 	uint8_t  cd;
+	// Media is a physical CD-ROM drive rather than a CHD/CUE/ISO. Mirrors
+	// toc_t.phys in cd.h. chd_f and track[].f are all NULL/closed; the
+	// track table is still fully populated from the drive's real TOC.
+	uint8_t  phys;
 	uint8_t  load_state;
 	uint8_t  last_load_state;
 	uint8_t  track_cnt;
