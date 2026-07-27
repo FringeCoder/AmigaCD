@@ -1,0 +1,32 @@
+# Serena project state
+.serena/cache/
+
+# Upstream clones (fetched via scripts/fetch-upstream, not tracked here)
+/upstream/*/
+
+# Build artefacts
+*.o
+*.d
+*.elf
+*.rbf
+*.sof
+*.qar
+*.rpt
+*.summary
+db/
+incremental_db/
+output_files/
+simulation/
+greybox_tmp/
+
+# MiSTer binaries
+MiSTer
+MiSTer_*.bin
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
