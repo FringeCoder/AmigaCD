@@ -1,13 +1,46 @@
+# ---- AmigaCD project ----
+
 # Serena project state
 .serena/cache/
 
-# Upstream clones (fetched via scripts/fetch-upstream, not tracked here)
+# Upstream clones (fetched via scripts/fetch-upstream.sh, not tracked here)
 /upstream/*/
 
-# Build artefacts
-*.o
-*.d
+# ---- Main_MiSTer (inherited from cd32-main/amiga-console) ----
+
+# ignore backup files
+*~
+
+# ignore vi swapfiles
+.*.swp
+
+# ignore compiled python
+*pyc
+
+# ignore some backup files
+*bak
+
+# ignore some c files
+*\.o
+*\.d
+
+# ignore dropbox files
+.dropbox.attr
+
+# ignore directories
+Debug
+gcc-*
+
+host
+*.lst
 *.elf
+*.map
+*.user
+.vs
+MiSTer
+/bin
+
+# ---- Quartus / core build artefacts ----
 *.rbf
 *.sof
 *.qar
@@ -19,14 +52,8 @@ output_files/
 simulation/
 greybox_tmp/
 
-# MiSTer binaries
-MiSTer
-MiSTer_*.bin
-
-# Editor / OS
+# ---- Editor / OS ----
 .vscode/
 .idea/
-*.swp
-*~
 Thumbs.db
 desktop.ini
