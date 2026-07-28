@@ -64,6 +64,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "support.h"
 #include "bootcore.h"
 #include "ide.h"
+#include "support/physical_disc/physical_disc.h"
 #include "profiling.h"
 #include "str_util.h"
 #include "autofire.h"
@@ -6423,7 +6424,7 @@ void HandleUI(void)
 		// the core menu itself is reskinned, the MiSTer menu stays reachable.
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 		helptext_idx = 0;
-		menumask = 0x7F;            // CD, Floppy, System, Settings, Save, Reset, Exit
+		menumask = 0xFF;            // CD, Real CD, Floppy, System, Settings, Save, Reset, Exit
 		parentstate = menustate;
 
 		int cdtv = amigacd_is_cdtv();
@@ -6432,7 +6433,11 @@ void HandleUI(void)
 
 		// CD slot = hardfile[0]
 		strcpy(s, " CD       : ");
-		if (minimig_config.hardfile[0].filename[0])
+		if (!strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
+		{
+			strcat(s, "* physical drive *");
+		}
+		else if (minimig_config.hardfile[0].filename[0])
 		{
 			char *name = minimig_config.hardfile[0].filename;
 			char *p = strrchr(name, '/');
@@ -6440,6 +6445,17 @@ void HandleUI(void)
 		}
 		else strcat(s, "* no disc *");
 		OsdWrite(m++, s, menusub == 0, 0);
+
+		// Physical CD-ROM drive attached to the MiSTer. Mounting parks the
+		// sentinel in hardfile[0].filename, which is what ide_open matches on.
+		// Re-selecting while mounted re-reads the TOC, i.e. disc swap.
+		{
+			bool phys_cd = !strcmp(minimig_config.hardfile[0].filename,
+			                       PHYSICAL_DISC_SENTINEL);
+			strcpy(s, " Real CD  : ");
+			strcat(s, phys_cd ? "re-read TOC" : "mount drive");
+			OsdWrite(m++, s, menusub == 1, 0);
+		}
 
 		// Floppy df0
 		strcpy(s, " Floppy   : ");
@@ -6449,21 +6465,21 @@ void HandleUI(void)
 			strncat(s, p ? p + 1 : df[0].name, 24);
 		}
 		else strcat(s, "* no disk *");
-		OsdWrite(m++, s, menusub == 1, 0);
+		OsdWrite(m++, s, menusub == 2, 0);
 
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " System   : ");
 		strcat(s, cdtv ? "CDTV" : "CD32");
-		OsdWrite(m++, s, menusub == 2, 0);
+		OsdWrite(m++, s, menusub == 3, 0);
 
 		OsdWrite(m++, "", 0, 0);
-		OsdWrite(m++, " Settings                 \x16", menusub == 3, 0);
-		OsdWrite(m++, " Save settings", menusub == 4, 0);
+		OsdWrite(m++, " Settings                 \x16", menusub == 4, 0);
+		OsdWrite(m++, " Save settings", menusub == 5, 0);
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 5, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 6, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 6, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 7, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 		break;
@@ -6498,7 +6514,28 @@ void HandleUI(void)
 					else if (recent_init(500)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 1) // Floppy df0
+			else if (menusub == 1) // Real CD: mount the physical drive
+			{
+				if (select)
+				{
+					strcpy(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL);
+					minimig_config.hardfile[0].cfg = 2;
+					if (ide_open(0, minimig_config.hardfile[0].filename))
+					{
+						// No minimig_reset() here: the akiko bridge raises its own
+						// mediachange once cd_is_mounted() flips, same as for an
+						// image mount.
+						Info("Physical CD mounted", 1500);
+					}
+					else
+					{
+						minimig_config.hardfile[0].filename[0] = 0;
+						Info("No readable disc", 2000);
+					}
+					menustate = MENU_AMIGACD_MAIN1;
+				}
+			}
+			else if (menusub == 2) // Floppy df0
 			{
 				if (df[0].status & DSK_INSERTED) // eject
 				{
@@ -6518,7 +6555,7 @@ void HandleUI(void)
 					else if (recent_init(0)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 2) // System: toggle CD32 <-> CDTV
+			else if (menusub == 3) // System: toggle CD32 <-> CDTV
 			{
 				if (select || minus || plus)
 				{
@@ -6529,12 +6566,12 @@ void HandleUI(void)
 					menustate = MENU_AMIGACD_MAIN1;
 				}
 			}
-			else if (menusub == 3 && select) // Settings submenu
+			else if (menusub == 4 && select) // Settings submenu
 			{
 				menusub = 0;
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 4 && select) // Save settings -> default config slot 0
+			else if (menusub == 5 && select) // Save settings -> default config slot 0
 			{
 				// Persists the whole minimig_config: mounted CD (hardfile[0]),
 				// RAM (memory), CPU/chipset (System profile), D-Cache and ROMs.
@@ -6545,17 +6582,17 @@ void HandleUI(void)
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 5 && select) // Reset
+			else if (menusub == 6 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 6 && select) // Exit
+			else if (menusub == 7 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
 		}
-		else if (c == KEY_BACKSPACE && menusub == 1) // eject floppy
+		else if (c == KEY_BACKSPACE && menusub == 2) // eject floppy
 		{
 			df[0].status = 0;
 			FileClose(&df[0].file);
@@ -6635,7 +6672,7 @@ void HandleUI(void)
 		else if (back || left)
 		{
 			menustate = MENU_AMIGACD_MAIN1;
-			menusub = 3;
+			menusub = 4;
 		}
 		else if (select || minus || plus)
 		{
@@ -6687,7 +6724,7 @@ void HandleUI(void)
 			else if (menusub == 4 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
-				menusub = 3;
+				menusub = 4;
 			}
 		}
 		break;
