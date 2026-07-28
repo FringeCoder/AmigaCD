@@ -24,6 +24,7 @@
 #include "ide_cdrom.h"
 #include "support/minimig/akiko_cd32.h"
 #include "support/minimig/cdtv_cd.h"
+#include "support/physical_disc/physical_disc.h"
 
 #if 0
 	#define dbg_printf     printf
@@ -437,7 +438,9 @@ void ide_img_set(uint32_t drvnum, fileTYPE *f, int cd, int sectors, int heads, i
 	drive->offset = 0;
 	drive->type = 0;
 
-	drive->present = f ? 1 : 0;
+	// A physical CD-ROM drive has media but no backing file, so presence
+	// cannot come from the fileTYPE pointer alone.
+	drive->present = (f || drive->phys) ? 1 : 0;
 	ide_inst[port].state = IDE_STATE_RESET;
 	ide_inst[port].bitoff = port * 3;
 
@@ -463,8 +466,11 @@ void ide_img_set(uint32_t drvnum, fileTYPE *f, int cd, int sectors, int heads, i
 	{
 		if (!drive->chd_f) drive->total_sectors = (drive->f->size / 512);
 	}
-	else
+	else if (!drive->phys)
 	{
+		// Physical drives keep the total_sectors that load_physical_disc
+		// derived from the drive's own TOC; there is no file size to fall
+		// back on.
 		drive->total_sectors = 0;
 	}
 
@@ -1108,6 +1114,25 @@ int ide_open(uint8_t unit, const char* filename)
 	    || cdtv_cd_slot)
 	{
 		printf("\nChecking HDD %d\n", unit);
+
+		// Physical CD-ROM drive. Must be handled before the FileOpenEx gate
+		// below: the sentinel is not a path, so that gate would reject it and
+		// cdrom_parse would never run. There is also nothing for
+		// ide_img_mount to open, hence the file-less ide_img_set. Geometry is
+		// zeroed because ide_img_set only applies cylinders/heads/spt to
+		// non-CD drives.
+		if (filename[0] && !strcmp(filename, PHYSICAL_DISC_SENTINEL))
+		{
+			if (cdrom_parse(unit, filename))
+			{
+				ide_img_set(unit, 0, 1, 0, 0, 0);
+				printf("HDD %d: physical CD-ROM drive\n", unit);
+				return 1;
+			}
+			printf("HDD %d: no readable physical disc\n", unit);
+			// fall through to the not-present cleanup below
+		}
+
 		if (filename[0] && FileOpenEx(&hdd_file[unit], filename, FileCanWrite(filename) ? O_RDWR : O_RDONLY))
 		{
 			printf("file: \"%s\": ", hdd_file[unit].name);

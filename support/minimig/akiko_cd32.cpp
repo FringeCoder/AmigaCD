@@ -34,6 +34,7 @@
 #include "../../hardware.h"   // GetTimer / CheckTimer
 #include "../../menu.h"       // menu_present() — OSD-open save trigger
 #include "../chd/mister_chd.h" // mister_chd_read_sector for CDDA pump
+#include "../physical_disc/physical_disc.h" // physical CD-ROM drive media
 #include "minimig_config.h"   // minimig_reset() — used to unblock BIOS stuck
                               // on no-CD splash after a boot-with-no-CD-then-mount.
 #include "akiko_cd32.h"
@@ -449,7 +450,7 @@ static bool cd_is_mounted(void)
 	for (int p = 0; p < 2; p++) {
 		for (int d = 0; d < 2; d++) {
 			drive_t *drv = &ide_inst[p].drive[d];
-			if (drv->cd && (drv->chd_f || drv->f)) {
+			if (drv->cd && (drv->chd_f || drv->f || drv->phys)) {
 				return true;
 			}
 		}
@@ -463,7 +464,7 @@ static drive_t *cd_find_drive(void)
 	for (int p = 0; p < 2; p++) {
 		for (int d = 0; d < 2; d++) {
 			drive_t *drv = &ide_inst[p].drive[d];
-			if (drv->cd && (drv->chd_f || drv->f)) {
+			if (drv->cd && (drv->chd_f || drv->f || drv->phys)) {
 				return drv;
 			}
 		}
@@ -1623,7 +1624,8 @@ static void akiko_push_sector(const uint8_t *buf)
 // validate "is this actually audio" before reading.
 static bool cd_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 {
-	if (!drv || !drv->chd_f || !buf2352) return false;
+	if (!drv || !buf2352) return false;
+	if (!drv->chd_f && !drv->phys) return false;
 
 	bool index0 = false;
 	track_t *track = NULL;
@@ -1650,6 +1652,19 @@ static bool cd_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 	// attr & 0x40 == 0 → audio (CDDA). Refuse to play data tracks as audio.
 	if (track->attr & 0x40) return false;
 	if (track->sectorSize != AKIKO_CDDA_BYTES) return false;
+
+	if (drv->phys) {
+		if (physical_disc_read_sector((int)lba, buf2352, NULL)) return false;
+		// READ CD (flags 0x10) returns audio in disc order, i.e.
+		// little-endian per 16-bit sample. CHD stores it big-endian, and
+		// akiko_push_audio_sector byte-swaps unconditionally on the way to
+		// the FIFO. Normalise to CHD order here so the push path stays
+		// source-agnostic. Getting this wrong is immediately audible:
+		// white noise, not silence.
+		uint16_t *s = (uint16_t *)buf2352;
+		for (int i = 0; i < AKIKO_CDDA_BYTES / 2; i++) s[i] = bswap_16(s[i]);
+		return true;
+	}
 
 	uint32_t chd_lba = lba + track->chd_offset;
 	if (mister_chd_read_sector(drv->chd_f, chd_lba, 0, 0,
