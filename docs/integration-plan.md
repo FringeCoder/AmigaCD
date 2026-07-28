@@ -58,10 +58,12 @@ re-reads the TOC — which gets disc-swap-on-remount for free.
 
 ---
 
-## Phase 2 — make the bridge see the disc ⬜ next
+## Phase 2 — make the bridge see the disc ✅ done (`73fd46b`)
 
-Nothing works until this lands: the bridges will report no media and the BIOS
-will sit on the no-disc splash.
+Applied by `tools/patches/phase2_bridge.py` and `phase2b_mount.py`.
+
+Turned out to be two layers, not one. The bridge fixes below are necessary but
+not sufficient — see 2b, without which all of phase 1 and 2a is dead code.
 
 ### 1. Media detection — three call sites
 
@@ -117,11 +119,38 @@ unchanged on a physical disc. Real Q-channel data from the drive
 (`physical_disc_read_sector_sub`) is a later accuracy improvement, not a
 requirement.
 
+### 6. Mount path plumbing (phase 2b)
+
+Not in the original plan; found while testing the phase 2a reasoning.
+
+`ide_open` (`ide.cpp:1114`) runs the entire CD mount behind:
+
+```c
+if (filename[0] && FileOpenEx(&hdd_file[unit], filename, ...))
+```
+
+The sentinel is not a path and never opens, so `cdrom_parse` was unreachable
+and every phase 1 and 2a change was dead code. The physical branch now runs
+*ahead* of that gate. On failure it deliberately does not return: `FileOpenEx`
+rejects the sentinel, the mount block is skipped, and control falls to the
+normal not-present cleanup, which closes any stale CHD and clears the
+akiko/cdtv save paths.
+
+`ide_img_set` (`ide.cpp:416`) then had the same shape of assumption:
+`drive->present = f ? 1 : 0`. A physical drive has media but no file, so it
+landed with `present=0` / `cd=0` and `cd_find_drive` refused it regardless of
+`drive->phys`. Presence now comes from `(f || drive->phys)`, and the no-file
+branch no longer zeroes the `total_sectors` that `load_physical_disc` derived
+from the drive's own TOC.
+
+Geometry is passed as zeros: `ide_img_set` only applies cylinders/heads/spt
+on the `!drive->cd` path.
+
 ---
 
-## Phase 3 — make it fast enough ⬜
+## Phase 3 — make it fast enough ⬜ next
 
-### 6. Seek hints
+### 7. Seek hints
 
 Call `physical_disc_seek_hint(s_lba)` where a data read is armed —
 `akiko_cd32.cpp:1027`, in the `cmd_multi` PLAY DATA branch right after
@@ -133,7 +162,7 @@ cache-window fill becomes 16 synchronous `SG_IO` round trips inside
 `user_io_poll()`, each with a 3-second timeout. That is a hard freeze of input
 and OSD, not merely slow loading.
 
-### 7. Collapse the double cache
+### 8. Collapse the double cache
 
 Akiko's 4-window × 128-sector LRU (`akiko_prefetch_fill`, 1856; `akiko_prefetch_get`,
 1882) now sits on top of physical_disc's own two-lane ring. A cold window fill
@@ -155,7 +184,12 @@ rather than drive-limited.
 
 ## Phase 4 — plumbing and polish ⬜
 
-### 8. Mount path
+### 9. OSD trigger — nothing is reachable until this exists
+
+Phases 1-2 are complete but dormant: no code path passes
+`PHYSICAL_DISC_SENTINEL` to `cdrom_parse` yet, so none of it can be exercised
+on hardware. This is now the highest-value next step, ahead of the phase 3
+performance work, because it is what makes the rest testable.
 
 Bring `physical_disc_launch.cpp` in (or write a minimal Minimig-only
 replacement) and add:
@@ -173,14 +207,14 @@ else if (is_minimig()) {
 The OSD entry goes in `menu.cpp` next to the existing CD image selector — on
 `amiga-console` that is the reworked console OSD, not the stock Minimig menu.
 
-### 9. Disc identification
+### 10. Disc identification
 
 `physical_disc_identify()` has no CD32/CDTV type. Add `PHYSICAL_DISC_DISC_CD32`
 / `_CDTV`, detected from the ISO9660 PVD system identifier at LBA 16
 (`CDTV`, `AMIGA`) or the CD32 boot block. This wires the disc into the existing
 auto-launch machinery.
 
-### 10. Per-game NVRAM
+### 11. Per-game NVRAM
 
 `akiko_cd32_set_cd_path()` (2280-ish) hashes the image path basename into
 `cd32-<hash>.nvr` via `compute_save_path` (417). With a physical disc that path
@@ -188,7 +222,7 @@ is a constant sentinel, so every game shares one save. Key off
 `physical_disc_disc_label()` / `physical_disc_disc_serial()` instead — both
 already exist. There is a `TODO(phase 4)` marking the spot in `cdrom_parse`.
 
-### 11. Hot swap
+### 12. Hot swap
 
 Wire `physical_disc_swap_consume()` / `physical_disc_media_changed()` into the
 Akiko mediachange path (the `mounted != cd_last_mounted` block at 2554) so a

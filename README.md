@@ -44,6 +44,9 @@ See [`docs/integration-plan.md`](docs/integration-plan.md) for the step-by-step 
 ## Status
 
 This repo *is* Main_MiSTer @ `amiga-console`, with the physical-disc module
-grafted on. Phases 0 and 1 of the plan are done; phase 2 is what makes it
-actually work. Nothing has been compiled yet -- there is no working build
-toolchain on this machine.
+grafted on. Phases 0, 1 and 2 of the plan are done. The adapter, the bridge changes and
+the mount plumbing are all in place, but dormant: nothing passes the sentinel
+to cdrom_parse yet, so there is no way to trigger a physical mount. That OSD
+trigger is the next step and is what makes everything else testable.
+
+Nothing has been compiled -- there is no build toolchain on this machine.
