@@ -184,12 +184,18 @@ rather than drive-limited.
 
 ## Phase 4 — plumbing and polish ⬜
 
-### 9. OSD trigger — nothing is reachable until this exists
+### 9. OSD trigger ✅ done (`7f9e9d1`)
 
-Phases 1-2 are complete but dormant: no code path passes
-`PHYSICAL_DISC_SENTINEL` to `cdrom_parse` yet, so none of it can be exercised
-on hardware. This is now the highest-value next step, ahead of the phase 3
-performance work, because it is what makes the rest testable.
+A "Real CD" row in the AmigaCD console OSD, under the CD image row.
+Selecting it parks `PHYSICAL_DISC_SENTINEL` in `hardfile[0].filename`, sets
+`cfg=2` and calls `ide_open` — the same three steps as an image mount. The CD
+row shows `* physical drive *` while mounted; BACKSPACE on it still ejects.
+
+Re-selecting while mounted re-reads the TOC, which is the manual disc-swap
+path until item 12 lands. "Save settings" persists it, so a saved config
+re-mounts the drive on the next core load.
+
+The stock Minimig Drives menu is deliberately untouched.
 
 Bring `physical_disc_launch.cpp` in (or write a minimal Minimig-only
 replacement) and add:
@@ -246,6 +252,11 @@ patch — it is the single most likely thing to derail this.
 builder consumes only track starts, so data is unaffected, but CDDA tracks with
 real pregaps may start slightly early or late.
 
-**No local build.** `.wsl_build.sh` is inherited from kblood's machine and
-points at `/mnt/c/LLM/MiSTer/CD32/research/repos/Main_MiSTer`; WSL is not
-installed here. Nothing in this repo has been compiled yet.
+**Nothing compiled yet.** `scripts/wsl-build.sh` replaces the inherited
+`.wsl_build.sh` (which pointed at another machine) and has a `check` mode
+running `-fsyntax-only` over just the seven changed files.
+
+`core.autocrlf=true` had produced a CRLF checkout, which would have broken
+both GNU make (`CC` picking up a trailing CR) and every `.sh`
+(`bad interpreter: /bin/bash^M`) under WSL. `.gitattributes` now forces LF in
+the working tree.
