@@ -6748,7 +6748,7 @@ void HandleUI(void)
 		memcpy(Selected_F[0], selPath, sizeof(Selected_F[0]));
 		recent_update(SelectedDir, selPath, SelectedLabel, 0);
 		InsertFloppy(&df[0], selPath);
-		menusub = 1;
+		menusub = 2;                     // Floppy row (1 is Real CD)
 		menustate = MENU_AMIGACD_MAIN1;
 		break;
 

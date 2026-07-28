@@ -406,6 +406,20 @@ static const char* load_physical_disc(drive_t *drv)
 		return 0;
 	}
 
+	// drv->track holds 50 entries and the last one is the lead-out sentinel
+	// added below, so at most 49 real tracks fit. physical_disc_load_toc caps
+	// at 99 (the red-book maximum), and unlike a curated CHD the disc here is
+	// whatever the user put in the tray -- audio CDs with 50+ tracks exist.
+	// Without this the loop below writes past track[49] into playing/paused/
+	// play_*_lba/chd_f.
+	const int max_tracks = (int)(sizeof(drv->track) / sizeof(track_t)) - 1;
+	if (tmpTOC.last > max_tracks)
+	{
+		printf("IDE: disc has %d tracks, only the first %d are usable\n",
+			tmpTOC.last, max_tracks);
+		tmpTOC.last = max_tracks;
+	}
+
 	memset(drv->track, 0, sizeof(drv->track));
 	drv->track_cnt = 0;
 	drv->data_num = 0;
@@ -1253,9 +1267,17 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 
 	// Physical drive: READ CD already hands back the exact 2352-byte raw
 	// frame (flags 0xF8 for data, 0x10 for audio), so there is no per-track
-	// sizing and no sync-header synthesis to do. On failure physical_disc
-	// has already zero-filled buf; we still report -1 so the caller's
-	// retry/hold logic runs.
+	// sizing and no sync-header synthesis to do.
+	//
+	// Caveat, and it is not the one you would guess from the signature:
+	// physical_disc_read_sector only reports non-zero for lba out of range or
+	// a closed device. An *unreadable* sector -- scratched disc, drive giving
+	// up after its retries -- is zero-filled and reported as success
+	// (fetch_sector, physical_disc.cpp). So this branch cannot surface a media
+	// error the way the CHD path below does, and a damaged disc reaches the
+	// Amiga as zeroed sectors rather than an ATAPI error. Closing that gap
+	// means exporting the per-entry `unreadable` flag from physical_disc.cpp,
+	// which would fork it from the verbatim upstream import.
 	if (drive->phys)
 	{
 		return physical_disc_read_sector((int)lba, buf, NULL) ? -1 : 0;
