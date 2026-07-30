@@ -146,6 +146,26 @@ from the drive's own TOC.
 Geometry is passed as zeros: `ide_img_set` only applies cylinders/heads/spt
 on the `!drive->cd` path.
 
+**The invariant that broke.** `present` used to *imply* `drive->f != NULL`,
+because presence came straight from the pointer. Widening it to
+`(f || drive->phys)` silently invalidated that, and `ide_img_set` has exactly
+one place that reads through `drive->f` guarded by `present` rather than by
+`f` itself — the ATAPI model-number copy at `ide.cpp:690`:
+
+```c
+if (ide_inst[port].drive[drv].present)
+    char *name = ide_inst[port].drive[drv].f->name;   // NULL for a physical drive
+```
+
+Mounting the physical drive segfaulted there, inside `HandleUI`, the moment the
+OSD row called `ide_open` — first hardware run, deterministic, confirmed by
+gdb backtrace. Fixed by also testing `f`.
+
+Two other `drive->f->` sites are safe but only incidentally:
+`ide_set_geometry` (`ide.cpp:301`) and `parse_vhd_config`
+(`support/vhd/vhdcgf.cpp`) both sit inside `if (!drive->cd)`, and a physical
+drive always has `cd=1`. If that ever changes, they become live.
+
 ---
 
 ## Phase 3 — make it fast enough ✅ done (untested on hardware)

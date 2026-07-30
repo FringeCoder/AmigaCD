@@ -686,7 +686,19 @@ void ide_img_set(uint32_t drvnum, fileTYPE *f, int cd, int sectors, int heads, i
 		drive->load_state = (drive->f || drive->chd_f) ? 1 : 3;
 	}
 
-	if (ide_inst[port].drive[drv].present)
+	// `present` no longer implies a backing file. Until the physical-disc work
+	// it did -- presence came straight from the fileTYPE pointer -- so this
+	// dereference was safe by construction. A physical CD-ROM drive has media
+	// but no file (see drive->phys and the presence test above), and this line
+	// is the only place in ide_img_set that reads through drive->f guarded by
+	// `present` rather than by `f` itself. Without the extra test, mounting the
+	// physical drive segfaults here, inside HandleUI, the instant the OSD
+	// "Real CD" row calls ide_open.
+	//
+	// Nothing to substitute: the model-number field is derived from the image
+	// filename, and a physical drive has none. Words 27..46 keep the spaces the
+	// identify template already wrote, which is a valid ATAPI response.
+	if (ide_inst[port].drive[drv].present && ide_inst[port].drive[drv].f)
 	{
 		char *name = ide_inst[port].drive[drv].f->name;
 		for (int i = 0; i < 20; i++)
