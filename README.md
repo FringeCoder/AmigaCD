@@ -56,6 +56,15 @@ phase that decides whether a real disc is fast enough to boot from at all. See
 Auto-mounting a disc inserted *after* the core has started is designed but not
 built: [`docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`](docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md).
 
-**Nothing has been compiled.** There is no build toolchain on this machine, so
-none of the above has been through a compiler, let alone hardware.
-[`scripts/wsl-build.sh`](scripts/wsl-build.sh) is written and waiting.
+**It compiles.** [`.github/workflows/build.yml`](.github/workflows/build.yml)
+cross-builds on GitHub Actions with the exact pinned toolchain (ARM GNU-A
+10.2-2020.11), producing a 1.06 MB stripped `ELF 32-bit LSB executable, ARM,
+EABI5` with **zero** compiler warnings. The binary needs at most `GLIBC_2.28`.
+
+CI carries the build because there is no local toolchain: this is a Windows
+machine without WSL, and ARM never shipped a Windows-hosted build of the
+pinned version.
+
+**It has not been run.** Compiling proves the integration is type-correct. It
+says nothing about whether a physical disc actually boots — phase 3 decides
+that.

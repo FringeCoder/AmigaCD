@@ -148,37 +148,58 @@ on the `!drive->cd` path.
 
 ---
 
-## Phase 3 — make it fast enough ⬜ next
+## Phase 3 — make it fast enough ✅ done (untested on hardware)
 
-### 7. Seek hints
+### 7. Seek hints ✅ done
 
-Call `physical_disc_seek_hint(s_lba)` where a data read is armed —
-`akiko_cd32.cpp:1027`, in the `cmd_multi` PLAY DATA branch right after
-`cd_data_lba_base = (int32_t)s_lba;` — and at the CDTV equivalent
-(`cmd_play`, `cdtv_cd.cpp:804`).
+`physical_disc_seek_hint()` is now called at three sites, each guarded on
+`drv->phys` so the CHD path is byte-for-byte unchanged:
 
-Without this the background prefetch lane never runs ahead, and every Akiko
-cache-window fill becomes 16 synchronous `SG_IO` round trips inside
-`user_io_poll()`, each with a 3-second timeout. That is a hard freeze of input
-and OSD, not merely slow loading.
+| File | Site | Aims at |
+|---|---|---|
+| `akiko_cd32.cpp` | `cmd_multi` PLAY DATA arm, after `cd_data_lba_base = s_lba` | data lane |
+| `cdtv_cd.cpp` | `cmd_play`, at the audio arm | audio lane |
+| `cdtv_cd.cpp` | `cdtv_dispatch` READ DATA, before the streaming loop | data lane |
 
-### 8. Collapse the double cache
+Without a hint the worker's `lane_cursor` never moves ahead of what we already
+read, so the background thread prefetches nothing and every sector request
+faults in synchronously.
 
-Akiko's 4-window × 128-sector LRU (`akiko_prefetch_fill`, 1856; `akiko_prefetch_get`,
-1882) now sits on top of physical_disc's own two-lane ring. A cold window fill
-costs 16 blocking SCSI transactions (`SYNC_IO_BURST = 8` per miss).
+The CDTV READ DATA hint is not in the original plan. That loop reads
+`lba..lba+nsec` synchronously regardless, but the BIOS walks a file across many
+successive READ DATA commands, so the hint is what puts the *next* command's
+sectors in the ring before it arrives.
 
-1. Preferred: bypass `akiko_prefetch_get` when `drv->phys` and call
-   `cdrom_read_raw_sector` directly, letting physical_disc do the caching.
-2. Or: drop `AKIKO_PREFETCH_SECTORS` to 16 when `drv->phys`.
+### 8. Collapse the double cache ✅ done (option 1)
 
-Measure first. `/tmp/physical_disc_stats.log` gives hit rate and worst-case I/O
-latency; the `sec_req GAP` diagnostic in `akiko_handle_sec_req` (2006) gives the
-other half.
+`akiko_prefetch_get` now returns `cdrom_read_raw_sector` directly when
+`drv->phys`, bypassing the 4-window × 128-sector LRU entirely.
 
-Target is ~150 sectors/s (2x red book). kblood's history shows the SPI push path
+Taken without measurement, deliberately. This is not a tuning question: on a
+miss `akiko_prefetch_fill` reads 128 sectors *synchronously*, and against a
+physical drive each ring miss is a blocking `SG_IO` of `SYNC_IO_BURST` (8)
+sectors with a 3-second timeout — roughly 16 blocking round trips inside
+`user_io_poll()` to serve a request for one sector. Stacking a synchronous
+128-sector cache on top of an asynchronous 4096-sector one converts prefetched
+sectors back into blocking reads. No capacity is lost either: physical_disc's
+ring is 8× the window cache.
+
+What measurement would still settle is the *shape* of the caches rather than
+whether to stack them. Akiko's 4 windows can hold 4 disparate regions;
+physical_disc's ring is direct-mapped (`lba % LANE_SECTORS`), so a backwards
+seek beyond 2048 sectors evicts. If the BIOS's PVD/dirent re-reads turn out to
+thrash, that is the number to revisit — not this decision.
+
+Failure returns `-2` (single bad sector, hold `sec_req` and let BIOS retry)
+rather than `-1` (whole batch failed), since there is no batch.
+
+Target is ~150 sectors/s (2× red book). kblood's history shows the SPI push path
 was already the bottleneck against CHD, so this may end up transport-limited
 rather than drive-limited.
+
+`/tmp/physical_disc_stats.log` gives hit rate and worst-case I/O latency; the
+`sec_req GAP` diagnostic in `akiko_handle_sec_req` gives the other half. Both
+are the instruments for the first hardware run.
 
 ---
 
@@ -259,9 +280,23 @@ strip sync from its `READ CD` reply, every data sector fails that check — the
 first eight are logged with "no sync pattern" to make that case diagnosable
 rather than looking like universally bad media.
 
-**Nothing compiled yet.** `scripts/wsl-build.sh` replaces the inherited
-`.wsl_build.sh` (which pointed at another machine) and has a `check` mode
-running `-fsyntax-only` over just the seven changed files.
+**Compiles clean, never run.** `.github/workflows/build.yml` cross-builds on
+GitHub Actions against the pinned ARM GNU-A 10.2-2020.11 toolchain: zero
+compiler warnings, 1.06 MB stripped ARM EABI5 binary, `GLIBC_2.28` floor.
+That was the largest single risk on this branch and it is now retired — but it
+only establishes that the code is type-correct. Every behavioural claim above
+still rests on code reading.
+
+CI carries the build because there is no local toolchain: a Windows machine
+without WSL, and ARM published no Windows-hosted build of the pinned version
+(10.2-2020.11 ships Linux hosts only; its mingw-w64 packages target bare
+metal). Newer `arm-gnu-toolchain` releases from 12.3.rel1 do offer Windows
+hosts, at the cost of a newer glibc sysroot — which is what the `GLIBC_2.28`
+figure is for: check any locally-built binary against the MiSTer's own
+`ldd --version` before wondering why it will not start.
+
+`scripts/wsl-build.sh` still works from any Linux box and keeps a `check` mode
+running `-fsyntax-only` over just the changed files.
 
 `core.autocrlf=true` had produced a CRLF checkout, which would have broken
 both GNU make (`CC` picking up a trailing CR) and every `.sh`

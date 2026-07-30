@@ -811,6 +811,11 @@ static int cmd_play(const uint8_t *cmd, uint8_t *out)
 	}
 
 	if (start_is_audio && e_lba > s_lba) {
+		// Phase 3 item 7: aim physical_disc's prefetch lane at the audio run
+		// about to stream, so the worker fills ahead instead of every CDDA
+		// sector faulting in synchronously. lane_of() routes this to the
+		// audio lane. No-op on CHD.
+		if (drv->phys) physical_disc_seek_hint((int)s_lba);
 		cdtv_play_drv      = drv;
 		cdtv_play_lba_next = (int32_t)s_lba;
 		cdtv_play_lba_end  = (int32_t)e_lba;
@@ -901,6 +906,13 @@ static void cdtv_dispatch(void)
 			}
 
 			cdtv_dbg("READ DATA lba=%u nsec=%u sec_sz=%u", lba, nsec, cd_sectorsize);
+
+			// Phase 3 item 7: hint before the streaming loop below. The loop
+			// itself reads lba..lba+nsec synchronously, but the BIOS walks a
+			// file sequentially across many READ DATA commands, so pointing
+			// the lane here is what lets the worker have the *next* request
+			// already in the ring. No-op on CHD.
+			if (drv->phys) physical_disc_seek_hint((int)lba);
 
 			uint8_t raw[2352];
 			bool    failed = false;
