@@ -268,13 +268,47 @@ char is_minimig()
 	return (is_minimig_type == 1);
 }
 
+// Bring-up shim, see is_amigacd(). Testing aid; delete the file once running a
+// core that declares CONF_STR "AmigaCD".
+#define AMIGACD_FORCE_MARKER "/media/fat/amigacd_force"
+
 static int is_amigacd_type = 0;
 char is_amigacd()
 {
 	// The simplified "console" Minimig variant (CONF_STR "AmigaCD"). Renders a
 	// stripped-down OSD (CD / Floppy / System / Settings) instead of the full
 	// MinimigCD menu. Still a Minimig core (is_minimig() also matches it).
-	if (!is_amigacd_type) is_amigacd_type = strncasecmp(orig_name, "amigacd", 7) ? 2 : 1;
+	if (!is_amigacd_type)
+	{
+		is_amigacd_type = strncasecmp(orig_name, "amigacd", 7) ? 2 : 1;
+
+		// Pre-rename cores. kblood's CD32 RTL declared CONF_STR "Minimig"
+		// until 6f8abca (2026-05-23, -> "MinimigCD") and c5eb180 (2026-06-13,
+		// -> "AmigaCD"). A core built before that has the full Akiko bridge
+		// and boots a CD32 game from a CHD quite happily, but can never reach
+		// the AmigaCD console OSD -- and that OSD's "Real CD" row is the only
+		// caller of PHYSICAL_DISC_SENTINEL in the entire tree, so the whole
+		// physical-disc path is unreachable from such a core.
+		//
+		// Touching /media/fat/amigacd_force opts one in. Deliberately a marker
+		// file rather than widening the name match: matching "minimig" would
+		// drag every stock Minimig core into the console OSD, which is exactly
+		// what the CONF_STR rename exists to prevent.
+		//
+		// It is still blunt -- the file forces ANY Minimig-family core,
+		// including stock Minimig-AGA. That is acceptable for a testing aid
+		// and is why it is a file you have to go and create, not a setting.
+		if (is_amigacd_type == 2 && is_minimig())
+		{
+			struct stat st;
+			if (!stat(AMIGACD_FORCE_MARKER, &st))
+			{
+				printf("AmigaCD: %s present -- forcing console OSD for core \"%s\"\n",
+				       AMIGACD_FORCE_MARKER, orig_name);
+				is_amigacd_type = 1;
+			}
+		}
+	}
 	return (is_amigacd_type == 1);
 }
 

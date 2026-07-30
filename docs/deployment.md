@@ -24,6 +24,46 @@ main=MiSTer_AmigaCD
 
 That's it. Load the AmigaCD core and it restarts into our binary.
 
+## Testing with a pre-rename core
+
+If your core's OSD title says **Minimig** rather than **AmigaCD**, its
+`CONF_STR` is not `AmigaCD` and neither the `.ini` match nor the console OSD
+will fire — see the next section for why the `.rbf` filename is irrelevant.
+
+kblood's CD32 RTL declared `CONF_STR "Minimig"` until `6f8abca` (2026-05-23,
+→ `MinimigCD`) and `c5eb180` (2026-06-13, → `AmigaCD`). A core built before
+that has the complete Akiko bridge — it will boot a CD32 game from a CHD — but
+it cannot reach the AmigaCD console OSD, and that OSD's **Real CD** row is the
+only caller of `PHYSICAL_DISC_SENTINEL` anywhere in the tree. So the entire
+physical-disc feature is unreachable from such a core.
+
+To test anyway, two steps:
+
+```ini
+[Minimig]
+main=MiSTer_AmigaCD
+```
+
+```bash
+ssh root@<mister> touch /media/fat/amigacd_force
+```
+
+The marker file makes `is_amigacd()` return true for any Minimig-family core.
+On success the log prints:
+
+```
+AmigaCD: /media/fat/amigacd_force present -- forcing console OSD for core "Minimig"
+```
+
+Both steps are blunt on purpose. `[Minimig]` also routes *stock* Minimig to
+this binary, and the marker also forces stock Minimig into the console OSD.
+That is fine while bringing the feature up on one machine, and is why the
+override is a file you have to go and create rather than a setting. **Delete
+the marker and restore `[AmigaCD]` once you are running a core that declares
+`AmigaCD`** — the shim is not a substitute for building the right core, which
+also carries the two post-February Deep Core sector-delivery fixes
+(`32c0a3c`, `fce5cc5`) that a pre-rename build lacks.
+
 ## Why `[AmigaCD]`
 
 Section names match the **core's `CONF_STR` name, not the `.rbf` filename**.
