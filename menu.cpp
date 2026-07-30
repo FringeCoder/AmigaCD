@@ -6525,14 +6525,52 @@ void HandleUI(void)
 			{
 				if (select)
 				{
+					// Swapping in from a mounted CD image is invisible to the
+					// Akiko bridge. akiko_cd32_poll acts only on a
+					// cd_is_mounted() edge, and image -> physical is
+					// mounted -> mounted, so nothing fires: no akiko_build_toc(),
+					// no mediachange push, and the BIOS carries on serving the
+					// previous disc's geometry. Both ide_open calls below run
+					// inside this one HandleUI pass, so the poll loop never
+					// observes the gap between them either.
+					//
+					// Unmount first so the image is torn down through the normal
+					// path, then mount the drive, then restart the Amiga so it
+					// boots from it. A saved config carrying a CHD in
+					// hardfile[0] is the usual way to land here.
+					bool had_image = minimig_config.hardfile[0].filename[0]
+					              && strcmp(minimig_config.hardfile[0].filename,
+					                        PHYSICAL_DISC_SENTINEL);
+					if (had_image)
+					{
+						minimig_config.hardfile[0].filename[0] = 0;
+						ide_open(0, "");
+					}
+
 					strcpy(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL);
 					minimig_config.hardfile[0].cfg = 2;
 					if (ide_open(0, minimig_config.hardfile[0].filename))
 					{
-						// No minimig_reset() here: the akiko bridge raises its own
-						// mediachange once cd_is_mounted() flips, same as for an
-						// image mount.
-						Info("Physical CD mounted", 1500);
+						if (had_image)
+						{
+							// minimig_reset re-runs ApplyConfiguration ->
+							// hdd_open -> ide_open, which re-reads the TOC
+							// without re-spinning the drive: physical_disc_open
+							// returns early when the same device is already open.
+							Info("Real CD mounted - resetting", 1500);
+							menustate = MENU_NONE1;
+							minimig_reset();
+						}
+						else
+						{
+							// Cold mount with nothing previously loaded. Here the
+							// bridge does see cd_is_mounted() go false -> true and
+							// handles it itself: TOC rebuild, plus its own
+							// deferred reset for the boot-with-no-CD case
+							// (phase 33-E).
+							Info("Physical CD mounted", 1500);
+							menustate = MENU_AMIGACD_MAIN1;
+						}
 					}
 					else
 					{
@@ -6543,8 +6581,8 @@ void HandleUI(void)
 						// impossible, and that is exactly the state you want to
 						// be able to sit in before putting a disc in.
 						Info("No readable disc", 2000);
+						menustate = MENU_AMIGACD_MAIN1;
 					}
-					menustate = MENU_AMIGACD_MAIN1;
 				}
 			}
 			else if (menusub == 2) // Floppy df0
