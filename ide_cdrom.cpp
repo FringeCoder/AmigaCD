@@ -320,6 +320,20 @@ static const char* load_chd_file(drive_t *drv, const char *chdfile)
 	drv->chd_hunknum = -1;
 	drv->chd_f = tmpTOC.chd_f;
 
+	// Same 49-real-tracks-plus-lead-out ceiling load_physical_disc enforces:
+	// toc_t holds 100 tracks, drv->track holds 50. Far less likely to bite on
+	// a curated CHD than on a disc out of someone's tray, but the loop below
+	// is just as unbounded.
+	{
+		const int max_tracks = (int)(sizeof(drv->track) / sizeof(track_t)) - 1;
+		if (tmpTOC.last > max_tracks)
+		{
+			printf("IDE: CHD has %d tracks, only the first %d are usable\n",
+				tmpTOC.last, max_tracks);
+			tmpTOC.last = max_tracks;
+		}
+	}
+
 	//don't use add_track, just do it ourselves...
 	for (int i = 0; i < tmpTOC.last; i++)
 	{
@@ -374,6 +388,25 @@ static const char* load_chd_file(drive_t *drv, const char *chdfile)
 }
 
 
+// Release the drive and drop whatever media geometry it was carrying.
+//
+// A failed mount must not leave the previous disc's track table in place: the
+// Akiko and CDTV bridges read drv->track directly, so stale geometry after a
+// "disc removed, then Real CD re-selected" round trip would have them serving
+// the old disc's layout. Today ide_open's fall-through happens to run
+// cdrom_close_chd and clear present/phys, but that is a property of one call
+// site, not something load_physical_disc can rely on.
+static void phys_mount_failed(drive_t *drv)
+{
+	memset(drv->track, 0, sizeof(drv->track));
+	drv->track_cnt = 0;
+	drv->data_num = 0;
+	drv->total_sectors = 0;
+	drv->chd_total_size = 0;
+	physical_disc_close();
+}
+
+
 // Mount a physical CD-ROM drive as this drive's media.
 //
 // physical_disc_load_toc fills a cd.h toc_t, so this is the same
@@ -392,17 +425,32 @@ static const char* load_physical_disc(drive_t *drv)
 {
 	toc_t tmpTOC = { };
 
+	// Install the udev rule that stops persistent-storage probing on sr*,
+	// before the device is ever opened. Upstream does this from
+	// physical_disc_launch_startup(); we have no equivalent of that file, and
+	// this is the one place that opens the drive. Without it udev/blkid
+	// contend with our SG_IO reads, which matters here because a cache miss
+	// blocks user_io_poll(). The call itself is idempotent (it compares the
+	// existing rule before rewriting), but it also shells out to udevadm, so
+	// keep it to once per process.
+	static bool env_prepared = false;
+	if (!env_prepared)
+	{
+		env_prepared = true;
+		physical_disc_prepare_environment();
+	}
+
 	if (physical_disc_open(NULL)) return 0;
 	if (physical_disc_load_toc(&tmpTOC))
 	{
-		physical_disc_close();
 		printf("\x1b[32mIDE: no readable physical disc\n\x1b[0m");
+		phys_mount_failed(drv);
 		return 0;
 	}
 
 	if (tmpTOC.last < 1)
 	{
-		physical_disc_close();
+		phys_mount_failed(drv);
 		return 0;
 	}
 
@@ -1186,7 +1234,10 @@ void cdrom_read(ide_config *ide)
 
 	track_t *track = get_track_from_lba(drive, ide->regs.pkt_lba, is_index0);
 
-	if (ide->state == IDE_STATE_INIT_RW && !drive->chd_f && track)
+	// A physical drive has no per-track file to seek in -- track[].f is a
+	// closed fileTYPE -- so it must be excluded here as well as from
+	// read_cd_sectors below.
+	if (ide->state == IDE_STATE_INIT_RW && !drive->chd_f && !drive->phys && track)
 	{
 		uint32_t pos = track->skip + (ide->regs.pkt_lba - track->start) * track->sectorSize;
 		ide->null = (FileSeek(&track->f, pos, SEEK_SET) < 0);
@@ -1232,6 +1283,36 @@ void cdrom_read(ide_config *ide)
 		}
 
 	}
+	else if (drive->phys)
+	{
+		// ATAPI packet read off a physical drive. physical_disc_read_data2048
+		// pulls the 2048 user bytes out of the raw frame, picking the MODE1
+		// (16) or MODE2 (24) header offset from the frame itself, so there is
+		// no per-track pre/post arithmetic to mirror from read_cd_sectors.
+		// chd_last_partial_lba is reused as the running LBA: despite the name
+		// it is just the partial-packet continuation cursor, and the CHD
+		// branch above uses it for exactly that.
+		if (ide->state == IDE_STATE_INIT_RW)
+		{
+			drive->chd_last_partial_lba = ide->regs.pkt_lba;
+		}
+
+		uint32_t d_offset = 0;
+		for (uint32_t i = 0; i < cnt; i++)
+		{
+			if (physical_disc_read_data2048((int)drive->chd_last_partial_lba, ide_buf + d_offset))
+			{
+				ide->null = 1;
+				memset(ide_buf + d_offset, 0, 2048);
+			}
+			else
+			{
+				ide->null = 0;
+			}
+			d_offset += 2048;
+			drive->chd_last_partial_lba++;
+		}
+	}
 	else
 	{
 		read_cd_sectors(ide, track, cnt);
@@ -1268,19 +1349,48 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 	// Physical drive: READ CD already hands back the exact 2352-byte raw
 	// frame (flags 0xF8 for data, 0x10 for audio), so there is no per-track
 	// sizing and no sync-header synthesis to do.
-	//
-	// Caveat, and it is not the one you would guess from the signature:
-	// physical_disc_read_sector only reports non-zero for lba out of range or
-	// a closed device. An *unreadable* sector -- scratched disc, drive giving
-	// up after its retries -- is zero-filled and reported as success
-	// (fetch_sector, physical_disc.cpp). So this branch cannot surface a media
-	// error the way the CHD path below does, and a damaged disc reaches the
-	// Amiga as zeroed sectors rather than an ATAPI error. Closing that gap
-	// means exporting the per-entry `unreadable` flag from physical_disc.cpp,
-	// which would fork it from the verbatim upstream import.
 	if (drive->phys)
 	{
-		return physical_disc_read_sector((int)lba, buf, NULL) ? -1 : 0;
+		if (physical_disc_read_sector((int)lba, buf, NULL)) return -1;
+
+		// physical_disc_read_sector only reports failure for an out-of-range
+		// lba or a closed device. An *unreadable* sector -- scratch, or the
+		// drive giving up after its own retries -- is zero-filled and reported
+		// as success (fetch_sector in physical_disc.cpp). The CHD path below
+		// returns -1 for the equivalent case, and both callers branch on it
+		// (akiko_prefetch_fill, and the CDTV READ DATA case in cdtv_dispatch),
+		// so swallowing it here would feed the Amiga silent zeros instead of a
+		// media error.
+		//
+		// A raw data frame always opens with the 12-byte MODE1/MODE2 sync
+		// pattern, so its absence is an exact test for that zero-fill. Audio
+		// frames have no sync and all-zero audio is legitimate silence, so the
+		// check applies to data tracks only. Testing the frame here rather
+		// than exporting physical_disc.cpp's per-entry `unreadable` flag keeps
+		// that file a verbatim copy of the upstream import.
+		bool phys_index0 = false;
+		track_t *phys_track = get_track_from_lba(drive, lba, phys_index0);
+		if (phys_track && (phys_track->attr & 0x40))
+		{
+			static const uint8_t sync[12] =
+				{ 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
+			if (memcmp(buf, sync, sizeof(sync)))
+			{
+				// Log the first few so a drive that strips sync from its READ CD
+				// reply is distinguishable from a disc that is merely dirty. The
+				// former makes *every* data sector fail here and would otherwise
+				// look identical to unreadable media.
+				static uint32_t nosync_logged = 0;
+				if (nosync_logged < 8)
+				{
+					nosync_logged++;
+					printf("IDE: physical read lba=%u has no sync pattern%s\n", lba,
+						nosync_logged == 8 ? " (further ones silent)" : "");
+				}
+				return -1;
+			}
+		}
+		return 0;
 	}
 
 	bool is_index0 = false;
@@ -2134,6 +2244,19 @@ void ide_cdda_send_sector()
 			// a few seconds of data interpreted as audio depending on layout).
 			mister_chd_read_sector(drv->chd_f, drv->play_start_lba + track->chd_offset, 0, 0, BYTES_PER_RAW_REDBOOK_FRAME, cdda_buf, drv->chd_hunkbuf, &drv->chd_hunknum);
 			needs_swap = true;
+		}
+		else if (drv->phys)
+		{
+			// READ CD with flags 0x10 returns audio in disc order, i.e. little
+			// endian per 16-bit sample, which is already what the volume scale
+			// below and ide_sendbuf want. No swap -- unlike CHD, which stores
+			// red-book audio big-endian. (The Akiko and CDTV bridges swap in
+			// the opposite direction because their push paths swap
+			// unconditionally; this path does not.)
+			if (physical_disc_read_sector((int)drv->play_start_lba, cdda_buf, NULL))
+			{
+				memset(cdda_buf, 0, sizeof(cdda_buf));
+			}
 		}
 		else
 		{

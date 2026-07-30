@@ -83,6 +83,16 @@ Arming already persists through **Save settings** and restores on the next core
 load via `ApplyConfiguration → hdd_open(0) → ide_open`. BACKSPACE on the CD row
 clears the filename, which disarms. Selecting **Real CD** re-arms.
 
+Two preconditions this design depends on landed ahead of it, in the fix pass on
+2026-07-28:
+
+- Selecting **Real CD** with an empty tray used to clear the sentinel on the
+  failed mount, so "armed but waiting" was not a state you could be in. The
+  sentinel now survives a failed mount.
+- The CD row used to render `* physical drive *` off the sentinel alone, which
+  lied whenever the mount had failed. Both the CD row and the Real CD row now
+  render `ide_inst[0].drive[0].phys`, the real mount state.
+
 ### Call site
 
 From `user_io.cpp:3132`, alongside `akiko_cd32_poll()` and `cdtv_cd_poll()`, so
@@ -137,8 +147,8 @@ hardware.**
 
 ## OSD
 
-The Real CD row currently renders `mount drive` when unmounted and `re-read TOC`
-when mounted. It gains a third state so the console says what it is doing:
+The Real CD row renders `mount drive` when unmounted and `re-read TOC` when
+mounted. It gains two more states so the console says what it is doing:
 
 | Condition | Row text |
 |---|---|
@@ -149,6 +159,31 @@ when mounted. It gains a third state so the console says what it is doing:
 
 Selecting the row while waiting forces an immediate attempt and clears the
 give-up latch, rather than waiting for the next tick.
+
+## Disc types
+
+All discs are treated identically. Audio CDs, mixed-mode discs and game discs
+all take the same detect → mount → let-the-bridges-decide path, and no disc
+identification happens before the mount.
+
+The consequence, decided deliberately on 2026-07-30: inserting a **music CD**
+while armed mounts it, and on CD32 the Akiko Phase 33-E path turns that mount
+edge into a `minimig_reset()`. The machine reboots and comes up in the boot
+ROM's CD player rather than simply starting playback. That is acceptable —
+it is the same thing that happens with a game disc, and the alternative is a
+disc-type gate that has to be right about every disc it rejects.
+
+If that changes later, the hook already exists: `physical_disc_identify()`
+returns `PHYSICAL_DISC_DISC_AUDIO` for an audio-only TOC, and
+`physical_disc_toc_audio_only()` answers the same question straight off a
+`toc_t` without touching the drive. Neither is called today.
+
+Note that the audio path itself needs no work for this feature. `attr` is 0 for
+every CDDA track, `akiko_build_toc` emits a correct all-audio TOC, the PLAY
+AUDIO branch of `cmd_multi` accepts any LBA inside an audio track, and the Q
+subchannel the player UI reads is synthesised from the track table rather than
+the disc. Whether a player UI exists at all is a property of the loaded
+extended ROM, not of this code.
 
 ## Failure modes
 

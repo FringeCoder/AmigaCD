@@ -6431,11 +6431,15 @@ void HandleUI(void)
 		m = 0;
 		OsdWrite(m++, "", 0, 0);
 
-		// CD slot = hardfile[0]
+		// CD slot = hardfile[0]. The sentinel means "the physical drive is
+		// selected", which is not the same as "a disc is mounted" -- a saved
+		// config restores the sentinel even if the tray was empty at core
+		// load, and ide_open then returns 0. Render the real mount state
+		// (drive[0].phys) so the row cannot claim a disc that is not there.
 		strcpy(s, " CD       : ");
 		if (!strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
 		{
-			strcat(s, "* physical drive *");
+			strcat(s, ide_inst[0].drive[0].phys ? "* physical drive *" : "* no disc *");
 		}
 		else if (minimig_config.hardfile[0].filename[0])
 		{
@@ -6450,10 +6454,8 @@ void HandleUI(void)
 		// sentinel in hardfile[0].filename, which is what ide_open matches on.
 		// Re-selecting while mounted re-reads the TOC, i.e. disc swap.
 		{
-			bool phys_cd = !strcmp(minimig_config.hardfile[0].filename,
-			                       PHYSICAL_DISC_SENTINEL);
 			strcpy(s, " Real CD  : ");
-			strcat(s, phys_cd ? "re-read TOC" : "mount drive");
+			strcat(s, ide_inst[0].drive[0].phys ? "re-read TOC" : "mount drive");
 			OsdWrite(m++, s, menusub == 1, 0);
 		}
 
@@ -6508,7 +6510,12 @@ void HandleUI(void)
 					strcpy(fs_pFileExt, "ISOCUECHDIMG");
 					if (select)
 					{
-						if (!Selected_S[0][0]) memcpy(Selected_S[0], minimig_config.hardfile[0].filename, sizeof(Selected_S[0]));
+						// Never seed the browser's start path with the physical
+						// drive sentinel -- it is not a path and SelectFile
+						// would try to open it as a directory.
+						if (!Selected_S[0][0]
+						    && strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
+							memcpy(Selected_S[0], minimig_config.hardfile[0].filename, sizeof(Selected_S[0]));
 						SelectFile(Selected_S[0], fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel);
 					}
 					else if (recent_init(500)) menustate = MENU_RECENT1;
@@ -6529,7 +6536,12 @@ void HandleUI(void)
 					}
 					else
 					{
-						minimig_config.hardfile[0].filename[0] = 0;
+						// Leave the sentinel in place. It means "the physical
+						// drive is selected", not "a disc is mounted", and the
+						// CD row above renders the difference. Clearing it here
+						// would make selecting the drive with an empty tray
+						// impossible, and that is exactly the state you want to
+						// be able to sit in before putting a disc in.
 						Info("No readable disc", 2000);
 					}
 					menustate = MENU_AMIGACD_MAIN1;

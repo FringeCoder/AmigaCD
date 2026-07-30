@@ -57,6 +57,17 @@ INCLUDES=(
     -I./lib/serial_server/library
 )
 
+# Must track DFLAGS in the Makefile. Without these, `check` compiles a
+# different program than `build` does -- _FILE_OFFSET_BITS in particular
+# changes off_t and every file_io.h signature that depends on it, so a clean
+# `check` would not mean the real build compiles.
+DEFINES=(
+    -D_7ZIP_ST -DPACKAGE_VERSION='"1.3.3"' -DHAVE_LROUND -DHAVE_STDINT_H
+    -DHAVE_STDLIB_H -DHAVE_SYS_PARAM_H -DENABLE_64_BIT_WORDS=0
+    -D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE
+    -DVDATE="\"$(date +%y%m%d)\""
+)
+
 case "${1:-build}" in
 check)
     need_toolchain
@@ -65,7 +76,8 @@ check)
     for f in "${CHANGED[@]}"; do
         printf '   %-48s' "$f"
         if arm-none-linux-gnueabihf-g++ -fsyntax-only -std=gnu++14 \
-             "${INCLUDES[@]}" "$f" 2>/tmp/amigacd-check.err; then
+             -Wall -Wextra -Wno-strict-aliasing -Wno-psabi -Wno-class-memaccess \
+             "${DEFINES[@]}" "${INCLUDES[@]}" "$f" 2>/tmp/amigacd-check.err; then
             echo "ok"
         else
             echo "FAILED"

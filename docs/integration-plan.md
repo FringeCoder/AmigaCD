@@ -252,6 +252,13 @@ patch — it is the single most likely thing to derail this.
 builder consumes only track starts, so data is unaffected, but CDDA tracks with
 real pregaps may start slightly early or late.
 
+**Damaged discs.** `cdrom_read_raw_sector`'s phys branch validates the 12-byte
+MODE1/MODE2 sync pattern on data tracks, because `physical_disc_read_sector`
+zero-fills an unreadable sector and reports success. If a drive turns out to
+strip sync from its `READ CD` reply, every data sector fails that check — the
+first eight are logged with "no sync pattern" to make that case diagnosable
+rather than looking like universally bad media.
+
 **Nothing compiled yet.** `scripts/wsl-build.sh` replaces the inherited
 `.wsl_build.sh` (which pointed at another machine) and has a `check` mode
 running `-fsyntax-only` over just the seven changed files.

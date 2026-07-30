@@ -44,9 +44,18 @@ See [`docs/integration-plan.md`](docs/integration-plan.md) for the step-by-step 
 ## Status
 
 This repo *is* Main_MiSTer @ `amiga-console`, with the physical-disc module
-grafted on. Phases 0, 1 and 2 of the plan are done. The adapter, the bridge changes and
-the mount plumbing are all in place, but dormant: nothing passes the sentinel
-to cdrom_parse yet, so there is no way to trigger a physical mount. That OSD
-trigger is the next step and is what makes everything else testable.
+grafted on. Phases 0, 1, 2 and the phase 4a OSD trigger are done: the adapter,
+the bridge changes, the mount plumbing and a **Real CD** row in the AmigaCD
+console OSD that mounts the drive. Selecting that row while mounted re-reads
+the TOC, which is the manual disc-swap path for now.
 
-Nothing has been compiled -- there is no build toolchain on this machine.
+Phase 3 -- seek hints and collapsing the double cache -- is next, and it is the
+phase that decides whether a real disc is fast enough to boot from at all. See
+[`docs/integration-plan.md`](docs/integration-plan.md).
+
+Auto-mounting a disc inserted *after* the core has started is designed but not
+built: [`docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`](docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md).
+
+**Nothing has been compiled.** There is no build toolchain on this machine, so
+none of the above has been through a compiler, let alone hardware.
+[`scripts/wsl-build.sh`](scripts/wsl-build.sh) is written and waiting.
