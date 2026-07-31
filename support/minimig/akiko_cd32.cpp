@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   // strcasecmp, for discnames.cfg key matching
 #include <stdarg.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -420,6 +421,80 @@ static uint64_t fnv1a_64(const char *s)
 #define AKIKO_PHYSDISC_PREFIX "physdisc/"
 #define AKIKO_PHYSDISC_PREFIX_LEN (sizeof(AKIKO_PHYSDISC_PREFIX) - 1)
 
+// Optional user-supplied "identity = friendly name" map, one per line, '#' or
+// ';' comments, whitespace around either side ignored. Exists because CD32
+// discs routinely do not carry their own title: Simon the Sorcerer's official
+// pressing has volume ID "CD32_TEST", every other ISO9660 name field empty, and
+// a root directory of numbered .out chunks. There is nothing on the disc to
+// read a real name from, so the only honest source is the person holding it.
+#define AKIKO_DISCNAMES_FILE AKIKO_NVRAM_DIR "/discnames.cfg"
+
+// Reduce a user-supplied name to something safe to put in a filename. Spaces
+// survive -- they are legal and legibility is the whole point -- but path
+// separators, control characters and the usual shell-hostile punctuation go.
+// Runs of whitespace collapse to one; leading/trailing space and dots are
+// trimmed, so the result can never be "", "." or "..".
+static int sanitize_disc_name(const char *src, char *out, size_t outsz)
+{
+	size_t n = 0;
+	int pending_space = 0;
+
+	for (const unsigned char *p = (const unsigned char *)src; *p && n + 1 < outsz; p++)
+	{
+		unsigned char c = *p;
+		if (c == ' ' || c == '\t') { if (n) pending_space = 1; continue; }
+		if (c < 0x20 || c > 0x7E) continue;
+		if (strchr("/\\:*?\"<>|", (char)c)) continue;
+		if (pending_space && n + 2 < outsz) out[n++] = ' ';
+		pending_space = 0;
+		out[n++] = (char)c;
+	}
+
+	while (n && (out[n - 1] == ' ' || out[n - 1] == '.')) n--;
+	out[n] = 0;
+	return (int)n;
+}
+
+// Returns 1 and fills out[] when discnames.cfg maps this identity to a name.
+// Absent file, absent entry and a name that sanitises to nothing all mean "no
+// override", so the caller falls back to the identity itself.
+static int lookup_disc_name(const char *identity, char *out, size_t outsz)
+{
+	if (!identity || !*identity || !out || outsz < 2) return 0;
+	out[0] = 0;
+
+	FILE *f = fopen(AKIKO_DISCNAMES_FILE, "r");
+	if (!f) return 0;
+
+	char line[512];
+	int found = 0;
+
+	while (!found && fgets(line, sizeof(line), f))
+	{
+		char *p = line;
+		while (*p == ' ' || *p == '\t') p++;
+		if (!*p || *p == '#' || *p == ';' || *p == '\r' || *p == '\n') continue;
+
+		char *eq = strchr(p, '=');
+		if (!eq) continue;
+
+		char *key_end = eq;
+		while (key_end > p && (key_end[-1] == ' ' || key_end[-1] == '\t')) key_end--;
+		*key_end = 0;
+		if (strcasecmp(p, identity)) continue;
+
+		char *val = eq + 1;
+		while (*val == ' ' || *val == '\t') val++;
+		char *nl = strpbrk(val, "\r\n");
+		if (nl) *nl = 0;
+
+		found = sanitize_disc_name(val, out, outsz) > 0;
+	}
+
+	fclose(f);
+	return found;
+}
+
 static void compute_save_path(const char *cd_path, char *out, size_t outsz)
 {
 	// A physical disc names its save after the disc itself rather than a hash
@@ -434,8 +509,18 @@ static void compute_save_path(const char *cd_path, char *out, size_t outsz)
 	// save, since matching volume labels produce the same filename.
 	if (!strncmp(cd_path, AKIKO_PHYSDISC_PREFIX, AKIKO_PHYSDISC_PREFIX_LEN))
 	{
-		snprintf(out, outsz, "%s/%s.nvr", AKIKO_NVRAM_DIR,
-		         cd_path + AKIKO_PHYSDISC_PREFIX_LEN);
+		const char *identity = cd_path + AKIKO_PHYSDISC_PREFIX_LEN;
+
+		// discnames.cfg wins when it has an entry, because the identity is
+		// often not a name anyone would recognise.
+		char friendly[128];
+		if (lookup_disc_name(identity, friendly, sizeof(friendly)))
+		{
+			snprintf(out, outsz, "%s/%s.nvr", AKIKO_NVRAM_DIR, friendly);
+			return;
+		}
+
+		snprintf(out, outsz, "%s/%s.nvr", AKIKO_NVRAM_DIR, identity);
 		return;
 	}
 
@@ -460,19 +545,38 @@ static void migrate_physdisc_save_name(const char *cd_path, const char *new_path
 	struct stat st;
 	if (!stat(new_path, &st)) return;          // already on the new name
 
-	char legacy[256];
-	uint64_t h = fnv1a_64(cd_path + AKIKO_PHYSDISC_PREFIX_LEN);
-	snprintf(legacy, sizeof(legacy), "%s/cd32-%016" PRIx64 ".nvr", AKIKO_NVRAM_DIR, h);
-	if (stat(legacy, &st)) return;             // no old save for this disc
+	const char *identity = cd_path + AKIKO_PHYSDISC_PREFIX_LEN;
+	char cand[256];
 
-	if (!rename(legacy, new_path))
+	// Two hops are possible, and a disc can need either. The identity-named
+	// file exists when discnames.cfg gained an entry after the disc had already
+	// been played; the hashed file exists from before saves were named at all.
+	// Try the nearer one first.
+	snprintf(cand, sizeof(cand), "%s/%s.nvr", AKIKO_NVRAM_DIR, identity);
+	if (strcmp(cand, new_path) && !stat(cand, &st))
 	{
-		akiko_diag("[akiko] save renamed %s -> %s", legacy, new_path);
+		if (!rename(cand, new_path))
+		{
+			akiko_diag("[akiko] save renamed %s -> %s", cand, new_path);
+			return;
+		}
+		akiko_diag("[akiko] save rename %s -> %s FAILED (errno %d) — "
+		           "the old file is left alone", cand, new_path, errno);
+		return;
+	}
+
+	uint64_t h = fnv1a_64(identity);
+	snprintf(cand, sizeof(cand), "%s/cd32-%016" PRIx64 ".nvr", AKIKO_NVRAM_DIR, h);
+	if (stat(cand, &st)) return;               // no old save for this disc
+
+	if (!rename(cand, new_path))
+	{
+		akiko_diag("[akiko] save renamed %s -> %s", cand, new_path);
 	}
 	else
 	{
 		akiko_diag("[akiko] save rename %s -> %s FAILED (errno %d) — "
-		           "the old file is left alone", legacy, new_path, errno);
+		           "the old file is left alone", cand, new_path, errno);
 	}
 }
 
