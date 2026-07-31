@@ -271,6 +271,52 @@ has one, otherwise a UUID built from TOC geometry. Both are stable across
 remounts and differ between discs. `IDE: physical disc save id "…"` logs the
 result.
 
+**The identity is the filename, not a hash of it.** `compute_save_path`
+special-cases the `physdisc/` prefix and uses the identity verbatim, so a save
+lands as `ISSUE7.nvr` rather than `cd32-8fd2874f328829b5.nvr`. That makes the
+saves directory readable, and means a disc re-burned from the same source keeps
+its save, since matching volume labels produce matching filenames. Safe because
+`sanitize_name()` has already reduced the identity to `[0-9A-Za-z-.]`.
+
+`migrate_physdisc_save_name()` renames an existing save to the new name on
+first mount, trying the identity-named file first and the old `cd32-<hash>.nvr`
+second. Both hops are reachable: the former when `discnames.cfg` gains an entry
+for a disc already played, the latter from before saves were named at all. It
+renames rather than copies — leaving the old file would strand a real save
+where nothing looks for it.
+
+### Why an override file exists
+
+**CD32 discs routinely do not carry their own title.** Measured on hardware:
+
+| Disc | Volume ID | Other name fields | Root directory |
+|---|---|---|---|
+| Simon the Sorcerer (official) | `CD32_TEST` | all empty | numbered `.out` chunks |
+| CDTV coverdisc | `ISSUE7` | Publisher, Application populated | — |
+
+A leftover working title, and nothing else on the disc to correct it with. The
+ISO9660 system identifier is no help either: **both** discs report `CDTV`,
+including the CD32 one — so that field cannot discriminate CD32 from CDTV, and
+plan item 10 needs the boot block instead.
+
+So `AKIKO_NVRAM_DIR/discnames.cfg` maps identity to a name the owner chooses:
+
+```
+# identity = friendly name
+CD32_TEST = Simon the Sorcerer
+ISSUE7    = CDTV Coverdisc 7
+8555b7f1-9711-5292-9228-d1c9baf4defe = Lamborghini American Challenge
+```
+
+`#`/`;` comments, whitespace ignored, keys matched case-insensitively. Absent
+file, absent entry, or a name that sanitises away all mean "no override" and
+the identity is used as before, so the file is entirely optional.
+
+`sanitize_disc_name()` keeps spaces — they are legal and legibility is the
+point — but drops path separators, control characters and shell-hostile
+punctuation, collapses whitespace runs, and trims leading/trailing space and
+dots so a name can never be `""`, `"."` or `".."`.
+
 The type argument is pinned to `PHYSICAL_DISC_DISC_UNKNOWN` rather than calling
 `physical_disc_identify()` — it only salts the UUID and selects
 PSX/Saturn/MegaCD paths that do not apply, and identify() would cost a read and
