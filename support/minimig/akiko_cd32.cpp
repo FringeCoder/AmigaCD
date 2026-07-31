@@ -34,6 +34,7 @@
 #include "../../hardware.h"   // GetTimer / CheckTimer
 #include "../../menu.h"       // menu_present() — OSD-open save trigger
 #include "../chd/mister_chd.h" // mister_chd_read_sector for CDDA pump
+#include "../physical_disc/physical_disc.h" // physical CD-ROM drive media
 #include "minimig_config.h"   // minimig_reset() — used to unblock BIOS stuck
                               // on no-CD splash after a boot-with-no-CD-then-mount.
 #include "akiko_cd32.h"
@@ -449,7 +450,7 @@ static bool cd_is_mounted(void)
 	for (int p = 0; p < 2; p++) {
 		for (int d = 0; d < 2; d++) {
 			drive_t *drv = &ide_inst[p].drive[d];
-			if (drv->cd && (drv->chd_f || drv->f)) {
+			if (drv->cd && (drv->chd_f || drv->f || drv->phys)) {
 				return true;
 			}
 		}
@@ -463,7 +464,7 @@ static drive_t *cd_find_drive(void)
 	for (int p = 0; p < 2; p++) {
 		for (int d = 0; d < 2; d++) {
 			drive_t *drv = &ide_inst[p].drive[d];
-			if (drv->cd && (drv->chd_f || drv->f)) {
+			if (drv->cd && (drv->chd_f || drv->f || drv->phys)) {
 				return drv;
 			}
 		}
@@ -1025,6 +1026,14 @@ static void cmd_multi(const uint8_t *cmd)
 			// is reset to 0 on CDFLAG_ENABLE rising (akiko.cpp:1973-1976), so
 			// LBA = base + counter holds across the full read pass.
 			cd_data_lba_base = (int32_t)s_lba;
+
+			// Phase 3 item 7: point physical_disc's background prefetch lane
+			// at the LBA the BIOS is about to stream. This is the whole reason
+			// the worker thread exists -- without a hint its lane_cursor never
+			// moves ahead of where we already read, so it prefetches nothing
+			// and every sector request becomes a synchronous SG_IO burst
+			// inside user_io_poll(). No-op on CHD.
+			if (drv2 && drv2->phys) physical_disc_seek_hint((int)s_lba);
 			// 2026-05-15 WinUAE-parity fix: cmd_multi at akiko.cpp:1054 sets
 			// cdrom_paused = 0 unconditionally on entry. Our scan-TOC and
 			// audio-play branches do this, but the data branch was missing it.
@@ -1623,7 +1632,8 @@ static void akiko_push_sector(const uint8_t *buf)
 // validate "is this actually audio" before reading.
 static bool cd_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 {
-	if (!drv || !drv->chd_f || !buf2352) return false;
+	if (!drv || !buf2352) return false;
+	if (!drv->chd_f && !drv->phys) return false;
 
 	bool index0 = false;
 	track_t *track = NULL;
@@ -1650,6 +1660,19 @@ static bool cd_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 	// attr & 0x40 == 0 → audio (CDDA). Refuse to play data tracks as audio.
 	if (track->attr & 0x40) return false;
 	if (track->sectorSize != AKIKO_CDDA_BYTES) return false;
+
+	if (drv->phys) {
+		if (physical_disc_read_sector((int)lba, buf2352, NULL)) return false;
+		// READ CD (flags 0x10) returns audio in disc order, i.e.
+		// little-endian per 16-bit sample. CHD stores it big-endian, and
+		// akiko_push_audio_sector byte-swaps unconditionally on the way to
+		// the FIFO. Normalise to CHD order here so the push path stays
+		// source-agnostic. Getting this wrong is immediately audible:
+		// white noise, not silence.
+		uint16_t *s = (uint16_t *)buf2352;
+		for (int i = 0; i < AKIKO_CDDA_BYTES / 2; i++) s[i] = bswap_16(s[i]);
+		return true;
+	}
 
 	uint32_t chd_lba = lba + track->chd_offset;
 	if (mister_chd_read_sector(drv->chd_f, chd_lba, 0, 0,
@@ -1881,6 +1904,31 @@ static int akiko_prefetch_fill(drive_t *drv, int win_idx, uint32_t base_lba)
 // seeks (BIOS often re-reads PVD/dirent after data passes) stay in-window.
 static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 {
+	// Phase 3 item 8: a physical drive bypasses this cache entirely.
+	//
+	// On a miss, akiko_prefetch_fill reads AKIKO_PREFETCH_SECTORS (128)
+	// sectors synchronously. Against a CHD that is cheap -- decompress a few
+	// hunks out of the page cache. Against a real drive, each ring miss in
+	// physical_disc costs a blocking SG_IO of SYNC_IO_BURST (8) sectors with
+	// a 3-second timeout, so one cold window is ~16 blocking round trips
+	// executed inside user_io_poll(), to satisfy a request for ONE sector.
+	// That is the freeze described under "Blocking I/O in the main loop" in
+	// docs/integration-plan.md, not a throughput nicety.
+	//
+	// physical_disc already caches: a 4096-sector two-lane ring (8x this
+	// window cache) with a background worker filling ahead of lane_cursor,
+	// aimed by physical_disc_seek_hint above. Stacking a second, synchronous,
+	// 128-sector cache on top of an asynchronous one only converts prefetched
+	// sectors back into blocking reads.
+	//
+	// -2 rather than -1 on failure: -1 means "the whole batch failed" and
+	// there is no batch here. -2 is the caller's single-bad-sector path,
+	// which holds sec_req and lets BIOS retry -- the right behaviour for a
+	// disc that is merely dirty. Both land in the same bounded-retry logic.
+	if (drv->phys) {
+		return (cdrom_read_raw_sector(drv, lba, out_buf) == 0) ? 0 : -2;
+	}
+
 	int win = akiko_prefetch_find(lba);
 	if (win < 0) {
 		cd_prefetch_misses++;

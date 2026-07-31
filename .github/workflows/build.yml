@@ -1,0 +1,94 @@
+# Cross-build MiSTer for the DE10-Nano (arm-none-linux-gnueabihf).
+#
+# This exists because there is no local build environment: the dev machine is
+# Windows without WSL, and ARM never shipped a Windows-hosted build of the
+# toolchain this project pins (10.2-2020.11 has x86_64/aarch64 Linux hosts
+# only -- its mingw-w64 packages target bare metal). Newer arm-gnu-toolchain
+# releases (12.3.rel1+) do have Windows hosts, but they bring a newer glibc
+# sysroot and therefore a runtime-compatibility question against the MiSTer's
+# own glibc. CI sidesteps that by using the exact pinned toolchain.
+#
+# Every ARM library the link needs (libImlib2, libfreetype, libpng16, libbz2,
+# libz, libbluetooth) is a prebuilt .so committed under lib/, so the toolchain
+# is the only external dependency.
+name: build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      # Keep in step with setup_default_toolchain.sh.
+      MISTER_GCC_VER: 10.2-2020.11
+      MISTER_GCC_HOST_ARCH: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve toolchain package name
+        id: tc
+        run: |
+          echo "name=gcc-arm-${MISTER_GCC_VER}-${MISTER_GCC_HOST_ARCH}-arm-none-linux-gnueabihf" >> "$GITHUB_OUTPUT"
+
+      # Sizeable download, so cache it. The key includes the full package name,
+      # so bumping MISTER_GCC_VER invalidates the cache automatically.
+      - name: Cache toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.tc.outputs.name }}
+          key: toolchain-${{ steps.tc.outputs.name }}
+
+      - name: Download toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          f="${{ steps.tc.outputs.name }}.tar.xz"
+          curl -fL --retry 3 --retry-delay 5 -o "$f" \
+            "https://developer.arm.com/-/media/Files/downloads/gnu-a/${MISTER_GCC_VER}/binrel/${f}"
+          tar xf "$f"
+          rm "$f"
+
+      # setup_default_toolchain.sh is deliberately not used: it must be sourced,
+      # and a sourced PATH does not survive between workflow steps. It also
+      # exports CC=.../arm-none-gnueabihf-gcc, which is not the real binary name
+      # (arm-none-linux-gnueabihf-gcc). That is harmless -- the Makefile assigns
+      # CC itself, and a Makefile assignment beats the environment -- but it is
+      # not something to build on.
+      - name: Add toolchain to PATH
+        run: echo "${{ github.workspace }}/${{ steps.tc.outputs.name }}/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain version
+        run: arm-none-linux-gnueabihf-gcc --version
+
+      - name: Build
+        run: make
+
+      # bin/MiSTer is stripped by the Makefile; bin/MiSTer.elf keeps symbols.
+      # `file` is the quickest confirmation this really is an ARM binary and not
+      # something the host toolchain produced. The GLIBC_* dump is the number to
+      # compare against `ldd --version` on the MiSTer if it ever fails to start.
+      - name: Inspect output
+        run: |
+          set -euo pipefail
+          ls -l bin/MiSTer bin/MiSTer.elf
+          file bin/MiSTer
+          md5sum bin/MiSTer
+          echo "--- glibc symbol versions required ---"
+          arm-none-linux-gnueabihf-objdump -p bin/MiSTer.elf \
+            | grep -o 'GLIBC_[0-9.]*' | sort -u -V || true
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiSTer_AmigaCD
+          path: |
+            bin/MiSTer
+            bin/MiSTer.elf
+          if-no-files-found: error

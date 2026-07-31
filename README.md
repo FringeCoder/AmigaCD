@@ -8,8 +8,8 @@ attached to the MiSTer, instead of from a CHD/CUE image on the SD card.
 | Role | Repo | Branch |
 |---|---|---|
 | Physical disc userspace | [`Anime0t4ku/Main_MiSTer_Physical_Disc`](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc) | `master` |
-| CD32/CDTV userspace driver | [`kblood/Main_MiSTer-cd32-cdtv`](https://github.com/kblood/Main_MiSTer-cd32-cdtv) | `master` |
-| CD32/CDTV core RTL | [`kblood/Minimig-AGA-cd32-cdtv-native-akiko`](https://github.com/kblood/Minimig-AGA-cd32-cdtv-native-akiko) | `cd32-native-mvp` |
+| CD32/CDTV userspace driver | [`kblood/Main_MiSTer-cd32-cdtv`](https://github.com/kblood/Main_MiSTer-cd32-cdtv) | `amiga-console` |
+| CD32/CDTV core RTL | [`kblood/Minimig-AGA-cd32-cdtv-native-akiko`](https://github.com/kblood/Minimig-AGA-cd32-cdtv-native-akiko) | `amiga-console` |
 
 Fetch them into `upstream/` with `scripts/fetch-upstream.sh` (not tracked).
 
@@ -43,4 +43,34 @@ See [`docs/integration-plan.md`](docs/integration-plan.md) for the step-by-step 
 
 ## Status
 
-Planning. Nothing built yet.
+This repo *is* Main_MiSTer @ `amiga-console`, with the physical-disc module
+grafted on. Phases 0, 1, 2 and the phase 4a OSD trigger are done: the adapter,
+the bridge changes, the mount plumbing and a **Real CD** row in the AmigaCD
+console OSD that mounts the drive. Selecting that row while mounted re-reads
+the TOC, which is the manual disc-swap path for now.
+
+Phase 3 -- seek hints and collapsing the double cache -- is next, and it is the
+phase that decides whether a real disc is fast enough to boot from at all. See
+[`docs/integration-plan.md`](docs/integration-plan.md).
+
+Auto-mounting a disc inserted *after* the core has started is designed but not
+built: [`docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`](docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md).
+
+**It compiles.** [`.github/workflows/build.yml`](.github/workflows/build.yml)
+cross-builds on GitHub Actions with the exact pinned toolchain (ARM GNU-A
+10.2-2020.11), producing a 1.06 MB stripped `ELF 32-bit LSB executable, ARM,
+EABI5` with **zero** compiler warnings. The binary needs at most `GLIBC_2.28`.
+
+CI carries the build because there is no local toolchain: this is a Windows
+machine without WSL, and ARM never shipped a Windows-hosted build of the
+pinned version.
+
+**It boots a CD32 game from a real disc.** Verified on hardware 2026-07-31:
+mount, TOC read, and a game running from the optical drive. The drive measured
+~720 kB/s (~351 sectors/s, ~4.7× red book), well above what the CD32 consumes —
+so throughput, the plan's headline risk, is retired.
+
+Not yet exercised on hardware: per-game NVRAM, the Real CD reset paths, the CDDA
+audio path, and everything CDTV. Hot swap (noticing a disc change without an OSD
+action) is **not implemented** — use the **Real CD** row after swapping. See
+"Still to do" in [`docs/integration-plan.md`](docs/integration-plan.md).

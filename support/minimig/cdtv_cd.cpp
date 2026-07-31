@@ -33,6 +33,7 @@
 #include "../../ide.h"
 #include "../../ide_cdrom.h"
 #include "../chd/mister_chd.h"    // mister_chd_read_sector for CDDA pump
+#include "../physical_disc/physical_disc.h" // physical CD-ROM drive media
 #include "cdtv_cd.h"
 #include "minimig_config.h"
 
@@ -191,7 +192,7 @@ static drive_t *cdtv_find_drive(void)
 	for (int p = 0; p < 2; p++) {
 		for (int d = 0; d < 2; d++) {
 			drive_t *drv = &ide_inst[p].drive[d];
-			if (drv->cd && (drv->chd_f || drv->f)) {
+			if (drv->cd && (drv->chd_f || drv->f || drv->phys)) {
 				return drv;
 			}
 		}
@@ -378,7 +379,8 @@ static void cdtv_push_sector(const uint8_t *buf, int len)
 // cdrom_read_raw_sector because that helper zero-fills audio tracks.
 static bool cdtv_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 {
-	if (!drv || !drv->chd_f || !buf2352) return false;
+	if (!drv || !buf2352) return false;
+	if (!drv->chd_f && !drv->phys) return false;
 
 	track_t *track = NULL;
 	int real_tracks = drv->track_cnt > 0 ? drv->track_cnt - 1 : 0;
@@ -392,6 +394,15 @@ static bool cdtv_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 	if (!track) return false;
 	if (track->attr & 0x40) return false;
 	if (track->sectorSize != CDTV_CDDA_BYTES) return false;
+
+	if (drv->phys) {
+		if (physical_disc_read_sector((int)lba, buf2352, NULL)) return false;
+		// See the CD32 path: disc order is little-endian, CHD order is
+		// big-endian, and cdtv_push_audio_sector swaps unconditionally.
+		uint16_t *s = (uint16_t *)buf2352;
+		for (int i = 0; i < CDTV_CDDA_BYTES / 2; i++) s[i] = bswap_16(s[i]);
+		return true;
+	}
 
 	uint32_t chd_lba = lba + track->chd_offset;
 	if (mister_chd_read_sector(drv->chd_f, chd_lba, 0, 0,
@@ -800,6 +811,11 @@ static int cmd_play(const uint8_t *cmd, uint8_t *out)
 	}
 
 	if (start_is_audio && e_lba > s_lba) {
+		// Phase 3 item 7: aim physical_disc's prefetch lane at the audio run
+		// about to stream, so the worker fills ahead instead of every CDDA
+		// sector faulting in synchronously. lane_of() routes this to the
+		// audio lane. No-op on CHD.
+		if (drv->phys) physical_disc_seek_hint((int)s_lba);
 		cdtv_play_drv      = drv;
 		cdtv_play_lba_next = (int32_t)s_lba;
 		cdtv_play_lba_end  = (int32_t)e_lba;
@@ -878,8 +894,11 @@ static void cdtv_dispatch(void)
 			uint16_t nsec  = ((uint16_t)cmd_buf[4] <<  8) | cmd_buf[5];
 
 			drive_t *drv = cdtv_find_drive();
-			if (!drv || !drv->chd_f) {
-				cdtv_dbg("READ DATA lba=%u nsec=%u — no drive/chd", lba, nsec);
+			// Data path, not audio. Easy to miss when grepping for the CDDA
+			// chd_f checks, but CDTV data reads fail without it even once
+			// cdtv_find_drive accepts a physical drive.
+			if (!drv || (!drv->chd_f && !drv->phys)) {
+				cdtv_dbg("READ DATA lba=%u nsec=%u — no drive/media", lba, nsec);
 				cd_error    = 1;
 				cd_finished = 1;
 				rlen        = 0;
@@ -887,6 +906,13 @@ static void cdtv_dispatch(void)
 			}
 
 			cdtv_dbg("READ DATA lba=%u nsec=%u sec_sz=%u", lba, nsec, cd_sectorsize);
+
+			// Phase 3 item 7: hint before the streaming loop below. The loop
+			// itself reads lba..lba+nsec synchronously, but the BIOS walks a
+			// file sequentially across many READ DATA commands, so pointing
+			// the lane here is what lets the worker have the *next* request
+			// already in the ring. No-op on CHD.
+			if (drv->phys) physical_disc_seek_hint((int)lba);
 
 			uint8_t raw[2352];
 			bool    failed = false;
