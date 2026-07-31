@@ -54,17 +54,17 @@ See [`docs/integration-plan.md`](docs/integration-plan.md) for the step-by-step 
 ## Status
 
 This repo *is* Main_MiSTer @ `amiga-console`, with the physical-disc module
-grafted on. Phases 0, 1, 2 and the phase 4a OSD trigger are done: the adapter,
-the bridge changes, the mount plumbing and a **Real CD** row in the AmigaCD
-console OSD that mounts the drive. Selecting that row while mounted re-reads
-the TOC, which is the manual disc-swap path for now.
+grafted on. Phases 0-3 and the phase 4a OSD trigger are done: the adapter, the
+bridge changes, the mount plumbing, a **Real CD** row in the AmigaCD console
+OSD, seek hints and the collapsed prefetch cache. Per-game NVRAM (item 11) and
+hot swap (item 12) are done too, the latter alongside auto-boot-on-insert.
 
-Phase 3 -- seek hints and collapsing the double cache -- is next, and it is the
-phase that decides whether a real disc is fast enough to boot from at all. See
-[`docs/integration-plan.md`](docs/integration-plan.md).
+The tree is current with all three upstreams, including 58 commits of
+`MiSTer-devel/Main_MiSTer` — nobody between us and it is rebasing, so that is
+ours to keep up.
 
-Auto-mounting a disc inserted *after* the core has started is designed but not
-built: [`docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`](docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md).
+See [`docs/integration-plan.md`](docs/integration-plan.md) for what each phase
+actually proved, and what is left.
 
 **It compiles.** [`.github/workflows/build.yml`](.github/workflows/build.yml)
 cross-builds on GitHub Actions with the exact pinned toolchain (ARM GNU-A
@@ -85,7 +85,13 @@ slots via both identity paths — one by ISO9660 volume label (`ISSUE7`), one by
 TOC-geometry UUID because it has no label — and the old save is flushed before
 the slot changes.
 
-Not yet exercised on hardware: the Real CD reset paths, the CDDA audio path,
-and everything CDTV. Hot swap (noticing a disc change without an OSD action) is
-**not implemented** — use the **Real CD** row after swapping. See "Still to do"
-in [`docs/integration-plan.md`](docs/integration-plan.md).
+**Audio CDs play.** That exercises the CDDA path end to end, including the
+byte-order normalisation where a mistake would have been unmistakable — white
+noise rather than silence.
+
+**Insert a disc and it mounts; take it out and it unmounts.** One drive watcher
+covers both auto-boot-on-insert and hot swap, so changing discs mid-session no
+longer needs the OSD.
+
+Not yet exercised on hardware: the Real CD reset paths, and everything CDTV.
+See "Still to do" in [`docs/integration-plan.md`](docs/integration-plan.md).
