@@ -35,6 +35,7 @@
 #include "ide.h"
 #include "ide_cdrom.h"
 #include "support/minimig/akiko_cd32.h"
+#include "support/physical_disc/physical_disc_autoboot.h"
 #include "support/minimig/cdtv_cd.h"
 #ifdef PROFILING
 #include "profiling.h"
@@ -3215,6 +3216,11 @@ void user_io_poll()
 		UpdateDriveStatus();
 		akiko_cd32_poll();
 		cdtv_cd_poll();
+		// Watch the tray when the physical drive is armed: mount on insert,
+		// unmount on eject. Ordered after the bridges so a mount made here is
+		// seen by their mediachange handling on the next poll rather than
+		// mid-iteration.
+		physical_disc_autoboot_poll();
 
 		kbd_fifo_poll();
 

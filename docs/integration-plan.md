@@ -168,7 +168,7 @@ drive always has `cd=1`. If that ever changes, they become live.
 
 ---
 
-## Phase 3 — make it fast enough ✅ done (untested on hardware)
+## Phase 3 — make it fast enough ✅ done
 
 ### 7. Seek hints ✅ done
 
@@ -326,26 +326,45 @@ Saves written against the old shared slot are **not** migrated. The first boot
 of each disc after this starts from the akiko `.mif` baseline. Migrating would
 mean guessing which disc that file belonged to.
 
-### 12. Hot swap ⬜ **not implemented**
+### 12. Hot swap ✅ done, together with auto-boot on insert
 
-Nothing watches the drive. Changing discs while a game runs is not noticed:
-`cd_is_mounted()` stays true, so `akiko_cd32_poll`'s `mounted != cd_last_mounted`
-block never fires, and the bridge keeps serving the previous disc's geometry.
-Confirmed on hardware 2026-07-31.
+Both are the same problem seen from different states — something changed in the
+tray, make the mount match it — so one state machine in
+`support/physical_disc/physical_disc_autoboot.cpp` serves both:
 
-The OSD **Real CD** row is the workaround — re-selecting it re-reads the TOC and
-now also resets (`deaceea`, `844b683`), so a swap works if you go through the
-menu.
+```
+ARMED_IDLE --disc appears--> SETTLING --mount ok--> MOUNTED
+    ^                            |                     |
+    +------- (retry, latch) <----+                     |
+    +--------------- disc disappears <-----------------+
+```
 
-To do it properly, wire `physical_disc_swap_consume()` /
-`physical_disc_media_changed()` — both already exist and have no callers — into
-the Akiko mediachange path so a physical swap triggers `akiko_build_toc()`.
-Note the driver's swap detection only arms when `physical_disc_swap_enable()`
-has been called, which nothing does either.
+Armed is the existing state — `hardfile[0].filename` holding the sentinel — so
+there is no new setting and no new menu row. Polled from `user_io.cpp` beside
+the two bridges, every 2 s, costing one `strcmp` when idle.
 
-This overlaps heavily with auto-boot-on-insert
-(`docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`): both need
-a poller watching drive state, and they should share one.
+**It deliberately never resets the core and never talks to the bridges.**
+`akiko_cd32_poll()` already carries a worked-out mediachange path keyed on the
+`cd_is_mounted()` edge, which separates a cold boot from a hot swap via
+`had_prior_unmount`. Unmounting on eject and mounting on insert produces exactly
+the edges that code consumes, so a swap takes the hot-swap branch it always had
+rather than competing with a second reset path. CDTV follows through
+`cdtv_cd_set_cd_path()`.
+
+Presence probing never reads media: one ioctl on the already-open fd when
+mounted, `open(O_NONBLOCK)` + `CDROM_DRIVE_STATUS` + close when idle. The drive
+is not held open while idle, which would keep it spun up and defeat the
+module's acoustic management.
+
+An unreadable disc latches off after 5 consecutive failed mounts rather than
+re-spinning every 2 s forever; removing it clears the latch, and selecting
+**Real CD** by hand calls `physical_disc_autoboot_reset()` so an explicit
+request always retries.
+
+Neither upstream's "autoboot" was reusable: Anime0t4ku's and theshaneobrien's
+are both menu-level core-launchers — identify a disc from the MiSTer menu, load
+the matching core — not in-core mount-on-insert, and both live in files this
+tree excludes.
 
 ---
 
@@ -353,9 +372,6 @@ a poller watching drive state, and they should share one.
 
 | | |
 |---|---|
-| **12. Hot swap** | Notice a disc change without an OSD action. Shares a poller with auto-boot. |
-| **Auto-boot on insert** | Designed, not built. See `docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`. Build it together with item 12 — one poller serves both. Neither upstream autoboot helps: both Anime0t4ku's and theshaneobrien's are menu-level core-launchers, not in-core mount-on-insert. |
-| **Catch up with `MiSTer-devel`** | 58 commits ahead of our shared base as of 2026-07-31, and nobody between us and it is rebasing. A real merge, not a re-extract — it touches `menu.cpp`, `ide.cpp`, `ide_cdrom.cpp`, `user_io.cpp`, all modified here. |
 | **10. Disc identification** | `physical_disc_identify()` still has no CD32/CDTV type. Only needed if the upstream auto-launch machinery is ever adopted; per-game NVRAM no longer depends on it. |
 | **A core declaring `AmigaCD`** | Building with Quartus 17.0.2 Lite. Then delete `/media/fat/amigacd_force` and put the ini section back to `[AmigaCD]`. Also picks up the two Deep Core sector-delivery fixes (`32c0a3c`, `fce5cc5`) a pre-rename core lacks. |
 | **CDTV** | Every CDTV path is code-read only. Untested on hardware. |
@@ -369,7 +385,8 @@ shim:
 - A physical CD32 disc mounts and **a game boots from it**.
 - The drive sustains **~720 kB/s ≈ 351 sectors/s (~4.7× red book)**, measured
   with `dd`. Comfortably above the ~150 sectors/s phase 3 targets.
-- Hot swap does **not** work (item 12).
+- **Insert and eject are noticed** (items 12 + auto-boot): a disc put in
+  mounts itself, one taken out unmounts.
 - **Per-game NVRAM works, on both identity paths.** Observed in
   `/tmp/akiko_dbg.log`:
 
@@ -387,8 +404,15 @@ shim:
   labelled disc never reaches the UUID path. Only the label-less disc's slot
   moved, orphaning one throwaway test save.
 
-Not yet exercised: either Real CD reset path, the CDDA audio path, and
-everything CDTV.
+- **Audio CDs play.** An audio disc mounts and plays through the CD32 BIOS
+  player. That exercises the whole CDDA path: an all-audio TOC through
+  `load_physical_disc` (every track `attr = 0`), `akiko_build_toc`'s all-audio
+  branch, the PLAY AUDIO arm in `cmd_multi`, and `cd_read_audio_sector`'s phys
+  branch — including the byte-order normalisation, where being wrong would have
+  been white noise rather than silence. The plan called that failure "loud and
+  unmistakable"; it did not happen.
+
+Not yet exercised: either Real CD reset path, and everything CDTV.
 
 ## Known risks
 
