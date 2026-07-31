@@ -66,6 +66,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "bootcore.h"
 #include "ide.h"
 #include "support/physical_disc/physical_disc.h"
+#include "support/physical_disc/physical_disc_autoboot.h"
 #include "profiling.h"
 #include "str_util.h"
 #include "autofire.h"
@@ -6615,6 +6616,10 @@ void HandleUI(void)
 					// path, then mount the drive, then restart the Amiga so it
 					// boots from it. A saved config carrying a CHD in
 					// hardfile[0] is the usual way to land here.
+					// Asking for it by hand always earns a fresh attempt, even
+					// if the watcher has latched off on an unreadable disc.
+					physical_disc_autoboot_reset();
+
 					bool had_image = minimig_config.hardfile[0].filename[0]
 					              && strcmp(minimig_config.hardfile[0].filename,
 					                        PHYSICAL_DISC_SENTINEL);
