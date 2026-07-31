@@ -40,6 +40,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <pthread.h>
 #include <libgen.h>
 #include <bluetooth.h>
 #include <hci.h>
@@ -241,6 +242,8 @@ static uint32_t menu_timer = 0;
 static uint32_t menu_save_timer = 0;
 static uint32_t load_addr = 0;
 static int32_t  bt_timer = 0;
+static bool     bt_present = false;
+static bool     bt_pairing = false;
 
 static bool osd_unlocked = 1;
 static char osd_code_entry[32];
@@ -363,6 +366,20 @@ void StoreIdx_S(int idx, const char *path)
 
 static char selPath[1024] = {};
 
+static void ResolveExistingCorePath(char *path)
+{
+	while (path[0] && !FileExists(path) && !PathIsDir(path))
+	{
+		char *p = strrchr(path, '/');
+		if (!p)
+		{
+			path[0] = 0;
+			break;
+		}
+		*p = 0;
+	}
+}
+
 static int changeDir(char *dir)
 {
 	char curdir[128];
@@ -428,6 +445,7 @@ void SelectFile(const char* path, const char* pFileExt, int Options, unsigned ch
 			if(strlen(selPath)) strcat(selPath, "/");
 			strcat(selPath, get_rbf_name());
 		}
+		ResolveExistingCorePath(selPath);
 		pFileExt = "RBFMRAMGL";
 		home_dir = NULL;
 	}
@@ -785,6 +803,7 @@ static void printSysInfo()
 		}
 		else
 		{
+			video_mode_adjust(true);
 			infowrite(n++, "");
 			video_core_description(str, 40);
 			infowrite(n++, str);
@@ -1046,7 +1065,7 @@ static void menu_parse_buttons()
 
 void build_advanced_map_core_btn_str(advancedButtonMap *abm, char *dest_str, size_t dest_size)
 {
-	int first_btn = -1; 
+	int first_btn = -1;
 	int btn_count = 0;
 	for(unsigned int i = 0; i < sizeof(abm->button_mask)*8; i++)
 	{
@@ -1075,6 +1094,12 @@ void build_advanced_map_summary(advancedButtonMap *abm, char *dest_str, size_t d
 	snprintf(dest_str, dest_size, "%s->%s", input_str, output_str);
 }
 
+static void *close_pipe_async(void *arg)
+{
+	pclose((FILE *)arg);
+	return NULL;
+}
+
 void HandleUI(void)
 {
 	PROFILE_FUNCTION();
@@ -1092,6 +1117,16 @@ void HandleUI(void)
 				printf("*** reset bt ***\n");
 				system("/bin/bluetoothd hcireset &");
 			}
+		}
+	}
+
+	{
+		static unsigned long bt_icon_timer = 0;
+		if (!bt_pairing && (!bt_icon_timer || CheckTimer(bt_icon_timer)))
+		{
+			bt_present = (hci_get_route(0) >= 0);
+			bt_icon_timer = GetTimer(3000);
+			if (!bt_icon_timer) bt_icon_timer = 1;
 		}
 	}
 
@@ -1204,9 +1239,6 @@ void HandleUI(void)
 		c = menu_key_get();
 	}
 
-	int release = 0;
-	if (c & UPSTROKE) release = 1;
-
 	// decode and set events
 	menu = false;
 	back = false;
@@ -1226,8 +1258,15 @@ void HandleUI(void)
 		static int menu_visible = 1;
 		static unsigned long timeout = 0;
 		static unsigned long off_timeout = 0;
+		static uint32_t wake_release = 0;
 		if (!video_fb_state() && cfg.fb_terminal)
 		{
+			if (c == wake_release)
+			{
+				wake_release = 0;
+				c = 0;
+			}
+
 			if (timeout && CheckTimer(timeout))
 			{
 				timeout = 0;
@@ -1248,8 +1287,8 @@ void HandleUI(void)
 			if (off_timeout && CheckTimer(off_timeout) && menu_visible < 0)
 			{
 				off_timeout = 0;
-				video_menu_bg(user_io_status_get("[3:1]"), 3);
-				if (cfg.video_off_hdmi) video_hdmi_power(0);
+				video_menu_bg(user_io_status_get("[3:1]"), cfg.video_off_logo ? 4 : 3);
+				if (cfg.video_off_logo) off_timeout = GetTimer(10000);
 			}
 
 			if (c || menustate != MENU_FILE_SELECT2)
@@ -1257,11 +1296,12 @@ void HandleUI(void)
 				timeout = 0;
 				if (menu_visible <= 0)
 				{
+					wake_release = c | UPSTROKE;
 					c = 0;
 					menu_visible = 1;
-					if (cfg.video_off_hdmi) video_hdmi_power(1);
 					video_menu_bg(user_io_status_get("[3:1]"));
 					OsdMenuCtl(1);
+					off_timeout = 0;
 				}
 			}
 
@@ -1329,6 +1369,13 @@ void HandleUI(void)
 					menustate = MENU_NONE1;
 					has_fb_terminal = 1;
 				}
+			}
+			break;
+
+		case KEY_F7: // added: F7 activates joystick map if OSD is visible, or in menu core
+			if (menustate != MENU_SCRIPTS1 || script_finished)
+			{
+				menustate = MENU_JOYDIGMAP;
 			}
 			break;
 
@@ -2537,6 +2584,7 @@ void HandleUI(void)
 									if (is_3do() && !bit) p3do_reset();
 
 									user_io_status_set(opt, 1, ex);
+									if (is_n64() && !ex && !strcmp(opt, "[41]")) n64_save_dd_disk();
 									user_io_status_set(opt, 0, ex);
 
 									menustate = MENU_GENERIC_MAIN1;
@@ -2624,7 +2672,7 @@ void HandleUI(void)
 					if (is_n64())
 					{
 						uint32_t n64_crc;
-						if (!n64_rom_tx(selPath, idx, load_addr, n64_crc)) 
+						if (!n64_rom_tx(selPath, idx, load_addr, n64_crc))
                 Info("failed to load ROM");
 						else if (!store_name)
 						{
@@ -3986,10 +4034,12 @@ void HandleUI(void)
 		{
 			strcpy(s, "     Core Volume: ");
 			if (audio_filter_en() >= 0) s[4] = 0x1b;
-			memset(s + strlen(s), 0, 10);
+			memset(s + strlen(s), 0, 11);
 			char *bar = s + strlen(s);
 			memset(bar, 0x8C, 8);
-			memset(bar, 0x7f, 8 - m);
+			memset(bar, 0x7f, 8 - (m & 7));
+			if (m & 0x60) bar[8] = '+';
+			if (m & 0x40) bar[9] = '+';
 		}
 		OsdWrite(12, s, menusub == 1);
 
@@ -5517,7 +5567,7 @@ void HandleUI(void)
 			}
 		}
 
-		if (release) PrintDirectory(1);
+		if (c & UPSTROKE) PrintDirectory(1);
 		break;
 
 		/******************************************************************/
@@ -6168,6 +6218,8 @@ void HandleUI(void)
 
 	case MENU_MINIMIG_CHIPSET1:
 		helptext_idx = HELPTEXT_CHIPSET;
+		// 13 selectable rows: 0..10 from this fork, 11 = upstream's A2065
+		// Ethernet row (menusub 9 upstream, renumbered on merge), 12 = Back.
 		menumask = 0x1FFF;
 		OsdSetTitle("System");
 		parentstate = menustate;
@@ -6230,8 +6282,15 @@ void HandleUI(void)
 		strcat(s, (minimig_config.memory & 0x40) ? "enabled " : "disabled");
 		OsdWrite(m++, s, menusub == 10, 0);
 
+		OsdWrite(m++, "", 0, 0);
+		strcpy(s, " Ethernet : ");
+		strcat(s, a2065_iface_msg(a2065_get_iface()));
+		// Upstream renders this at menusub 9; this fork has two extra rows
+		// ahead of it, so it lands at 11 and Back moves to 12.
+		OsdWrite(m++, s, menusub == 11, 0);
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 11, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 12, 0);
 
 		menustate = MENU_MINIMIG_CHIPSET2;
 		break;
@@ -6383,6 +6442,24 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
 			else if (menusub == 11)
+			{
+				// A2065 ethernet: OFF -> eth0 -> eth1 -> macvlan -> tap0,
+				// skipping anything this box cannot support (no second NIC,
+				// no tun driver, no macvlan). OFF and eth0 always qualify, so
+				// the walk always lands somewhere.
+				int m2 = a2065_get_iface();
+				for (int i = 0; i < A2065_MODES; i++)
+				{
+					m2 = minus ? (m2 + A2065_MODES - 1) % A2065_MODES
+					           : (m2 + 1) % A2065_MODES;
+					if (a2065_mode_available(m2)) break;
+				}
+				a2065_set_iface(m2);
+				menustate = MENU_MINIMIG_CHIPSET1;
+			}
+			// Back. Upstream puts the A2065 row at menusub 9 and Back at 10;
+			// this fork has two extra rows ahead of them, so both shift up.
+			else if (menusub == 12)
 			{
 				menustate = MENU_MINIMIG_MAIN1;
 				menusub = 6;
@@ -7573,6 +7650,7 @@ void HandleUI(void)
 		sched_setaffinity(0, sizeof(set), &set);
 		if (parentstate == MENU_BTPAIR)
 		{
+			bt_pairing = true;
 			OsdUpdate();
 			if(cfg.bt_reset_before_pair) system("hciconfig hci0 reset");
 			script_pipe = popen("/usr/sbin/btpair", "r");
@@ -7620,9 +7698,13 @@ void HandleUI(void)
 			if (!script_finished)
 			{
 				strcpy(script_command, "killall ");
-				strcat(script_command, (parentstate == MENU_BTPAIR) ? "-SIGINT btctl" : flist_SelectedItem()->de.d_name);
+				strcat(script_command, (parentstate == MENU_BTPAIR) ? "-SIGINT btpair btctl" : flist_SelectedItem()->de.d_name);
 				system(script_command);
-				pclose(script_pipe);
+				FILE *p = script_pipe;
+				script_pipe = NULL;
+				pthread_t tid;
+				if (!pthread_create(&tid, NULL, close_pipe_async, p)) pthread_detach(tid);
+				else { printf("close_pipe_async: pthread_create failed\n"); pclose(p); }
 				cpu_set_t set;
 				CPU_ZERO(&set);
 				CPU_SET(1, &set);
@@ -7642,6 +7724,7 @@ void HandleUI(void)
 			{
 				if (parentstate == MENU_BTPAIR)
 				{
+					bt_pairing = false;
 					menustate = MENU_NONE1;
 				}
 				else
@@ -7853,29 +7936,29 @@ void HandleUI(void)
 					build_advanced_map_code_str(abm_edit_ptr->input_codes, sizeof(abm_edit_ptr->input_codes), code_str, sizeof(code_str));
 					snprintf(s, sizeof(s), " Input Hotkey(s) %-20s\x16",code_str);
 					MenuWrite(n, s, menusub == n, 0);
-				  menumask |= 1 << n++; 
+				  menumask |= 1 << n++;
 
 					code_str[0] = 0;
 					snprintf(s, sizeof(s), " Core Button(s): %-17s\x10 \x11", bname);
-					MenuWrite(n, s, keyboard_only ? 0 : menusub == n, keyboard_only ); 
-				  if(!keyboard_only) menumask |= 1 << n; 
+					MenuWrite(n, s, keyboard_only ? 0 : menusub == n, keyboard_only );
+				  if(!keyboard_only) menumask |= 1 << n;
 				  n++;
 
 					build_advanced_map_code_str(abm_edit_ptr->output_codes, sizeof(abm_edit_ptr->output_codes), code_str, sizeof(code_str));
 					snprintf(s, sizeof(s), " Output(s): %-20s\x16", code_str);
 					MenuWrite(n, s, menusub == n, 0);
-				  menumask |= 1 << n++; 
+				  menumask |= 1 << n++;
 
 					const char *af_label = get_autofire_rate_hz(abm_edit_ptr->autofire_idx);
 					snprintf(s, sizeof(s), " Autofire : %-20s\x16", af_label);
 					MenuWrite(n, s, menusub == n, 0);
-				  menumask |= 1 << n++; 
-				
+				  menumask |= 1 << n++;
+
 
 					MenuWrite(n, " Delete", menusub == n, 0);
-				  menumask |= 1 << n++; 
+				  menumask |= 1 << n++;
 					MenuWrite(n, " Done", menusub == n, 0);
-				  menumask |= 1 << n++; 
+				  menumask |= 1 << n++;
 					for (int i = n; i < OsdGetSize(); i++) MenuWrite(i, "", 0, 0);
 					break;
 				}
@@ -7894,13 +7977,13 @@ void HandleUI(void)
 										int first_map_idx = -1;
 										for (uint bn = 0; bn < sizeof(abm_edit_ptr->button_mask)*8; bn++)
 										{
-											if (abm_edit_ptr->button_mask & 1<<bn) 
+											if (abm_edit_ptr->button_mask & 1<<bn)
 											{
 												mapped_button_cnt++;
 												if (first_map_idx == -1) first_map_idx = bn;
 											}
 										}
-										if (select) 
+										if (select)
 										{
 											menustate = MENU_ADVANCED_MAP_EDIT3;
                       menusub = 0;
@@ -7917,14 +8000,14 @@ void HandleUI(void)
 										}
 										break;
 									}
-								case 0: 
+								case 0:
 								case 2:
 									if (select) {
 										menustate = MENU_ADVANCED_MAP_CAPTURE1;
-										start_map_setting(1, menusub ? 2 : 1, abm_edit_ptr);	
+										start_map_setting(1, menusub ? 2 : 1, abm_edit_ptr);
 									}
 									break;
-								
+
 							case 3:
 								if (select || plus)
 								{
@@ -7971,8 +8054,8 @@ void HandleUI(void)
 							menu_button_name(i, bname, sizeof(bname));
 							if (!strcmp("-", bname)) continue;
 							bool b_used = abm_edit_ptr->button_mask & 1<<i;
-							sprintfz(s, "%s %s", b_used ? "*":" ", bname);	
-							MenuWrite(n, s, menusub == n, 0); 
+							sprintfz(s, "%s %s", b_used ? "*":" ", bname);
+							MenuWrite(n, s, menusub == n, 0);
 							menumask |= 1<<n;
 							n++;
 						}
@@ -7983,7 +8066,7 @@ void HandleUI(void)
 				}
 			case MENU_ADVANCED_MAP_EDIT4:
 				{
-					if (back || menu) 
+					if (back || menu)
 					{
 						menustate = MENU_ADVANCED_MAP_EDIT1;
 						menusub = 1;
@@ -8164,7 +8247,7 @@ void HandleUI(void)
 				int n = 8;
 				if (getNet(2)) str[n++] = 0x1d;
 				if (getNet(1)) str[n++] = 0x1c;
-				if (hci_get_route(0) >= 0) str[n++] = 4;
+				if (bt_present) str[n++] = 4;
 				if (user_io_get_sdram_cfg() & 0x8000)
 				{
 					switch (user_io_get_sdram_cfg() & 7)
