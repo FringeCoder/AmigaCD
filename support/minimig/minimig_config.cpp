@@ -19,6 +19,7 @@
 #include "minimig_share.h"
 #include "akiko_cd32.h"
 #include "cdtv_cd.h"
+#include "minimig_a2065.h"
 #include "../arcade/mra_loader.h"
 #include <string>
 #include <unistd.h>
@@ -381,6 +382,10 @@ static char* GetConfigurationName(int num, int chk)
 
 int minimig_cfg_save(int num)
 {
+	// The A2065 interface selection rides in core status bits, which Minimig
+	// excludes from the generic status-word config load, so it is stored
+	// beside the config slot rather than inside the size-checked blob.
+	a2065_cfg_save(num);
 	return FileSaveConfig(GetConfigurationName(num, 0), &minimig_config, sizeof(minimig_config));
 }
 
@@ -750,6 +755,10 @@ int minimig_cfg_load(int num)
 		}
 	}
 
+	// Restore the A2065 interface selection for this slot (kept in core status
+	// bits, saved beside the config blob by minimig_cfg_save()).
+	a2065_cfg_load(num);
+
 	for (int i = 0; i < 4; i++)
 	{
 		df[i].status = 0;
@@ -789,6 +798,7 @@ void minimig_reset()
 	minimig_share_reset();
 	akiko_cd32_init();
 	cdtv_cd_init();
+	a2065_start();
 }
 
 void minimig_set_kickstart(char *name)
