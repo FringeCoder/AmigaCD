@@ -415,12 +415,65 @@ static uint64_t fnv1a_64(const char *s)
 // We hash the basename (not the full path) so the same CHD in a different
 // folder maps to the same save slot. Comparison is case-sensitive — Linux
 // FS, and CD32 CHDs are typically named in a stable case anyway.
+// Physical discs arrive from cdrom_parse as "physdisc/<identity>". Everything
+// else is an image path.
+#define AKIKO_PHYSDISC_PREFIX "physdisc/"
+#define AKIKO_PHYSDISC_PREFIX_LEN (sizeof(AKIKO_PHYSDISC_PREFIX) - 1)
+
 static void compute_save_path(const char *cd_path, char *out, size_t outsz)
 {
+	// A physical disc names its save after the disc itself rather than a hash
+	// of it. <identity> is already filesystem-safe -- physical_disc_save_name()
+	// runs it through sanitize_name(), which keeps only [0-9A-Za-z-.], collapses
+	// separators to '_' and strips trailing punctuation, and falls back to a
+	// TOC-derived UUID when a label sanitises to nothing. So the file lands as
+	// "ISSUE7.nvr" rather than "cd32-8fd2874f328829b5.nvr".
+	//
+	// Two reasons that is worth the special case: the saves directory becomes
+	// readable at a glance, and a disc re-burned from the same source keeps its
+	// save, since matching volume labels produce the same filename.
+	if (!strncmp(cd_path, AKIKO_PHYSDISC_PREFIX, AKIKO_PHYSDISC_PREFIX_LEN))
+	{
+		snprintf(out, outsz, "%s/%s.nvr", AKIKO_NVRAM_DIR,
+		         cd_path + AKIKO_PHYSDISC_PREFIX_LEN);
+		return;
+	}
+
 	const char *base = strrchr(cd_path, '/');
 	base = base ? base + 1 : cd_path;
 	uint64_t h = fnv1a_64(base);
 	snprintf(out, outsz, "%s/cd32-%016" PRIx64 ".nvr", AKIKO_NVRAM_DIR, h);
+}
+
+// One-shot rename of a physical disc's save from the old hashed name to the
+// disc-named one. The hash was taken over exactly the identity now used
+// verbatim, so the old path is reconstructible and the mapping is unambiguous.
+//
+// Renames rather than copies: leaving the hashed file behind would strand a
+// real save somewhere the code no longer looks. Silent no-op when there is
+// nothing to migrate, which is every case after the first mount of each disc.
+static void migrate_physdisc_save_name(const char *cd_path, const char *new_path)
+{
+	if (strncmp(cd_path, AKIKO_PHYSDISC_PREFIX, AKIKO_PHYSDISC_PREFIX_LEN)) return;
+	if (!new_path[0]) return;
+
+	struct stat st;
+	if (!stat(new_path, &st)) return;          // already on the new name
+
+	char legacy[256];
+	uint64_t h = fnv1a_64(cd_path + AKIKO_PHYSDISC_PREFIX_LEN);
+	snprintf(legacy, sizeof(legacy), "%s/cd32-%016" PRIx64 ".nvr", AKIKO_NVRAM_DIR, h);
+	if (stat(legacy, &st)) return;             // no old save for this disc
+
+	if (!rename(legacy, new_path))
+	{
+		akiko_diag("[akiko] save renamed %s -> %s", legacy, new_path);
+	}
+	else
+	{
+		akiko_diag("[akiko] save rename %s -> %s FAILED (errno %d) — "
+		           "the old file is left alone", legacy, new_path, errno);
+	}
 }
 
 static inline uint32_t msf_to_lba(uint8_t m, uint8_t s, uint8_t f)
@@ -2334,6 +2387,10 @@ void akiko_cd32_set_cd_path(const char *path)
 	char new_path[256] = {0};
 	if (path && *path) {
 		compute_save_path(path, new_path, sizeof(new_path));
+		// Before the same-slot check below, so a disc mounted for the first
+		// time after this change picks up its existing save rather than
+		// starting from the .mif baseline.
+		migrate_physdisc_save_name(path, new_path);
 	}
 
 	if (strcmp(new_path, cd_save_path_active) == 0) {

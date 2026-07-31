@@ -271,6 +271,19 @@ has one, otherwise a UUID built from TOC geometry. Both are stable across
 remounts and differ between discs. `IDE: physical disc save id "…"` logs the
 result.
 
+**The identity is the filename, not a hash of it.** `compute_save_path`
+special-cases the `physdisc/` prefix and uses the identity verbatim, so a save
+lands as `ISSUE7.nvr` rather than `cd32-8fd2874f328829b5.nvr`. That makes the
+saves directory readable, and means a disc re-burned from the same source keeps
+its save, since matching volume labels produce matching filenames. Safe because
+`sanitize_name()` has already reduced the identity to `[0-9A-Za-z-.]`.
+
+`migrate_physdisc_save_name()` renames an existing `cd32-<hash>.nvr` to the new
+name on first mount. The hash was taken over exactly the identity now used
+verbatim, so the old path is reconstructible and the mapping unambiguous. It
+renames rather than copies — leaving the hashed file would strand a real save
+where nothing looks for it.
+
 The type argument is pinned to `PHYSICAL_DISC_DISC_UNKNOWN` rather than calling
 `physical_disc_identify()` — it only salts the UUID and selects
 PSX/Saturn/MegaCD paths that do not apply, and identify() would cost a read and
