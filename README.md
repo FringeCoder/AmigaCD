@@ -65,6 +65,12 @@ CI carries the build because there is no local toolchain: this is a Windows
 machine without WSL, and ARM never shipped a Windows-hosted build of the
 pinned version.
 
-**It has not been run.** Compiling proves the integration is type-correct. It
-says nothing about whether a physical disc actually boots — phase 3 decides
-that.
+**It boots a CD32 game from a real disc.** Verified on hardware 2026-07-31:
+mount, TOC read, and a game running from the optical drive. The drive measured
+~720 kB/s (~351 sectors/s, ~4.7× red book), well above what the CD32 consumes —
+so throughput, the plan's headline risk, is retired.
+
+Not yet exercised on hardware: per-game NVRAM, the Real CD reset paths, the CDDA
+audio path, and everything CDTV. Hot swap (noticing a disc change without an OSD
+action) is **not implemented** — use the **Real CD** row after swapping. See
+"Still to do" in [`docs/integration-plan.md`](docs/integration-plan.md).

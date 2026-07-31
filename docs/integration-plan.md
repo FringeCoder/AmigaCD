@@ -261,27 +261,78 @@ The OSD entry goes in `menu.cpp` next to the existing CD image selector — on
 (`CDTV`, `AMIGA`) or the CD32 boot block. This wires the disc into the existing
 auto-launch machinery.
 
-### 11. Per-game NVRAM
+### 11. Per-game NVRAM ✅ done (`844b683`)
 
-`akiko_cd32_set_cd_path()` (2280-ish) hashes the image path basename into
-`cd32-<hash>.nvr` via `compute_save_path` (417). With a physical disc that path
-is a constant sentinel, so every game shares one save. Key off
-`physical_disc_disc_label()` / `physical_disc_disc_serial()` instead — both
-already exist. There is a `TODO(phase 4)` marking the spot in `cdrom_parse`.
+`compute_save_path` hashes the basename of whatever path it is handed, and the
+physical mount handed it a constant sentinel, so every disc shared one
+`cd32-5dd610a6930035d2.nvr`. `cdrom_parse` now derives a per-disc identity from
+`physical_disc_save_name()`: the sanitised ISO9660 volume label when the disc
+has one, otherwise a UUID built from TOC geometry. Both are stable across
+remounts and differ between discs. `IDE: physical disc save id "…"` logs the
+result.
 
-### 12. Hot swap
+The type argument is pinned to `PHYSICAL_DISC_DISC_UNKNOWN` rather than calling
+`physical_disc_identify()` — it only salts the UUID and selects
+PSX/Saturn/MegaCD paths that do not apply, and identify() would cost a read and
+could silently relocate every save slot if its classification ever changed.
 
-Wire `physical_disc_swap_consume()` / `physical_disc_media_changed()` into the
-Akiko mediachange path (the `mounted != cd_last_mounted` block at 2554) so a
-swap triggers `akiko_build_toc()` rather than serving stale geometry.
+Saves written against the old shared slot are **not** migrated. The first boot
+of each disc after this starts from the akiko `.mif` baseline. Migrating would
+mean guessing which disc that file belonged to.
+
+### 12. Hot swap ⬜ **not implemented**
+
+Nothing watches the drive. Changing discs while a game runs is not noticed:
+`cd_is_mounted()` stays true, so `akiko_cd32_poll`'s `mounted != cd_last_mounted`
+block never fires, and the bridge keeps serving the previous disc's geometry.
+Confirmed on hardware 2026-07-31.
+
+The OSD **Real CD** row is the workaround — re-selecting it re-reads the TOC and
+now also resets (`deaceea`, `844b683`), so a swap works if you go through the
+menu.
+
+To do it properly, wire `physical_disc_swap_consume()` /
+`physical_disc_media_changed()` — both already exist and have no callers — into
+the Akiko mediachange path so a physical swap triggers `akiko_build_toc()`.
+Note the driver's swap detection only arms when `physical_disc_swap_enable()`
+has been called, which nothing does either.
+
+This overlaps heavily with auto-boot-on-insert
+(`docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`): both need
+a poller watching drive state, and they should share one.
 
 ---
 
+## Still to do
+
+| | |
+|---|---|
+| **12. Hot swap** | Notice a disc change without an OSD action. Shares a poller with auto-boot. |
+| **Auto-boot on insert** | Designed, not built. See `docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`. |
+| **10. Disc identification** | `physical_disc_identify()` still has no CD32/CDTV type. Only needed if the upstream auto-launch machinery is ever adopted; per-game NVRAM no longer depends on it. |
+| **A core declaring `AmigaCD`** | Building with Quartus 17.0.2 Lite. Then delete `/media/fat/amigacd_force` and put the ini section back to `[AmigaCD]`. Also picks up the two Deep Core sector-delivery fixes (`32c0a3c`, `fce5cc5`) a pre-rename core lacks. |
+| **CDTV** | Every CDTV path is code-read only. Untested on hardware. |
+| **Real subchannel** | `physical_disc_read_sector_sub()` exists and is unused; the Q channel is still synthesised. Accuracy only. |
+
+## What is actually verified on hardware
+
+As of 2026-07-31, on a pre-rename `MinimigCD` core with the `amigacd_force`
+shim:
+
+- A physical CD32 disc mounts and **a game boots from it**.
+- The drive sustains **~720 kB/s ≈ 351 sectors/s (~4.7× red book)**, measured
+  with `dd`. Comfortably above the ~150 sectors/s phase 3 targets.
+- Hot swap does **not** work (item 12).
+
+Not yet exercised: per-game NVRAM, either Real CD reset path, the CDDA audio
+path, and everything CDTV.
+
 ## Known risks
 
-**Throughput.** A cache miss against a USB optical drive is milliseconds where
-CHD is microseconds. Phase 3 is not an optimisation pass; it decides whether
-anything boots.
+**Throughput — retired.** The plan's headline risk was that a cache miss
+against a USB optical drive is milliseconds where CHD is microseconds. Measured
+at ~351 sectors/s against a ~150 target, so there is real headroom. The freeze
+that did occur turned out to be a NULL dereference, not I/O at all.
 
 **Blocking I/O in the main loop.** `fetch_sector()` blocks on a miss with a 3s
 timeout, and everything in `user_io_poll()` stalls behind it. If seek hints are
