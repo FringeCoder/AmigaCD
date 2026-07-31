@@ -324,9 +324,25 @@ shim:
 - The drive sustains **~720 kB/s ≈ 351 sectors/s (~4.7× red book)**, measured
   with `dd`. Comfortably above the ~150 sectors/s phase 3 targets.
 - Hot swap does **not** work (item 12).
+- **Per-game NVRAM works, on both identity paths.** Observed in
+  `/tmp/akiko_dbg.log`:
 
-Not yet exercised: per-game NVRAM, either Real CD reset path, the CDDA audio
-path, and everything CDTV.
+  ```
+  cd=physdisc/8555b7f1-9711-5292-9228-d1c9baf4defe -> cd32-1e8c3f33b0e5f3bd.nvr
+  cd=physdisc/ISSUE7                              -> cd32-8fd2874f328829b5.nvr
+  ```
+
+  `ISSUE7` is an ISO9660 volume label; the other disc has none and fell through
+  to the TOC-geometry UUID. Distinct identities, distinct slots, and the old
+  save is flushed before the swap.
+
+  This also confirmed the `UNKNOWN` → `NONE` salt repin behaves as reasoned:
+  `ISSUE7`'s slot file predates the repin and is still the one in use, because a
+  labelled disc never reaches the UUID path. Only the label-less disc's slot
+  moved, orphaning one throwaway test save.
+
+Not yet exercised: either Real CD reset path, the CDDA audio path, and
+everything CDTV.
 
 ## Known risks
 

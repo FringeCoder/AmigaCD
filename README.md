@@ -80,7 +80,12 @@ mount, TOC read, and a game running from the optical drive. The drive measured
 ~720 kB/s (~351 sectors/s, ~4.7× red book), well above what the CD32 consumes —
 so throughput, the plan's headline risk, is retired.
 
-Not yet exercised on hardware: per-game NVRAM, the Real CD reset paths, the CDDA
-audio path, and everything CDTV. Hot swap (noticing a disc change without an OSD
-action) is **not implemented** — use the **Real CD** row after swapping. See
-"Still to do" in [`docs/integration-plan.md`](docs/integration-plan.md).
+**Per-game NVRAM works too.** Two discs on hardware resolved to distinct save
+slots via both identity paths — one by ISO9660 volume label (`ISSUE7`), one by
+TOC-geometry UUID because it has no label — and the old save is flushed before
+the slot changes.
+
+Not yet exercised on hardware: the Real CD reset paths, the CDDA audio path,
+and everything CDTV. Hot swap (noticing a disc change without an OSD action) is
+**not implemented** — use the **Real CD** row after swapping. See "Still to do"
+in [`docs/integration-plan.md`](docs/integration-plan.md).
