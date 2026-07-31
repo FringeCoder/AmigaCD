@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <limits.h>       // CDSL_CURRENT expands via INT_MAX on this kernel
 #include <linux/cdrom.h>
 
 #include "../../user_io.h"
