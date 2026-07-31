@@ -2129,11 +2129,41 @@ const char* cdrom_parse(uint32_t num, const char *filename)
 		        sizeof(last_path[0][0]) - 1);
 		last_path[num][drv][sizeof(last_path[0][0]) - 1] = '\0';
 
-		// TODO(phase 4): per-game NVRAM is keyed off the image path, so every
-		// physical disc currently shares one .nvr. Replace the sentinel here
-		// with physical_disc_disc_label()/_serial() once that lands.
-		akiko_cd32_set_cd_path(PHYSICAL_DISC_SENTINEL);
-		cdtv_cd_set_cd_path(PHYSICAL_DISC_SENTINEL);
+		// Per-game NVRAM (plan item 11). akiko's compute_save_path hashes the
+		// basename of whatever it is handed; the sentinel is a constant, so
+		// every physical disc used to share a single cd32-<hash>.nvr. Hand it
+		// a per-disc identity instead.
+		//
+		// physical_disc_save_name returns the sanitised ISO9660 volume label
+		// when the disc has one, else a UUID derived from the TOC geometry
+		// (track count, per-track start/type/length, disc end). Both are
+		// stable across remounts and differ between discs, which is exactly
+		// what the save slot needs. The type argument only salts the UUID and
+		// selects PSX/Saturn/MegaCD-specific paths that do not apply here, so
+		// it is pinned to a constant — passing physical_disc_identify() would
+		// cost a read and could change the slot if classification ever moved.
+		//
+		// The "physdisc/" prefix keeps compute_save_path's strrchr('/') from
+		// seeing any of the identity, so the hash covers the identity alone.
+		{
+			char disc_id[128];
+			char save_key[160];
+			if (physical_disc_save_name(PHYSICAL_DISC_DISC_UNKNOWN,
+			                            disc_id, sizeof(disc_id)) > 0)
+			{
+				snprintf(save_key, sizeof(save_key), "physdisc/%s", disc_id);
+				printf("\x1b[32mIDE: physical disc save id \"%s\"\n\x1b[0m", disc_id);
+			}
+			else
+			{
+				// No label and no readable TOC to hash. Fall back to the old
+				// shared slot rather than losing saves entirely.
+				snprintf(save_key, sizeof(save_key), "%s", PHYSICAL_DISC_SENTINEL);
+				printf("IDE: no disc identity, using the shared save slot\n");
+			}
+			akiko_cd32_set_cd_path(save_key);
+			cdtv_cd_set_cd_path(save_key);
+		}
 		return res;
 	}
 

@@ -6541,6 +6541,13 @@ void HandleUI(void)
 					bool had_image = minimig_config.hardfile[0].filename[0]
 					              && strcmp(minimig_config.hardfile[0].filename,
 					                        PHYSICAL_DISC_SENTINEL);
+					// Physical -> physical is edge-less for the same reason, so a
+					// disc swap needs the reset too. There are no multi-disc CD32
+					// titles, so re-selecting Real CD always means "boot what is in
+					// the tray now" rather than "continue with a second disc".
+					bool had_phys  = ide_inst[0].drive[0].phys;
+					bool need_reset = had_image || had_phys;
+
 					if (had_image)
 					{
 						minimig_config.hardfile[0].filename[0] = 0;
@@ -6551,7 +6558,7 @@ void HandleUI(void)
 					minimig_config.hardfile[0].cfg = 2;
 					if (ide_open(0, minimig_config.hardfile[0].filename))
 					{
-						if (had_image)
+						if (need_reset)
 						{
 							// minimig_reset re-runs ApplyConfiguration ->
 							// hdd_open -> ide_open, which re-reads the TOC
