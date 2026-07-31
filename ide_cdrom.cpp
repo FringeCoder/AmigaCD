@@ -2140,15 +2140,21 @@ const char* cdrom_parse(uint32_t num, const char *filename)
 		// stable across remounts and differ between discs, which is exactly
 		// what the save slot needs. The type argument only salts the UUID and
 		// selects PSX/Saturn/MegaCD-specific paths that do not apply here, so
-		// it is pinned to a constant — passing physical_disc_identify() would
-		// cost a read and could change the slot if classification ever moved.
+		// it is pinned rather than taken from physical_disc_identify(), which
+		// would cost a read and could move the slot if classification changed.
+		//
+		// Pinned specifically to PHYSICAL_DISC_DISC_NONE, which the enum fixes
+		// at 0. It was PHYSICAL_DISC_DISC_UNKNOWN until upstream d24d2b0
+		// inserted CDI/MDPLUS/SNES ahead of it, moving UNKNOWN from 8 to 11 --
+		// which would have silently relocated every TOC-derived save slot on a
+		// routine vendor sync. Only NONE is guaranteed not to drift.
 		//
 		// The "physdisc/" prefix keeps compute_save_path's strrchr('/') from
 		// seeing any of the identity, so the hash covers the identity alone.
 		{
 			char disc_id[128];
 			char save_key[160];
-			if (physical_disc_save_name(PHYSICAL_DISC_DISC_UNKNOWN,
+			if (physical_disc_save_name(PHYSICAL_DISC_DISC_NONE,
 			                            disc_id, sizeof(disc_id)) > 0)
 			{
 				snprintf(save_key, sizeof(save_key), "physdisc/%s", disc_id);
