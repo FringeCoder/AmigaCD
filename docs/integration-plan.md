@@ -308,7 +308,8 @@ a poller watching drive state, and they should share one.
 | | |
 |---|---|
 | **12. Hot swap** | Notice a disc change without an OSD action. Shares a poller with auto-boot. |
-| **Auto-boot on insert** | Designed, not built. See `docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`. |
+| **Auto-boot on insert** | Designed, not built. See `docs/superpowers/specs/2026-07-28-physical-cd-autoboot-design.md`. Build it together with item 12 — one poller serves both. Neither upstream autoboot helps: both Anime0t4ku's and theshaneobrien's are menu-level core-launchers, not in-core mount-on-insert. |
+| **Catch up with `MiSTer-devel`** | 58 commits ahead of our shared base as of 2026-07-31, and nobody between us and it is rebasing. A real merge, not a re-extract — it touches `menu.cpp`, `ide.cpp`, `ide_cdrom.cpp`, `user_io.cpp`, all modified here. |
 | **10. Disc identification** | `physical_disc_identify()` still has no CD32/CDTV type. Only needed if the upstream auto-launch machinery is ever adopted; per-game NVRAM no longer depends on it. |
 | **A core declaring `AmigaCD`** | Building with Quartus 17.0.2 Lite. Then delete `/media/fat/amigacd_force` and put the ini section back to `[AmigaCD]`. Also picks up the two Deep Core sector-delivery fixes (`32c0a3c`, `fce5cc5`) a pre-rename core lacks. |
 | **CDTV** | Every CDTV path is code-read only. Untested on hardware. |

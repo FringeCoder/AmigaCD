@@ -3,15 +3,25 @@
 Work towards running the MiSTer **Amiga CD32 / CDTV cores from a real CD-ROM drive**
 attached to the MiSTer, instead of from a CHD/CUE image on the SD card.
 
-## The three upstreams
+## Upstreams
+
+Three we are built from, two we track for improvements:
 
 | Role | Repo | Branch |
 |---|---|---|
 | Physical disc userspace | [`Anime0t4ku/Main_MiSTer_Physical_Disc`](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc) | `master` |
 | CD32/CDTV userspace driver | [`kblood/Main_MiSTer-cd32-cdtv`](https://github.com/kblood/Main_MiSTer-cd32-cdtv) | `amiga-console` |
 | CD32/CDTV core RTL | [`kblood/Minimig-AGA-cd32-cdtv-native-akiko`](https://github.com/kblood/Minimig-AGA-cd32-cdtv-native-akiko) | `amiga-console` |
+| *Watched* — parallel disc effort | [`theshaneobrien/mister-disc-drive-support`](https://github.com/theshaneobrien/mister-disc-drive-support) | `physcd` |
+| *Watched* — the root upstream | [`MiSTer-devel/Main_MiSTer`](https://github.com/MiSTer-devel/Main_MiSTer) | `master` |
 
-Fetch them into `upstream/` with `scripts/fetch-upstream.sh` (not tracked).
+The last two are not merged from automatically. `MiSTer-devel` matters because
+nobody is rebasing the forks between us and it, so keeping current is our job.
+See [`docs/upstream-pins.md`](docs/upstream-pins.md) for the pins, the sync
+procedure, and what is worth taking from each.
+
+Fetch them into `upstream/` with `scripts/fetch-upstream.sh` (not tracked), or
+use the git remotes: `physdisc`, `cd32-main`, `discdrive`, `mister-upstream`.
 
 ## Key finding
 
