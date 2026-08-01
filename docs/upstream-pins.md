@@ -9,6 +9,8 @@ against. Re-verify line numbers after moving off these.
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amiga-console` | `c5eb180` | 2026-06-14 |
 | `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `d24d2b0` "autoboot added" | 2026-07-31 |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
+| ^ our core's fork point | | `3ab91cd` "Release 20260220." | 2026-02-20 |
 
 `52625a4` is merged into this repo's `master` as the working tree.
 
@@ -104,6 +106,38 @@ the same menu-level shape as Anime0t4ku's launch file: identify a disc from the
 MiSTer menu and load the matching core. Ours is in-core mount-and-boot on
 insert. Useful as reference for the poller and for `swap_current_core()`, not
 as something to lift.
+
+### `MiSTer-devel/Minimig-AGA_MiSTer` @ `MiSTer`
+
+The RTL root upstream, the core-side counterpart to `Main_MiSTer`. Our core
+(`kblood/Minimig-AGA-cd32-cdtv-native-akiko` @ `amiga-console`) descends from it,
+forking at `3ab91cd` (2026-02-20). Only **5 commits** ahead of that point, so
+the RTL upstream moves far more slowly than the userspace one.
+
+Added as remote `minimig-upstream` in the core clone, not in this repo — it is
+Verilog, and nothing in it builds here.
+
+**The A2065 host/FPGA split — verified 2026-08-01.** The five commits include
+`809b955`, which adds `rtl/A2065/*` (the LANCE FPGA half). Our `amiga-console`
+pin predates it:
+
+| Tree | Has `rtl/A2065/` |
+|---|---|
+| `amiga-console` @ `c5eb180` (what we build) | **no** |
+| `minimig-upstream/MiSTer` @ `809b955` | yes |
+| kblood's `amigacd-core` @ `a27f4e8` | yes |
+
+So this repo carries the A2065 **host** half — pulled in by the `Main_MiSTer`
+merge (`#1247`) and surfaced by the AmigaCD Advanced OSD page — against a core
+with no A2065 in it. The OSD row selects an interface and the poller runs, but
+no FPGA logic is listening, so nothing reaches the Amiga. Making Ethernet
+actually work needs a core containing `rtl/A2065/`.
+
+Harmless meanwhile, and checked rather than assumed: `a2065_ddr3_clear()` writes
+24 bytes at `0x1FF08000`/`+0x10`/`+0x18` inside the window at
+`DDR3_FLAT_BASE 0x1FF00000`. The only other mapper in the tree is
+`minimig_share` at `0x27FF4000`, so there is no collision — on a core without
+the FPGA half those bytes are simply unread.
 
 ### `MiSTer-devel/Main_MiSTer` @ `master`
 
