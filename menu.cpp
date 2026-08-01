@@ -193,6 +193,8 @@ enum MENU
 	MENU_AMIGACD_MAIN2,
 	MENU_AMIGACD_SETTINGS1,
 	MENU_AMIGACD_SETTINGS2,
+	MENU_AMIGACD_ADVANCED1,
+	MENU_AMIGACD_ADVANCED2,
 	MENU_AMIGACD_CDFILE_SELECTED,
 	MENU_AMIGACD_ADFFILE_SELECTED,
 	MENU_AMIGACD_ROMFILE_SELECTED,
@@ -6502,7 +6504,7 @@ void HandleUI(void)
 		// the core menu itself is reskinned, the MiSTer menu stays reachable.
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 		helptext_idx = 0;
-		menumask = 0xFF;            // CD, Real CD, Floppy, System, Settings, Save, Reset, Exit
+		menumask = 0x1FF;           // CD, Real CD, Floppy, System, Settings, Advanced, Save, Reset, Exit
 		parentstate = menustate;
 
 		int cdtv = amigacd_is_cdtv();
@@ -6555,11 +6557,14 @@ void HandleUI(void)
 
 		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Settings                 \x16", menusub == 4, 0);
-		OsdWrite(m++, " Save settings", menusub == 5, 0);
+		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
+		// page so the everyday options stay a short list.
+		OsdWrite(m++, " Advanced                 \x16", menusub == 5, 0);
+		OsdWrite(m++, " Save settings", menusub == 6, 0);
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 6, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 7, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 7, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 8, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 		break;
@@ -6710,7 +6715,12 @@ void HandleUI(void)
 				menusub = 0;
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 5 && select) // Save settings -> default config slot 0
+			else if (menusub == 5 && select) // Advanced submenu
+			{
+				menusub = 0;
+				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == 6 && select) // Save settings -> default config slot 0
 			{
 				// Persists the whole minimig_config: mounted CD (hardfile[0]),
 				// RAM (memory), CPU/chipset (System profile), D-Cache and ROMs.
@@ -6721,12 +6731,12 @@ void HandleUI(void)
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 6 && select) // Reset
+			else if (menusub == 7 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 7 && select) // Exit
+			else if (menusub == 8 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
@@ -6864,6 +6874,72 @@ void HandleUI(void)
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 4;
+			}
+		}
+		break;
+
+	// Expansions a real CD32/CDTV never had. Separate from Settings so the
+	// everyday page stays short, and so anything added here is understood as
+	// deviating from the authentic machine rather than configuring it.
+	case MENU_AMIGACD_ADVANCED1:
+	{
+		OsdSetTitle("Advanced", 0);
+		helptext_idx = 0;
+		menumask = 0x3;             // Ethernet, Back
+		parentstate = menustate;
+
+		m = 0;
+		OsdWrite(m++, "", 0, 0);
+
+		// A2065 ZorroII Ethernet. Mirrors the row on the full Minimig Chipset
+		// page -- same a2065_* calls, same cycle order -- so the two cannot
+		// drift apart in behaviour.
+		strcpy(s, " Ethernet : ");
+		strcat(s, a2065_iface_msg(a2065_get_iface()));
+		OsdWrite(m++, s, menusub == 0, 0);
+
+		OsdWrite(m++, "", 0, 0);
+		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
+		OsdWrite(m++, " is always present either way.", 0, 0);
+
+		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 1, 0);
+
+		menustate = MENU_AMIGACD_ADVANCED2;
+		break;
+	}
+
+	case MENU_AMIGACD_ADVANCED2:
+		if (menu)
+		{
+			menustate = MENU_NONE1;
+		}
+		else if (back || left)
+		{
+			menustate = MENU_AMIGACD_MAIN1;
+			menusub = 5;
+		}
+		else if (select || minus || plus)
+		{
+			if (menusub == 0) // Ethernet interface
+			{
+				// OFF -> eth0 -> eth1 -> macvlan -> tap0, skipping anything this
+				// box cannot support (no second NIC, no tun driver, no macvlan).
+				// OFF and eth0 always qualify, so the walk always lands.
+				int m2 = a2065_get_iface();
+				for (int i = 0; i < A2065_MODES; i++)
+				{
+					m2 = minus ? (m2 + A2065_MODES - 1) % A2065_MODES
+					           : (m2 + 1) % A2065_MODES;
+					if (a2065_mode_available(m2)) break;
+				}
+				a2065_set_iface(m2);
+				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == 1 && select) // Back
+			{
+				menustate = MENU_AMIGACD_MAIN1;
+				menusub = 5;
 			}
 		}
 		break;
