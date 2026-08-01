@@ -2442,6 +2442,29 @@ static void akiko_drain_trace(void)
 
 		if (b3 == 0) break;              // ring drained
 
+		// Everything below is logging only, and it really is gated on
+		// AKIKO_BUS_TRACE now. It was not: the flag was defined, two comments
+		// claimed it gated this, and no #if was ever written -- so release
+		// builds logged every control-register write.
+		//
+		// That stayed harmless only while the RTL trace ring sat empty. Build a
+		// core whose ring is live and it becomes ~15k akiko_diag() calls a
+		// second, each a synchronous fopen/fwrite/fclose to tmpfs, and
+		// /tmp/akiko_dbg.log eats RAM because tmpfs is RAM. Observed 2026-07-31
+		// after switching to a locally built core.
+		//
+		// This was first written up as the cause of a black-screen/unresponsive
+		// hang during long sessions. It is not. With the gate deployed the log
+		// stopped growing (0 [trace] lines, 0 bytes/3s) and the hang still
+		// happened, and it was later reproduced on kblood's release core and
+		// with a CHD instead of a physical disc. The cost removed here is real
+		// on its own terms; the hang has a different cause.
+		//
+		// The drain above stays unconditional on purpose. The ring
+		// back-pressures the CPU when full, so skipping the spi_w reads would
+		// stall the Amiga on dense bus activity -- which is why the reads sit
+		// outside this block rather than inside it.
+#if AKIKO_BUS_TRACE
 		// Phase 33-C: filtered trace — log writes to control registers
 		// ($00-$27) so we can see CDFLAG_ENABLE toggles, PBX writes, INTREQ
 		// acks during the sec_req stall. Excludes high-volume cmd buffer
@@ -2464,6 +2487,9 @@ static void akiko_drain_trace(void)
 			// All read entries that escape the RTL filter are interesting.
 			akiko_diag("[trace] R $%06X -> 0x%04X", addr, data);
 		}
+#else
+		(void)b0; (void)b1; (void)b2;    // decoded only when tracing
+#endif
 	}
 
 	DisableIO();
@@ -2702,7 +2728,8 @@ void akiko_cd32_poll(void)
 	akiko_nvram_verify_load_pending();
 
 	// Always drain — the ring back-pressures the CPU when full. Per-entry
-	// logging is gated inside the function on AKIKO_BUS_TRACE.
+	// logging really is gated inside the function on AKIKO_BUS_TRACE now; this
+	// comment described an #if that had never been written.
 	akiko_drain_trace();
 
 	// Chipset bus trace (gfx-trio investigation). Always-on drain; when the

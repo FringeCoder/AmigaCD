@@ -662,6 +662,26 @@ static void ApplyConfiguration(char reloadkickstart)
 
 	minimig_ConfigVideo(minimig_config.scanlines);
 	minimig_ConfigAudio(minimig_config.audio);
+
+	// Joystick mode lives in autofire bits [2:1] (0=Digital, 1=Analog, 2=CD32).
+	// userio.v:466 decodes it as cd32pad = ~IO_DIN[1] & IO_DIN[2], and only
+	// feeds the CD32 pad shift register when that is set (userio.v:332). In
+	// Digital mode the red button is still readable as plain pin-6 fire, so a
+	// game that polls fire directly works while one that clocks the serial pad
+	// protocol reads nothing -- Lotus Trilogy's title selector responds, its
+	// in-game menu does not, and directions keep working throughout because
+	// they come from the JOYxDAT quadrature counters, not the shift register.
+	//
+	// The full Minimig OSD lets the player pick the mode, but AmigaCD jumps
+	// straight to MENU_AMIGACD_MAIN1 (menu.cpp:5828) and never shows that row,
+	// so on this variant it can only ever be whatever was stored -- 0 for a
+	// fresh config. A real CD32 always has a CD32 pad and a CDTV never does,
+	// so derive it from the system instead of trusting the saved value.
+	if (is_amigacd())
+	{
+		minimig_config.autofire = (minimig_config.autofire & ~6) |
+		                          (amigacd_is_cdtv() ? 0 : 4);
+	}
 	minimig_ConfigAutofire(minimig_config.autofire, 0xC);
 	minimig_set_extcfg(minimig_get_extcfg() & ~1);
 }
