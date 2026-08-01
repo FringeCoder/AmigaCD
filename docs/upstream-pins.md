@@ -49,16 +49,22 @@ The two lines fork at `59df90f` (2026-05-30): 8 commits on `amiga-console`,
 - `a27f4e8` keeps `CONF_STR = "AmigaCD"`, so `is_amigacd()` still resolves and
   the console OSD, per-game NVRAM and physical-disc paths are unaffected.
 
-**Lost — decide before trusting a build**
+**Lost — resolved on hardware 2026-08-01, do not re-litigate**
 
 `c3d412b` (Fix B, "private `chipRD_dma` return reg for DMA-stolen slots") is
 **absent by content**: `chipRD_dma` appears nowhere in `amigacd-core`'s
 `sdram_ctrl.v` or `chipdma_arb.v`. `3a1005f`'s in-flight bleed gate also differs
-(`slot_cnt` 12 hits vs 7). The read is that kblood replaced the Fix B approach
-with `b3f46cb`'s owner-freeze rather than carrying it forward, but that is
-inference from commit shape, not confirmation. Reverting Fix B on the old line
-moved timing by ~160 ps and nothing else, so it was never shown to be doing
-observable work — equally, it was never shown to be unnecessary.
+(`slot_cnt` 12 hits vs 7).
+
+This was the one thing that could have sent us back to `amiga-console`, since
+Fix B and the Deep Core commits are exactly about CD sector delivery. **A core
+built from `amigacd-core` was flashed and tested on 2026-08-01 and works**, so
+`b3f46cb`'s owner-freeze does cover the ground Fix B covered and cherry-picking
+`c3d412b` on top is unnecessary. Do not add it back speculatively.
+
+Worth keeping in mind if a *future* sector-delivery bug appears: reverting Fix B
+on the old line moved timing by only ~160 ps, so it was never shown to be doing
+observable work there either. It is not a proven-good patch being withheld.
 
 **Consequence for userspace.** `8178ddd` removes the RTL trace rings, so
 `akiko_drain_trace()`, `chipset_trace_drain()` and `z2_trace_drain()` now poll
