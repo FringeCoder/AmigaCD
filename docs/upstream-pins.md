@@ -6,7 +6,8 @@ against. Re-verify line numbers after moving off these.
 | Repo | Branch | Commit | Date |
 |---|---|---|---|
 | `kblood/Main_MiSTer-cd32-cdtv` | `amiga-console` | `52625a4` "AmigaCD: add Save settings to the console OSD" | 2026-06-14 |
-| `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amiga-console` | `c5eb180` | 2026-06-14 |
+| `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
+| ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
 | `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `d24d2b0` "autoboot added" | 2026-07-31 |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
 | `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
@@ -26,9 +27,46 @@ nothing useful. The branches that matter:
 | `cd32-native-mvp` | Akiko + CDTV native bridges (through 2026-05-26) |
 | `amiga-console` | superset: adds CDDA subcode Q-stream, play-end STCH retry, and the AmigaCD console OSD (11 commits ahead, 0 behind) |
 
-We are based on `amiga-console`. It was chosen over `cd32-native-mvp` because
-the CDDA subcode and STCH work overlaps the physical-disc audio path, and
-because its OSD rework is where the "Physical CD" mount entry has to land.
+We were based on `amiga-console` for the same reasons — the CDDA subcode and
+STCH work overlaps the physical-disc audio path, and its OSD rework is where the
+"Physical CD" mount entry lands. **Moved to `amigacd-core` on 2026-08-01.**
+
+## Core branch move: `amiga-console` -> `amigacd-core`
+
+`amigacd-core` is newer (2026-07-29 vs 2026-06-13) and is **not a superset**.
+The two lines fork at `59df90f` (2026-05-30): 8 commits on `amiga-console`,
+17 on `amigacd-core`. Verified by content, not commit identity.
+
+**Gained**
+
+- `rtl/A2065/*` — the Ethernet FPGA half, via the upstream merge `d7c36cc`.
+  This is what makes the host-side A2065 and the Advanced OSD row functional.
+- `b3f46cb` — owner-freeze cross-engine DMA ack fix plus a Deep Core residual
+  fix, a later and differently-shaped attack on the ground `fce5cc5` /
+  `32c0a3c` covered on the old line.
+- Upstream `Minimig-AGA` through `809b955`, de-narrated RTL comments, and
+  `8178ddd` removing the debug trace infrastructure.
+- `a27f4e8` keeps `CONF_STR = "AmigaCD"`, so `is_amigacd()` still resolves and
+  the console OSD, per-game NVRAM and physical-disc paths are unaffected.
+
+**Lost — decide before trusting a build**
+
+`c3d412b` (Fix B, "private `chipRD_dma` return reg for DMA-stolen slots") is
+**absent by content**: `chipRD_dma` appears nowhere in `amigacd-core`'s
+`sdram_ctrl.v` or `chipdma_arb.v`. `3a1005f`'s in-flight bleed gate also differs
+(`slot_cnt` 12 hits vs 7). The read is that kblood replaced the Fix B approach
+with `b3f46cb`'s owner-freeze rather than carrying it forward, but that is
+inference from commit shape, not confirmation. Reverting Fix B on the old line
+moved timing by ~160 ps and nothing else, so it was never shown to be doing
+observable work — equally, it was never shown to be unnecessary.
+
+**Consequence for userspace.** `8178ddd` removes the RTL trace rings, so
+`akiko_drain_trace()`, `chipset_trace_drain()` and `z2_trace_drain()` now poll
+addresses nothing decodes. All three are bounded (128 / `RING_DEPTH`), so there
+is no hang, but if an undecoded read returns `0xFF` the akiko drain runs its
+full 128 iterations at 4 SPI reads each — 512 wasted transfers per poll. Taking
+kblood's `63d848d` (removes the drains and the trace files outright) is the
+matching userspace change.
 
 ## Other branches (not used)
 
