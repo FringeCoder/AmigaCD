@@ -459,26 +459,42 @@ image and a real external drive, and the board-detection line.
   from `Minimig.sv`, landing above `mt32_cfg`/`mt32_available` in `status_menumask`.
 - `DSK_WRITABLE` — absent means write-protected, rendered by Rob as the padlock glyph `\x17`
 
-- [ ] **Step 1: Raise the AmigaCD default drive count to 2**
+- [ ] **Step 1: Confirm the drive count needs no change (it does not)**
 
-`amigacd_apply_system()` currently pins a single drive:
+**Resolved 2026-08-02 — this step is a no-op, kept so nobody re-opens it.**
+
+`amigacd_apply_system()` sets:
 
 ```c
 if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1; // single df0
 ```
 
-**Determine the encoding before changing anything.** Rob's OSD loops `i <= minimig_config.floppy.drives`,
-which implies `drives` is a count-minus-one (`0` = df0 only, `1` = df0+df1). If that holds,
-the existing line already yields two drives and this step is a no-op. Confirm by reading
-`minimig_ConfigFloppy` and the RTL `floppy_config` decode:
+`drives` is a **count-minus-one**, not a count. `paula_floppy.v:161` declares
+`reg [1:0] drives; //number of currently connected floppy drives (1-4)` and the ready decode
+at `:389-391` is:
 
-```bash
-grep -n "minimig_ConfigFloppy" support/minimig/minimig_config.cpp
-grep -n "floppy_config" upstream/core-cd32-cdtv/rtl/*.v
+```verilog
+assign _ready = (_sel[3] | ~(drives[1] & drives[0]))   // df3 exists when drives == 3
+              & (_sel[2] | ~drives[1])                  // df2 exists when drives >= 2
+              & (_sel[1] | ~(drives[1] | drives[0]))    // df1 exists when drives >= 1
 ```
 
-Write down which it is in the commit message. If it is a plain count, change the `1` to `2`
-and re-check that `amigacd_apply_system` is not clamping it back down elsewhere.
+So `drives == 1` already means **df0 and df1 both exist and report ready**. The full Minimig
+OSD agrees: it clamps increments at `drives < 3`, i.e. four drives max.
+
+The core has therefore been presenting two drives all along. The AmigaCD OSD shows a single
+Floppy line purely because `MENU_AMIGACD_MAIN1` draws one hardcoded row — df1 is live but has
+no way to mount anything. **This task is a pure menu change.** Only fix the comment, which
+currently says the opposite of what the line does:
+
+```c
+// drives is a COUNT-MINUS-ONE: 0 = df0 only, 1 = df0+df1 (paula_floppy.v:389).
+// Mr Floppy presents two drives, which this already satisfies. extDrives[] is
+// sized 4 for the eventual Amiga maximum.
+if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1;
+```
+
+Going to four drives later means `drives = 3` plus two more OSD rows — no data-structure work.
 
 - [ ] **Step 2: Add the DF1 row to the main menu**
 
