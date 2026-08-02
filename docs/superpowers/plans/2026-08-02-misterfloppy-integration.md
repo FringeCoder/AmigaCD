@@ -284,6 +284,12 @@ this commit exists to prove the core still fits and still meets timing."
 Make `.scp` images mountable in `df0`. This is the payoff for the Greaseweazle: dump on the
 PC with `gw read --format amiga.amigados out.scp`, copy over, mount.
 
+**SCP has no external dependency.** `scpfile.cpp` includes only `scpfile.h`, `<algorithm>`,
+`<utility>`, `<cstring>`, `<stdio.h>` and `debug.h` — zero references to `dlopen` or CAPS.
+The `libcapsimg.so` that Rob's download page lists is **IPF-only** (his table labels it
+"IPF Support"), and it lands in Task 3. So the whole Greaseweazle → SCP → `df0` path works
+with nothing installed beyond our own binary, which is what makes it the recommended route.
+
 **Files:**
 - Create: `support/minimig/scpfile.{cpp,h}`
 - Modify: `support/minimig/minimig_fdd.{cpp,h}`, `user_io.h`, `Makefile`
@@ -409,9 +415,16 @@ git show robsmith-main/master:support/minimig/ipffile.cpp > support/minimig/ipff
 
 `ipffile.cpp:85` does `dlopen("/media/fat/linux/libcapsimg.so", RTLD_NOW)`. That library is
 **not in this repo and is not open source** — it is the SPS/CAPS decoder, distributed
-separately. Add a comment at the top of `ipffile.cpp` recording that IPF silently degrades to
-"unsupported" when the `.so` is absent, so nobody debugs a missing feature that is really a
-missing file.
+separately. Per RobSmithDev's download page it ships as `CAPSIMG/libcapsimg.so` and installs
+to `/media/fat/linux`, listed there against "IPF Support".
+
+**It is IPF-only.** SCP does not touch it (Task 2), so a missing library costs IPF and nothing
+else — ADF and SCP are unaffected.
+
+`caps_init()` (declared `file_io.h:161`, defined `ipffile.cpp:77`) is the load probe. It gates
+both the decoder and the OSD file filter (Task 4 Step 6), so absence degrades to "IPF is not
+offered" rather than "IPF fails at mount". Add a comment at the top of `ipffile.cpp` recording
+that, so nobody debugs a missing feature that is really a missing file.
 
 - [ ] **Step 3: Build via CI**
 
@@ -632,8 +645,20 @@ else if (c == KEY_BACKSPACE && (menusub == 2 || menusub == 3))
 
 - [ ] **Step 6: Extend the file filter to flux formats**
 
-Change `ADF` to `ADFSCPIPF` (or `ADFSCP` if Task 3 was skipped — offering a filter for a
-format that cannot open produces a confusing failure at mount time).
+Select the filter **at runtime**, exactly as Rob does at `menu.cpp:6011`, so IPF is only
+offered when the decoder actually loaded:
+
+```c
+const char *ext = caps_init() ? "ADFSCPIPF" : "ADFSCP";
+strcpy(fs_pFileExt, ext);
+if (select) SelectFile(Selected_F[unit], ext, fs_Options, fs_MenuSelect, fs_MenuCancel);
+```
+
+`caps_init()` is declared in `file_io.h` and defined in `ipffile.cpp:77`; it returns false when
+`/media/fat/linux/libcapsimg.so` is absent. Offering a filter for a format that cannot open
+produces a confusing failure at mount time, which this avoids without a build-time switch.
+
+**SCP is always offered** — it needs no external library (see Task 2).
 
 Verified this works: `file_io.cpp:1455` and `:1752` walk the filter in 3-char groups
 (`ext += 3`), and `fs_pFileExt` is `char[13]`, so three extensions fit with room to spare.
