@@ -12,6 +12,10 @@ console OSD, with ADF write-back and real-drive writes included.
 Two drives now because that is what the Mr Floppy board presents; `extDrives[]` is sized 4 so
 growing to the Amiga maximum later is a menu change, not a data-structure change.
 
+**All three image formats are in scope.** ADF (with write-back), SCP and IPF. SCP needs
+nothing external; IPF needs `libcapsimg.so` at `/media/fat/linux`, and that dependency is
+accepted rather than designed around — it is how most protected originals are preserved.
+
 **Architecture:** Rob's fork splits cleanly. Seven new `MiSTerFloppy*` RTL modules plus a
 rewritten `paula_floppy.v` are drop-in files; only `minimig.v`, `userio.v` and `Minimig.sv`
 need merging against kblood's work. Userspace gains a `FluxFile` abstraction with `SCPFile`
@@ -394,7 +398,15 @@ IPF is deliberately excluded here; it needs libcapsimg and lands separately."
 
 ---
 
-### Task 3: IPF support
+### Task 3: IPF support — required
+
+In scope, not optional. The external `libcapsimg.so` dependency is accepted: IPF is the
+format most protected Amiga originals are preserved in, and re-implementing the CAPS decoder
+is not on the table.
+
+**Task 4 depends on this.** Its file filter calls `caps_init()`, which is declared in
+`file_io.h` and defined here in `ipffile.cpp:77` — build Task 4 without Task 3 and it fails to
+link. Run them in order, or land both before building.
 
 **Files:**
 - Create: `support/minimig/ipffile.{cpp,h}`, `support/minimig/capsapi/{CapsAPI.h,Comtype.h,LICENSE.txt}`
@@ -457,6 +469,9 @@ so the two behave identically where they overlap.
 
 Three deliverables: a second floppy drive on the main menu, per-drive selection between an
 image and a real external drive, and the board-detection line.
+
+**Depends on Task 3** — Step 6 calls `caps_init()`, defined in `ipffile.cpp`. Without it this
+task does not link.
 
 **Files:**
 - Modify: `menu.cpp` (AmigaCD console menu only), `support/minimig/minimig_config.cpp`
