@@ -824,6 +824,14 @@ exists and cannot be substituted in software.
 
   So ADF write-back comes with Task 2 for free, real-drive write comes with Task 5, and flux
   write cannot be "added" without designing an encoder Rob never wrote.
+
+  **Enabling write cannot corrupt a flux image.** `InsertFloppy`'s flux branch sets
+  `drive->status = DSK_INSERTED | DSK_FLUXMODE` and deliberately **omits `DSK_WRITABLE`**
+  (`minimig_fdd.cpp:740`), then returns before `drive->file` is even opened. `WriteTrack()`
+  gates every `FileWriteSec` on `DSK_WRITABLE` and otherwise raises Error 30, so a mounted
+  SCP or IPF presents to the Amiga as a write-protected disk and no write reaches it. The
+  padlock glyph in Task 4 Step 3 will therefore always show on flux mounts — that is correct,
+  not a bug to fix.
 - `MiSTerFloppyIBM.v` is carried but never instantiated — PC-format decode is not wired up.
 - Rob's `menu.cpp` changes, his `minimig_config.cpp` changes (+105) beyond what Tasks 2–4
   require, and his N64/Apple IIgs commits, which are unrelated upstream merges.
