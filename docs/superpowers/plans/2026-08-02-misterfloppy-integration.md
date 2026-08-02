@@ -207,7 +207,17 @@ design; it actually closes.
 But 17 ps is not headroom — it is a design sitting exactly on the line, so expect this to need
 attention rather than to sail through.
 
-Two things make that less alarming than it sounds:
+**Device utilisation, same build (`5CSEBA6U23I7`, Quartus 17.0.2):**
+
+| Resource | Used | Free |
+|---|---|---|
+| ALMs | 22,619 / 41,910 (54%) | **19,291** |
+| Block memory | 1,977,756 / 5,662,720 (35%) | 65% |
+| DSP blocks | 67 / 112 (60%) | 45 |
+| PLLs | 3 / 6 (50%) | 3 |
+| Pins | 145 / 314 (46%) | 169 |
+
+Three things make that less alarming than it sounds:
 
 - `MiSTerFloppyPLL.v` is a **digital data separator**, not a hardware PLL. It has zero Altera
   megafunction references and runs on the existing `clk`/`clk7_en` 28 MHz domain. It consumes
@@ -215,11 +225,20 @@ Two things make that less alarming than it sounds:
   paths to close.
 - The floppy logic all sits on that same slow 28 MHz domain, well away from the SDRAM/CPU
   paths where the critical path actually lives.
+- **The device is only 54% full.** ~2,100 lines of control-path Verilog with no DSP or memory
+  demands should land in the low thousands of ALMs — call it 2–4 points of utilisation against
+  19,291 free. Routing congestion is not a plausible limiter at this fill level, and the
+  fitter has ample room to place the new logic away from the critical path. The SNAC pins are
+  already declared in `sys_top` as `USER_IN`/`USER_OUT`, so no new pins are needed either.
 
-The realistic failure mode is therefore **area and routing congestion** pushing the existing
-critical path over, not the floppy logic itself failing to close. If that happens, the
-fallback is to fork `paula_floppy.v` and remove the `MiSTerFloppySHUGART` instantiation,
-dropping the real-drive path to buy back area for the image path.
+So the honest read is that Task 1 is **likely to be routine**. The residual risk is not area
+but placement luck: 17 ps is thin enough that a fitter reshuffle alone could tip an unrelated
+path negative, and a re-run with a different seed may be all that is needed. Treat a single
+marginal failure as noise to re-run, not as proof the port cannot work.
+
+If it genuinely will not close, the fallback is to fork `paula_floppy.v` and remove the
+`MiSTerFloppySHUGART` instantiation, dropping the real-drive path to buy back area for the
+image path. On these numbers that should not be necessary.
 
 - [ ] **Step 8: Hardware regression — nothing should have changed yet**
 
@@ -527,7 +546,7 @@ exists and cannot be substituted in software.
 
 | Risk | Signal | Response |
 |---|---|---|
-| Quartus area/timing | Task 1 Step 7 reports **any** failing setup path (baseline: passes, +0.017 ns worst slack) | Fork `paula_floppy.v`, drop the `MiSTerFloppySHUGART` instantiation, keep the image path |
+| Quartus timing | Task 1 Step 7 reports **any** failing setup path (baseline: passes, +0.017 ns) | Re-run first â 17 ps is thin enough that fitter placement alone can tip it. Only if it reproduces: fork `paula_floppy.v`, drop `MiSTerFloppySHUGART` |
 | `userio.v` merge breaks CD32 pad | Fire button dead in Lotus in-game menu | Re-check the `cd32pad` line survived Step 5 verbatim |
 | `minimig_fdd.cpp` overwrite breaks ADF | Task 2 Step 7 | Diff our file against `0f3a6ad` to find what was assumed absent |
 | IPF unusable | `libcapsimg.so` missing | Expected for most users; must degrade cleanly, not crash |
