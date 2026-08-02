@@ -5,8 +5,12 @@
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bring RobSmithDev's MiSTer Floppy work — flux-accurate SCP/IPF disk images and
-optional real-drive support over the SNAC port — into the AmigaCD core, so real Amiga
-floppies (dumped with a Greaseweazle) and protected originals both work in `df0`.
+real-drive support over the SNAC port — into the AmigaCD core, so real Amiga floppies
+(dumped with a Greaseweazle) and protected originals both work, across **two** drives in the
+console OSD, with ADF write-back and real-drive writes included.
+
+Two drives now because that is what the Mr Floppy board presents; `extDrives[]` is sized 4 so
+growing to the Amiga maximum later is a menu change, not a data-structure change.
 
 **Architecture:** Rob's fork splits cleanly. Seven new `MiSTerFloppy*` RTL modules plus a
 rewritten `paula_floppy.v` are drop-in files; only `minimig.v`, `userio.v` and `Minimig.sv`
@@ -89,7 +93,11 @@ onto our newer base, never the reverse.
 - `Makefile` — add `-ldl` to `IMLIB2_LIB` (needed by `ipffile.cpp`).
 - `menu.cpp` — **do not take Rob's 216 lines.** They target the full Minimig OSD; AmigaCD
   jumps to `MENU_AMIGACD_MAIN1` at `menu.cpp:5828` and never renders that page. Write our own
-  rows against the console menu instead (Task 5).
+  rows against the console menu instead (Task 4), mirroring his semantics.
+- `support/minimig/minimig_config.{cpp,h}` — `mm_floppyTYPE` gains `extDrives[4]`,
+  `mm_userportMode` enum (`mmup_mp32pi=0`, `mmup_misterfloppy=1`), `minimig_ConfigUserPort()`.
+  Note `mm_floppyTYPEOld` exists alongside for config-version migration — take it, or saved
+  configs written before this change will not load.
 
 ---
 
@@ -428,65 +436,260 @@ it is not open source. IPF degrades to unsupported when it is absent."
 
 ---
 
-### Task 4: AmigaCD OSD rows
+### Task 4: AmigaCD OSD — two drives, external-drive selection, detection line
 
 Rob's 216 lines of `menu.cpp` target the full Minimig OSD, which AmigaCD never renders
-(`menu.cpp:5828` jumps to `MENU_AMIGACD_MAIN1`). Write our own rows.
+(`menu.cpp:5828` jumps to `MENU_AMIGACD_MAIN1`). Write our own rows, borrowing his semantics
+so the two behave identically where they overlap.
+
+Three deliverables: a second floppy drive on the main menu, per-drive selection between an
+image and a real external drive, and the board-detection line.
 
 **Files:**
-- Modify: `menu.cpp` (AmigaCD console menu only)
+- Modify: `menu.cpp` (AmigaCD console menu only), `support/minimig/minimig_config.cpp`
+  (`amigacd_apply_system` floppy drive count)
 
-- [ ] **Step 1: Extend the Floppy row's file filter**
+**Interfaces consumed (from Rob, via Tasks 2-3):**
+- `minimig_config.floppy.extDrives[4]` — per-drive: `0` = use the mounted image,
+  `1` = External Drive 0/A, `2` = External Drive 1/B, `3`/`4` = drives 2/3
+- `minimig_config.userport` of type `mm_userportMode`: `mmup_mp32pi=0`, `mmup_misterfloppy=1`
+- `minimig_ConfigUserPort(mm_userportMode)` and `minimig_ConfigFloppy(drives, speed)`
+- `osdMask` bit 6 (`64`) = board detected, bit 7 (`128`) = IBM/PC vs Shugart,
+  bit 8 (`256`) = cable straight (`=`) vs crossed (`X`). These are `mister_floppy_status`
+  from `Minimig.sv`, landing above `mt32_cfg`/`mt32_available` in `status_menumask`.
+- `DSK_WRITABLE` — absent means write-protected, rendered by Rob as the padlock glyph `\x17`
 
-The AmigaCD Floppy row currently sets `strcpy(fs_pFileExt, "ADF")`. Change it to `ADFSCPIPF`
-so flux images appear in the browser.
+- [ ] **Step 1: Raise the AmigaCD default drive count to 2**
 
-Verified this works: `file_io.cpp:1455` and `:1752` walk the filter in 3-char groups
-(`ext += 3`), and `fs_pFileExt` is `char[13]`, so three extensions (9 chars) fit with room to
-spare. `file_io.cpp:1437` returns early for filters longer than 3 chars, but that is the
-*display-name* path deciding whether to strip the extension — with a multi-extension filter
-the extension stays visible in the listing, which is what we want here since `.adf` and
-`.scp` otherwise look identical.
-
-If IPF is not built (Task 3 skipped), use `ADFSCP` instead — offering a filter for a format
-that cannot open produces a confusing failure at mount time.
-
-- [ ] **Step 2: Show flux state on the Floppy row**
-
-When `df[0].status & DSK_FLUXMODE`, append a marker so the player can see the disk is being
-served as flux rather than as a decoded ADF:
+`amigacd_apply_system()` currently pins a single drive:
 
 ```c
-strcpy(s, " Floppy   : ");
-if (df[0].status & DSK_INSERTED)
-{
-    char *p = strrchr(df[0].name, '/');
-    strncat(s, p ? p + 1 : df[0].name, 20);
-    if (df[0].status & DSK_FLUXMODE) strcat(s, " [flux]");
-}
-else strcat(s, "* no disk *");
-OsdWrite(m++, s, menusub == 2, 0);
+if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1; // single df0
 ```
 
-- [ ] **Step 3: Build via CI, then hardware-check**
-
-Mount an ADF (no marker), then an SCP (`[flux]` marker). Confirm the Advanced and Settings
-rows still work — this file's row numbering has bitten us before (PR #8 renumbered nine rows).
-
-- [ ] **Step 4: Commit**
+**Determine the encoding before changing anything.** Rob's OSD loops `i <= minimig_config.floppy.drives`,
+which implies `drives` is a count-minus-one (`0` = df0 only, `1` = df0+df1). If that holds,
+the existing line already yields two drives and this step is a no-op. Confirm by reading
+`minimig_ConfigFloppy` and the RTL `floppy_config` decode:
 
 ```bash
-git add menu.cpp
-git commit -m "AmigaCD: browse flux images and show flux mode on the Floppy row
-
-The console OSD filtered the floppy browser to ADF, so SCP and IPF images were
-invisible even once the code could open them. Rob's 216 lines of menu.cpp are
-deliberately not taken -- they target the full Minimig OSD, which AmigaCD never
-renders (menu.cpp:5828 jumps to MENU_AMIGACD_MAIN1).
-
-Also marks a flux-served disk as [flux] on the row, since .adf and .scp are
-otherwise indistinguishable once mounted."
+grep -n "minimig_ConfigFloppy" support/minimig/minimig_config.cpp
+grep -n "floppy_config" upstream/core-cd32-cdtv/rtl/*.v
 ```
+
+Write down which it is in the commit message. If it is a plain count, change the `1` to `2`
+and re-check that `amigacd_apply_system` is not clamping it back down elsewhere.
+
+- [ ] **Step 2: Add the DF1 row to the main menu**
+
+The main menu is currently 9 rows (`menumask = 0x1FF`, PR #8). Adding DF1 makes it 10:
+
+| menusub | Row |
+|---|---|
+| 0 | CD |
+| 1 | Real CD |
+| 2 | **Floppy DF0** |
+| 3 | **Floppy DF1** (new) |
+| 4 | System |
+| 5 | Settings |
+| 6 | Advanced |
+| 7 | Save settings |
+| 8 | Reset |
+| 9 | Exit |
+
+Set `menumask = 0x3FF` and renumber every handler case in `MENU_AMIGACD_MAIN2`. **This file's
+row numbering has bitten us before** — PR #8 renumbered nine rows and every handler had to
+move with them. Enumerate all `menusub ==` occurrences in the handler and check for gaps and
+duplicates before building:
+
+```bash
+awk 'NR>=6580 && NR<=6800 && /menusub ==/ {print NR": "$0}' menu.cpp
+```
+
+Also update the two submenu return points, which currently set `menusub = 4` (Settings) and
+`menusub = 5` (Advanced) on Back — they become `5` and `6`.
+
+- [ ] **Step 3: Render both floppy rows with image, flux, write-protect and external drive**
+
+Factor the row into a helper so DF0 and DF1 cannot drift apart:
+
+```c
+// One floppy row. `unit` is 0 or 1; `sel` is the menusub this row owns.
+static void amigacd_floppy_row(int m, int unit, int sel)
+{
+    char s[64];
+    snprintf(s, sizeof(s), " Floppy %d : ", unit);
+
+    if (df[unit].status & DSK_INSERTED)
+    {
+        char *p = strrchr(df[unit].name, '/');
+        strncat(s, p ? p + 1 : df[unit].name, 18);
+        if (df[unit].status & DSK_FLUXMODE)     strcat(s, " [flux]");
+        if (!(df[unit].status & DSK_WRITABLE))  strcat(s, " \x17"); // padlock
+    }
+    else
+    {
+        // No image: show the external drive assignment if Mr Floppy owns the
+        // user port. Letters vs digits track the detected drive type, matching
+        // Rob's menu.cpp:5831 -- A/B for IBM/PC, 0/1 for Shugart.
+        int ext = (minimig_config.userport == mmup_misterfloppy)
+                ? minimig_config.floppy.extDrives[unit] : 0;
+        switch (ext)
+        {
+            case 1:
+                strcat(s, "External Drive ");
+                strcat(s, (osdMask & 64) ? ((osdMask & 128) ? "A" : "0") : "0/A");
+                break;
+            case 2:
+                strcat(s, "External Drive ");
+                strcat(s, (osdMask & 64) ? ((osdMask & 128) ? "B" : "1") : "1/B");
+                break;
+            default:
+                strcat(s, "* no disk *");
+                break;
+        }
+    }
+    OsdWrite(m, s, menusub == sel, 0);
+}
+```
+
+Call it twice from `MENU_AMIGACD_MAIN1`:
+
+```c
+amigacd_floppy_row(m++, 0, 2);
+amigacd_floppy_row(m++, 1, 3);
+```
+
+- [ ] **Step 4: Handle selection on both rows**
+
+`select` opens the file browser; `minus`/`plus` cycle the external-drive assignment when Mr
+Floppy owns the user port, so a real drive can be attached without a disk image:
+
+```c
+else if (menusub == 2 || menusub == 3) // Floppy DF0 / DF1
+{
+    int unit = menusub - 2;
+    if (minus || plus)
+    {
+        if (minimig_config.userport == mmup_misterfloppy)
+        {
+            // 0 = image, 1 = external A/0, 2 = external B/1. Two drives today;
+            // extDrives[] is sized 4 for the eventual Amiga maximum.
+            int e = minimig_config.floppy.extDrives[unit];
+            e = plus ? (e + 1) % 3 : (e + 2) % 3;
+            minimig_config.floppy.extDrives[unit] = e;
+            if (e) { df[unit].status = 0; FileClose(&df[unit].file); }
+            menustate = MENU_AMIGACD_MAIN1;
+        }
+    }
+    else if (select || recent)
+    {
+        minimig_config.floppy.extDrives[unit] = 0;   // an image overrides the external drive
+        df[unit].status = 0;
+        fs_Options = SCANO_DIR;
+        fs_MenuSelect = MENU_AMIGACD_ADFFILE_SELECTED;
+        fs_MenuCancel = MENU_AMIGACD_MAIN1;
+        strcpy(fs_pFileExt, "ADFSCPIPF");
+        if (select) SelectFile(Selected_F[unit], "ADFSCPIPF", fs_Options, fs_MenuSelect, fs_MenuCancel);
+        else if (recent_init(unit)) menustate = MENU_RECENT1;
+    }
+}
+```
+
+`MENU_AMIGACD_ADFFILE_SELECTED` currently hardcodes `df[0]`. It must insert into the unit the
+row owns. Add a file-scope `static int amigacd_fdd_unit = 0;`, set it immediately before
+`SelectFile`, and use it in the selection handler in place of the literal `0`.
+
+- [ ] **Step 5: Backspace ejects the row's own drive**
+
+The existing handler is `else if (c == KEY_BACKSPACE && menusub == 2)`. Extend to both:
+
+```c
+else if (c == KEY_BACKSPACE && (menusub == 2 || menusub == 3))
+{
+    int unit = menusub - 2;
+    df[unit].status = 0;
+    FileClose(&df[unit].file);
+    menustate = MENU_AMIGACD_MAIN1;
+}
+```
+
+- [ ] **Step 6: Extend the file filter to flux formats**
+
+Change `ADF` to `ADFSCPIPF` (or `ADFSCP` if Task 3 was skipped — offering a filter for a
+format that cannot open produces a confusing failure at mount time).
+
+Verified this works: `file_io.cpp:1455` and `:1752` walk the filter in 3-char groups
+(`ext += 3`), and `fs_pFileExt` is `char[13]`, so three extensions fit with room to spare.
+`file_io.cpp:1437` returns early for filters longer than 3 chars, but that is the
+*display-name* path deciding whether to strip the extension — with a multi-extension filter
+the extension stays visible in the listing, which is what we want since `.adf` and `.scp`
+otherwise look identical.
+
+- [ ] **Step 7: Add the User Port row and detection line to the Advanced page**
+
+`MENU_AMIGACD_ADVANCED1` (added in PR #8) currently holds Ethernet and Back, `menumask = 0x3`.
+Add User Port above Ethernet, making it 3 selectable rows (`menumask = 0x7`), with the
+detection line rendered beneath as **non-selectable** (`OsdWrite(..., 0, 1)`):
+
+```c
+strcpy(s, " User Port: ");
+strcat(s, (minimig_config.userport == mmup_misterfloppy) ? "MiSTer Floppy" : "MT32-Pi");
+OsdWrite(m++, s, menusub == 0, 0);
+
+// Detection line. Bits are mister_floppy_status from Minimig.sv:
+//   64 = board detected, 128 = IBM/PC (else Shugart), 256 = straight cable (else crossed).
+if (minimig_config.userport == mmup_misterfloppy)
+{
+    if (osdMask & 64)
+    {
+        strcpy(s, "   ");
+        strcat(s, (osdMask & 256) ? "=" : "X");           // cable: straight / crossed
+        strcat(s, (osdMask & 128) ? " Detected (IBM/PC)"  // drive type
+                                  : " Detected (Shugart)");
+    }
+    else strcpy(s, "   Not Detected");
+    OsdWrite(m++, s, 0, 1);
+}
+```
+
+Cycling the row calls `minimig_ConfigUserPort()`. **The SNAC port is shared with MT32-pi** —
+`Minimig.sv` muxes `USER_OUT` on `user_port_mode` and resets `mt32pi` when it changes
+(`userport_change_reset`), so the two are mutually exclusive by construction. Renumber
+Ethernet to `menusub == 1` and Back to `menusub == 2`, and update both Back return points.
+
+- [ ] **Step 8: Build via CI**
+
+Expected green. Watch for `Selected_F[]` bounds — it is indexed per file-selector slot, and
+DF1 needs its own.
+
+- [ ] **Step 9: Hardware check**
+
+Without the Mr Floppy board attached, everything except detection is still testable:
+
+- DF0 and DF1 both mount ADFs independently, and both boot
+- A write-protected ADF (`chmod a-w`) shows the padlock; a writable one does not
+- An SCP shows `[flux]`
+- **Write-back works**: boot Workbench in DF0, save a file to a writable ADF, reset, confirm
+  it persists. This is the first exercise of `WriteTrack()` in this project.
+- Advanced shows `User Port: MT32-Pi`; switching to `MiSTer Floppy` shows `Not Detected`
+- Settings, Advanced, Save, Reset and Exit all still work — the renumbering in Step 2 is the
+  most likely thing to have broken
+
+With the board attached, the detection line should read `Detected (Shugart)` or
+`Detected (IBM/PC)` with the cable glyph, and cycling a floppy row with `-`/`+` should offer
+the external drives.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add menu.cpp support/minimig/minimig_config.cpp
+git commit -m "AmigaCD: two floppy drives, external-drive selection, board detection"
+```
+
+Full message should record: the row renumbering (9 -> 10, `menumask` `0x1FF` -> `0x3FF`), the
+`floppy.drives` encoding determined in Step 1, and that `extDrives[]` is sized 4 for the Amiga
+maximum with two exposed today.
 
 ---
 
@@ -554,8 +757,17 @@ exists and cannot be substituted in software.
 
 ## Out of scope
 
-- Writing to real disks or writing back to flux images. Rob's code has write paths; this plan
-  covers read only, because a write bug destroys the user's original media.
+- **Nothing about write is excluded** — but note what "write support" actually means here,
+  because the three cases differ and only two exist:
+
+  | Path | Write? | Where |
+  |---|---|---|
+  | ADF images | **yes** | `WriteTrack()` in `minimig_fdd.cpp:618`, sector write-back via `FileWriteSec`, gated on `DSK_WRITABLE` (set from the file's read-only attribute at `:767`) |
+  | Real drive over SNAC | **yes** | RTL (`MiSTerFloppySHUGART`), and interlocked by the board's write jumper |
+  | SCP / IPF flux images | **no such thing** | `FluxFile` declares no write method at all — `fluxRead`, `unFluxRead`, `fluxDummyRead`, `selectTrack` and nothing else. Flux images are read-only by Rob's design, not by a decision in this plan. |
+
+  So ADF write-back comes with Task 2 for free, real-drive write comes with Task 5, and flux
+  write cannot be "added" without designing an encoder Rob never wrote.
 - `MiSTerFloppyIBM.v` is carried but never instantiated — PC-format decode is not wired up.
 - Rob's `menu.cpp` changes, his `minimig_config.cpp` changes (+105) beyond what Tasks 2–4
   require, and his N64/Apple IIgs commits, which are unrelated upstream merges.
