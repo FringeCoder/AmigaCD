@@ -33,6 +33,9 @@ gnueabihf 10.2), GitHub Actions cross-build, MiSTer DE10-Nano.
   `robsmith-core` (RTL) are fetched for extraction only; never push to them.
 - **Every RTL change costs a ~40 minute Quartus run.** Batch RTL edits; do not iterate on
   hardware one line at a time.
+- **Timing baseline: `amigacd-core` passes with +0.017 ns worst-case slack and no failing
+  setup paths** (measured 2026-08-02). Any RTL task that produces a failing path has regressed
+  and must stop, not be tuned around.
 
 ## Reference pins
 
@@ -186,9 +189,36 @@ This is the gate for the entire plan. Record from the compilation report:
 - Total logic utilisation (ALMs) before vs after
 - TimeQuest worst-case slack and TNS
 
-Our baseline before this change ran slightly negative TNS (~−1.9 to −2.1 ns) and still worked.
-If adding ~2,100 lines including a PLL pushes slack materially worse, **stop and report** —
-the fallback is to fork `paula_floppy.v` and remove the `MiSTerFloppySHUGART` instantiation,
+**Baseline, measured on the `amigacd-core` build 2026-08-02:**
+
+```
+This design does not contain any failing setup paths.
+The worst-case slack is 0.017 ns.
+```
+
+So the gate here is **binary, not comparative**: today the design meets timing, and the only
+acceptable result is that it still does. Do not reason about TNS deltas — if any setup path
+fails, that is the stop condition.
+
+Note the earlier ~−1.9 to −2.1 ns TNS figures in this project's history came from
+`amiga-console` builds and do **not** describe the current core. `amigacd-core` is the better
+design; it actually closes.
+
+But 17 ps is not headroom — it is a design sitting exactly on the line, so expect this to need
+attention rather than to sail through.
+
+Two things make that less alarming than it sounds:
+
+- `MiSTerFloppyPLL.v` is a **digital data separator**, not a hardware PLL. It has zero Altera
+  megafunction references and runs on the existing `clk`/`clk7_en` 28 MHz domain. It consumes
+  no PLL resource and introduces **no new clock domain**, so there are no new cross-domain
+  paths to close.
+- The floppy logic all sits on that same slow 28 MHz domain, well away from the SDRAM/CPU
+  paths where the critical path actually lives.
+
+The realistic failure mode is therefore **area and routing congestion** pushing the existing
+critical path over, not the floppy logic itself failing to close. If that happens, the
+fallback is to fork `paula_floppy.v` and remove the `MiSTerFloppySHUGART` instantiation,
 dropping the real-drive path to buy back area for the image path.
 
 - [ ] **Step 8: Hardware regression — nothing should have changed yet**
@@ -497,7 +527,7 @@ exists and cannot be substituted in software.
 
 | Risk | Signal | Response |
 |---|---|---|
-| Quartus area/timing | Task 1 Step 7 slack materially worse than −2.1 ns TNS | Fork `paula_floppy.v`, drop the `MiSTerFloppySHUGART` instantiation, keep the image path |
+| Quartus area/timing | Task 1 Step 7 reports **any** failing setup path (baseline: passes, +0.017 ns worst slack) | Fork `paula_floppy.v`, drop the `MiSTerFloppySHUGART` instantiation, keep the image path |
 | `userio.v` merge breaks CD32 pad | Fire button dead in Lotus in-game menu | Re-check the `cd32pad` line survived Step 5 verbatim |
 | `minimig_fdd.cpp` overwrite breaks ADF | Task 2 Step 7 | Diff our file against `0f3a6ad` to find what was assumed absent |
 | IPF unusable | `libcapsimg.so` missing | Expected for most users; must degrade cleanly, not crash |
