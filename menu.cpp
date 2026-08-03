@@ -6569,12 +6569,18 @@ void HandleUI(void)
 				// rendering -- A/B for IBM/PC, 0/1 for Shugart.
 				int ext = (minimig_config.userport == mmup_misterfloppy)
 				        ? minimig_config.floppy.extDrives[fu] : 0;
-				if (ext == 1 || ext == 2)
+				if (ext >= 1 && ext <= 4)
 				{
+					// 1/2 are the pair a Shugart or IBM cable exposes and get the
+					// detected-type label; 3/4 only exist on a 4-drive setup.
 					strcat(s, "External Drive ");
-					if (osdMask & 64) strcat(s, (osdMask & 128) ? ((ext == 1) ? "A" : "B")
-					                                            : ((ext == 1) ? "0" : "1"));
-					else              strcat(s, (ext == 1) ? "0/A" : "1/B");
+					if (ext <= 2)
+					{
+						if (osdMask & 64) strcat(s, (osdMask & 128) ? ((ext == 1) ? "A" : "B")
+						                                            : ((ext == 1) ? "0" : "1"));
+						else              strcat(s, (ext == 1) ? "0/A" : "1/B");
+					}
+					else strcat(s, (ext == 3) ? "2" : "3");
 				}
 				else strcat(s, "* no disk *");
 			}
@@ -6717,21 +6723,50 @@ void HandleUI(void)
 			else if (menusub == 2 || menusub == 3) // Floppy df0 / df1
 			{
 				int fu = menusub - 2;
-				if (minus || plus)
+				if (left || right || minus || plus)
 				{
-					// Cycle the external-drive assignment: image -> ext A/0 ->
-					// ext B/1. Only when Mr Floppy owns the user port; otherwise
-					// there is no external drive to point at.
-					if (minimig_config.userport == mmup_misterfloppy)
+					// Cycle the external-drive assignment. LEFT/RIGHT is the binding that
+					// matters: minus/plus are the keyboard -/+ keys only, so on a gamepad
+					// this was unreachable.
+					//
+					// driveMask is which external drives physically exist. An IBM/PC cable
+					// only carries two, so skip 3 and 4 rather than offer drives that
+					// cannot answer.
+					uint16_t mask16 = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
+					uint8_t  driveMask = 0x0F;
+					if ((mask16 & 64) && (mask16 & 128)) driveMask &= 0x03;
+
+					if (df[fu].status & DSK_INSERTED)   // an image was mounted; eject it
 					{
-						int e = minimig_config.floppy.extDrives[fu];
-						e = plus ? ((e + 1) % 3) : ((e + 2) % 3);
-						minimig_config.floppy.extDrives[fu] = e;
-						if (e) { df[fu].status = 0; FileClose(&df[fu].file); }
-						minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
-						                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
-						menustate = MENU_AMIGACD_MAIN1;
+						FileClose(&df[fu].file);
+						if (df[fu].fluxFile) df[fu].fluxFile->closeFile();
 					}
+
+					// 0 = image, 1..4 = external drive. Skip anything absent or already
+					// claimed by the other unit; fall back to image after a full lap.
+					bool inUse = false;
+					int  loops = 0;
+					do {
+						int e = minimig_config.floppy.extDrives[fu];
+						if (right || plus) e = (e + 1) % 5;
+						else               e = e ? (e - 1) : 4;
+						minimig_config.floppy.extDrives[fu] = (unsigned char)e;
+
+						inUse = false;
+						if (e)
+						{
+							if (!(driveMask & (1 << (e - 1)))) inUse = true;
+							else for (int d = 0; d < 4; d++)
+								if (d != fu && minimig_config.floppy.extDrives[d] == e) inUse = true;
+						}
+						loops++;
+					} while (inUse && loops <= 5);
+					if (inUse) minimig_config.floppy.extDrives[fu] = 0;
+
+					df[fu].status = 0;
+					minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
+					                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
+					menustate = MENU_AMIGACD_MAIN1;
 				}
 				else if (df[fu].status & DSK_INSERTED) // eject
 				{
