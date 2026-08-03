@@ -261,6 +261,10 @@ const char *config_scanlines_msg[] = { "Off", "HQ2x", "CRT 25%" , "CRT 50%" , "C
 const char *config_blank_msg[] = { "Blank", "Blank+" };
 const char *config_dither_msg[] = { "off", "SPT", "RND", "S+R" };
 const char *config_autofire_msg[] = { "        AUTOFIRE OFF", "        AUTOFIRE FAST", "        AUTOFIRE MEDIUM", "        AUTOFIRE SLOW" };
+// Which df unit the AmigaCD floppy browser was opened for, so
+// MENU_AMIGACD_ADFFILE_SELECTED inserts into the row that asked.
+static int amigacd_fdd_unit = 0;
+
 const char *config_joystick_mode[] = { "Digital", "Analog", "CD32", "Analog" };
 const char *config_button_turbo_msg[] = { "OFF", "FAST", "MEDIUM", "SLOW" };
 const char *config_button_turbo_choice_msg[] = { "A only", "B only", "A & B" };
@@ -6504,7 +6508,7 @@ void HandleUI(void)
 		// the core menu itself is reskinned, the MiSTer menu stays reachable.
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 		helptext_idx = 0;
-		menumask = 0x1FF;           // CD, Real CD, Floppy, System, Settings, Advanced, Save, Reset, Exit
+		menumask = 0x3FF;           // CD, Real CD, DF0, DF1, System, Settings, Advanced, Save, Reset, Exit
 		parentstate = menustate;
 
 		int cdtv = amigacd_is_cdtv();
@@ -6539,32 +6543,57 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == 1, 0);
 		}
 
-		// Floppy df0
-		strcpy(s, " Floppy   : ");
-		if (df[0].status & DSK_INSERTED)
+		// df0 and df1. The core has always presented two drives -- floppy.drives
+		// is a count-minus-one and amigacd_apply_system sets it to 1 -- but the
+		// OSD only ever drew one row, so df1 was live with no way to fill it.
+		// extDrives[] is sized 4 for the eventual Amiga maximum.
+		for (int fu = 0; fu < 2; fu++)
 		{
-			char *p = strrchr(df[0].name, '/');
-			strncat(s, p ? p + 1 : df[0].name, 24);
+			sprintf(s, " Floppy %d : ", fu);
+			if (df[fu].status & DSK_INSERTED)
+			{
+				char *p = strrchr(df[fu].name, '/');
+				strncat(s, p ? p + 1 : df[fu].name, 18);
+				// Flux images are read-only by design (InsertFloppy omits
+				// DSK_WRITABLE for them), so the padlock is expected there.
+				if (df[fu].status & DSK_FLUXMODE)    strcat(s, " \x1B");
+				if (!(df[fu].status & DSK_WRITABLE)) strcat(s, " \x17");
+			}
+			else
+			{
+				// No image: show the external drive assignment instead. Letters
+				// vs digits track the detected drive type, matching Rob's
+				// rendering -- A/B for IBM/PC, 0/1 for Shugart.
+				int ext = (minimig_config.userport == mmup_misterfloppy)
+				        ? minimig_config.floppy.extDrives[fu] : 0;
+				if (ext == 1 || ext == 2)
+				{
+					strcat(s, "External Drive ");
+					if (osdMask & 64) strcat(s, (osdMask & 128) ? ((ext == 1) ? "A" : "B")
+					                                            : ((ext == 1) ? "0" : "1"));
+					else              strcat(s, (ext == 1) ? "0/A" : "1/B");
+				}
+				else strcat(s, "* no disk *");
+			}
+			OsdWrite(m++, s, menusub == (uint32_t)(2 + fu), 0);
 		}
-		else strcat(s, "* no disk *");
-		OsdWrite(m++, s, menusub == 2, 0);
 
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " System   : ");
 		strcat(s, cdtv ? "CDTV" : "CD32");
-		OsdWrite(m++, s, menusub == 3, 0);
+		OsdWrite(m++, s, menusub == 4, 0);
 
 		OsdWrite(m++, "", 0, 0);
-		OsdWrite(m++, " Settings                 \x16", menusub == 4, 0);
+		OsdWrite(m++, " Settings                 \x16", menusub == 5, 0);
 		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
 		// page so the everyday options stay a short list.
-		OsdWrite(m++, " Advanced                 \x16", menusub == 5, 0);
-		OsdWrite(m++, " Save settings", menusub == 6, 0);
+		OsdWrite(m++, " Advanced                 \x16", menusub == 6, 0);
+		OsdWrite(m++, " Save settings", menusub == 7, 0);
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 7, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 8, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 8, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 9, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 		break;
@@ -6679,27 +6708,53 @@ void HandleUI(void)
 					}
 				}
 			}
-			else if (menusub == 2) // Floppy df0
+			else if (menusub == 2 || menusub == 3) // Floppy df0 / df1
 			{
-				if (df[0].status & DSK_INSERTED) // eject
+				int fu = menusub - 2;
+				if (minus || plus)
 				{
-					df[0].status = 0;
-					FileClose(&df[0].file);
+					// Cycle the external-drive assignment: image -> ext A/0 ->
+					// ext B/1. Only when Mr Floppy owns the user port; otherwise
+					// there is no external drive to point at.
+					if (minimig_config.userport == mmup_misterfloppy)
+					{
+						int e = minimig_config.floppy.extDrives[fu];
+						e = plus ? ((e + 1) % 3) : ((e + 2) % 3);
+						minimig_config.floppy.extDrives[fu] = e;
+						if (e) { df[fu].status = 0; FileClose(&df[fu].file); }
+						minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
+						                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
+						menustate = MENU_AMIGACD_MAIN1;
+					}
+				}
+				else if (df[fu].status & DSK_INSERTED) // eject
+				{
+					df[fu].status = 0;
+					FileClose(&df[fu].file);
 					menustate = MENU_AMIGACD_MAIN1;
 				}
 				else if (select || recent)
 				{
+					// A chosen image overrides any external-drive assignment.
+					minimig_config.floppy.extDrives[fu] = 0;
+					minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
+					                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
 					ioctl_index = 0;
-					df[0].status = 0;
+					amigacd_fdd_unit = fu;
+					df[fu].status = 0;
 					fs_Options = SCANO_DIR;
 					fs_MenuSelect = MENU_AMIGACD_ADFFILE_SELECTED;
 					fs_MenuCancel = MENU_AMIGACD_MAIN1;
-					strcpy(fs_pFileExt, "ADF");
-					if (select) SelectFile(Selected_F[0], "ADF", fs_Options, fs_MenuSelect, fs_MenuCancel);
-					else if (recent_init(0)) menustate = MENU_RECENT1;
+					// IPF only when the CAPS decoder actually loaded, matching
+					// what upstream does -- otherwise the browser offers a format
+					// that cannot open.
+					const char *fext = caps_init() ? "ADFSCPIPF" : "ADFSCP";
+					strcpy(fs_pFileExt, fext);
+					if (select) SelectFile(Selected_F[fu], fext, fs_Options, fs_MenuSelect, fs_MenuCancel);
+					else if (recent_init(fu)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 3) // System: toggle CD32 <-> CDTV
+			else if (menusub == 4) // System: toggle CD32 <-> CDTV
 			{
 				if (select || minus || plus)
 				{
@@ -6710,17 +6765,17 @@ void HandleUI(void)
 					menustate = MENU_AMIGACD_MAIN1;
 				}
 			}
-			else if (menusub == 4 && select) // Settings submenu
+			else if (menusub == 5 && select) // Settings submenu
 			{
 				menusub = 0;
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 5 && select) // Advanced submenu
+			else if (menusub == 6 && select) // Advanced submenu
 			{
 				menusub = 0;
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 6 && select) // Save settings -> default config slot 0
+			else if (menusub == 7 && select) // Save settings -> default config slot 0
 			{
 				// Persists the whole minimig_config: mounted CD (hardfile[0]),
 				// RAM (memory), CPU/chipset (System profile), D-Cache and ROMs.
@@ -6731,20 +6786,21 @@ void HandleUI(void)
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 7 && select) // Reset
+			else if (menusub == 8 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 8 && select) // Exit
+			else if (menusub == 9 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
 		}
-		else if (c == KEY_BACKSPACE && menusub == 2) // eject floppy
+		else if (c == KEY_BACKSPACE && (menusub == 2 || menusub == 3)) // eject floppy
 		{
-			df[0].status = 0;
-			FileClose(&df[0].file);
+			int fu = menusub - 2;
+			df[fu].status = 0;
+			FileClose(&df[fu].file);
 			menustate = MENU_AMIGACD_MAIN1;
 		}
 		else if (right) // -> stock MiSTer "System" menu (load cores / reboot)
@@ -6873,7 +6929,7 @@ void HandleUI(void)
 			else if (menusub == 4 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
-				menusub = 4;
+				menusub = 5;   // Settings row
 			}
 		}
 		break;
@@ -6885,10 +6941,34 @@ void HandleUI(void)
 	{
 		OsdSetTitle("Advanced", 0);
 		helptext_idx = 0;
-		menumask = 0x3;             // Ethernet, Back
+		menumask = 0x7;             // User Port, Ethernet, Back
 		parentstate = menustate;
 
 		m = 0;
+		OsdWrite(m++, "", 0, 0);
+
+		// The SNAC user port is shared with MT32-pi: Minimig.sv muxes USER_OUT
+		// on this and resets mt32pi when it changes, so the two are mutually
+		// exclusive by construction.
+		strcpy(s, " User Port: ");
+		strcat(s, (minimig_config.userport == mmup_misterfloppy) ? "MiSTer Floppy" : "MT32-Pi");
+		OsdWrite(m++, s, menusub == 0, 0);
+
+		// Board detection, straight from mister_floppy_status in Minimig.sv:
+		// bit 6 detected, bit 7 IBM/PC vs Shugart, bit 8 cable straight vs
+		// crossed. Informational, so drawn unselectable.
+		if (minimig_config.userport == mmup_misterfloppy)
+		{
+			if (osdMask & 64)
+			{
+				strcpy(s, "   ");
+				strcat(s, (osdMask & 256) ? "=" : "X");
+				strcat(s, (osdMask & 128) ? " Detected (IBM/PC)" : " Detected (Shugart)");
+			}
+			else strcpy(s, "   Not Detected");
+			OsdWrite(m++, s, 0, 1);
+		}
+
 		OsdWrite(m++, "", 0, 0);
 
 		// A2065 ZorroII Ethernet. Mirrors the row on the full Minimig Chipset
@@ -6896,14 +6976,14 @@ void HandleUI(void)
 		// drift apart in behaviour.
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		OsdWrite(m++, s, menusub == 0, 0);
+		OsdWrite(m++, s, menusub == 1, 0);
 
 		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
 		OsdWrite(m++, " is always present either way.", 0, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 1, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 2, 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -6917,11 +6997,18 @@ void HandleUI(void)
 		else if (back || left)
 		{
 			menustate = MENU_AMIGACD_MAIN1;
-			menusub = 5;
+			menusub = 6;   // Advanced row
 		}
 		else if (select || minus || plus)
 		{
-			if (menusub == 0) // Ethernet interface
+			if (menusub == 0) // User Port: MiSTer Floppy <-> MT32-pi
+			{
+				minimig_config.userport = (minimig_config.userport == mmup_misterfloppy)
+				                        ? mmup_mp32pi : mmup_misterfloppy;
+				minimig_ConfigUserPort(minimig_config.userport);
+				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == 1) // Ethernet interface
 			{
 				// OFF -> eth0 -> eth1 -> macvlan -> tap0, skipping anything this
 				// box cannot support (no second NIC, no tun driver, no macvlan).
@@ -6936,10 +7023,10 @@ void HandleUI(void)
 				a2065_set_iface(m2);
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 1 && select) // Back
+			else if (menusub == 2 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
-				menusub = 5;
+				menusub = 6;   // Advanced row
 			}
 		}
 		break;
@@ -6960,10 +7047,10 @@ void HandleUI(void)
 		break;
 
 	case MENU_AMIGACD_ADFFILE_SELECTED:
-		memcpy(Selected_F[0], selPath, sizeof(Selected_F[0]));
+		memcpy(Selected_F[amigacd_fdd_unit], selPath, sizeof(Selected_F[0]));
 		recent_update(SelectedDir, selPath, SelectedLabel, 0);
-		InsertFloppy(&df[0], selPath);
-		menusub = 2;                     // Floppy row (1 is Real CD)
+		InsertFloppy(&df[amigacd_fdd_unit], selPath);
+		menusub = 2 + amigacd_fdd_unit;  // back to the row that opened the browser
 		menustate = MENU_AMIGACD_MAIN1;
 		break;
 
