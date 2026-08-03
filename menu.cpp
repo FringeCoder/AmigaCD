@@ -6613,7 +6613,10 @@ void HandleUI(void)
 			ide_open(0, "");
 			menustate = MENU_AMIGACD_MAIN1;
 		}
-		else if (select || recent || minus || plus)
+		// left/right normally page out to the stock MiSTer menus, but on the
+		// floppy rows they choose the external drive. Let those through here;
+		// the else-if chain then never reaches the paging branches.
+		else if (select || recent || minus || plus || ((left || right) && (menusub == 2 || menusub == 3)))
 		{
 			if (menusub == 0) // CD: always (re)select a disc image
 			{
