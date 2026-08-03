@@ -6512,6 +6512,9 @@ void HandleUI(void)
 		parentstate = menustate;
 
 		int cdtv = amigacd_is_cdtv();
+		// mister_floppy_status rides in the core's OSD mask: bit 6 board
+		// detected, bit 7 IBM/PC vs Shugart, bit 8 cable straight vs crossed.
+		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 		m = 0;
 		OsdWrite(m++, "", 0, 0);
 
@@ -6943,6 +6946,7 @@ void HandleUI(void)
 		helptext_idx = 0;
 		menumask = 0x7;             // User Port, Ethernet, Back
 		parentstate = menustate;
+		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 
 		m = 0;
 		OsdWrite(m++, "", 0, 0);
