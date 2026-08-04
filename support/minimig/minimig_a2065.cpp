@@ -550,6 +550,33 @@ void a2065_stop(void)
 	printf("A2065: stopped\n");
 }
 
+// The FPGA half of the card is always instantiated and polls the DDR3 control
+// words unconditionally, so they must be cleared even when the host interface
+// is off. INT_STATE is the one that matters: the mailbox latches bit 0 into the
+// card's INT2 output, and DDR3 comes up holding whatever the previous core
+// left, so a stale 1 there parks the Amiga in a level-2 interrupt from the
+// moment Exec enables interrupts.
+static void a2065_ddr3_clear(void)
+{
+	volatile uint8_t *m = map;
+	bool borrowed = false;
+
+	if (!m)
+	{
+		m = (volatile uint8_t *)shmem_map(DDR3_FLAT_BASE, DDR3_FLAT_WINDOW_SIZE);
+		if (!m) return;
+		borrowed = true;
+	}
+
+	uint64_t zero = 0;
+	memcpy((void *)(m + DDR3_CMD_OFF), &zero, 8);
+	memcpy((void *)(m + DDR3_CSR_OFF), &zero, 8);
+	memcpy((void *)(m + DDR3_INT_OFF), &zero, 8);
+	__sync_synchronize();
+
+	if (borrowed) shmem_unmap((void *)m, DDR3_FLAT_WINDOW_SIZE);
+}
+
 void a2065_start(void)
 {
 	// Already up: this is a Minimig reset, so put the LANCE back to its
@@ -561,6 +588,8 @@ void a2065_start(void)
 		update_int_state();
 		return;
 	}
+
+	a2065_ddr3_clear();
 
 	if (a2065_get_iface() == A2065_OFF) return;
 
