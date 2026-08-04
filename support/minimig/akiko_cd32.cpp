@@ -2399,8 +2399,32 @@ static void akiko_diag(const char *fmt, ...)
 	fclose(f);
 }
 
+// Is the core actually configured as a CD32? From MiSTer-devel/Main_MiSTer
+// 7d88019 (Kasper Olesen), the only functional line in the whole upstreaming of
+// this file that we did not already have -- see
+// docs/mister-upstream-merge-assessment.md.
+//
+// 68020 + AGA + a removable CD slot. Checked against every AmigaCD profile:
+// CD32 stays true with D-Cache or the 14 MHz throttle toggled (both live in
+// other bits of minimig_config.cpu), and CDTV is false because it is a 68000.
+//
+// Note hardfile[0].cfg stays 2 with no disc mounted -- ejecting clears the
+// filename, not the slot type -- so this does not disturb autoboot, which
+// depends on the poll continuing to run before anything is inserted.
+static inline bool cd32_active(void)
+{
+	return (minimig_config.cpu & 0x03) == 3
+	    && ((minimig_config.chipset >> 2) & 7) == 6
+	    && minimig_config.hardfile[0].cfg == 2;
+}
+
 void akiko_cd32_poll(void)
 {
+	// Nothing here can do useful work on a non-CD32 configuration, and in CDTV
+	// mode cdtv_cd_poll() owns the CD instead. Previously this ran every poll
+	// regardless.
+	if (!cd32_active()) return;
+
 	// Phase 32.6 P3 (rolled back): tried replacing the floor with a SEC_REQ-
 	// drop barrier inside akiko_handle_sec_req, but CF then re-armed PLAY at
 	// 250 Hz (15k arms in 60s vs ~1 Hz baseline) and stalled at black screen.
