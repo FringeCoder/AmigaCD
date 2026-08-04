@@ -93,18 +93,25 @@ userspace will send UIO `0xFA`/`0xFB`/`0xFC` that nothing decodes, the floppy
 rows will offer external drives that never respond, and it will look like a
 regression rather than a wrong branch.
 
-That branch carries the MiSTerFloppy RTL, the `paula_floppy` flux-select
-retiming, and three Quartus settings commits. Two of those (`SEED 2`, `SEED 3`)
-are dead ends kept for the record; `5ec4d2e` is live and raises
-`PLACEMENT_EFFORT_MULTIPLIER` / `ROUTER_EFFORT_MULTIPLIER` to 3.0 and drops
-`FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION` from ALWAYS to AUTOMATICALLY.
+That branch carries the MiSTerFloppy RTL and the `paula_floppy` flux-select
+retiming, plus four Quartus settings commits that are all dead ends kept for
+the record (`SEED 2`, `SEED 3`, raised fitter effort, and the revert of it).
 
-**Open question:** those raised effort settings were added while chasing a
-timing failure that turned out to be logic depth, not routing. The design now
-closes at +0.143 ns — nearly 10x the pre-floppy baseline of +0.017 — so they may
-no longer be needed. Worth one build with them reverted to defaults, because a
-core that only closes at 3.0 effort is fragile. Not urgent while the margin
-holds.
+**`Minimig.qsf` is byte-identical to `amigacd-core`.** The raised
+`PLACEMENT_EFFORT_MULTIPLIER` / `ROUTER_EFFORT_MULTIPLIER` and
+`ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM` were added while chasing a timing
+failure diagnosed as routing, which turned out to be logic depth — the
+flux-select retiming is what actually fixed it. Tested on defaults 2026-08-03:
+
+| Fitter settings | Worst slack | ALMs |
+|---|---|---|
+| raised effort (3.0, MAXIMUM) | +0.143 ns | 23,609 |
+| **stock (kblood's)** | **+0.177 ns** | **23,555** |
+
+So the extra effort was not merely unnecessary, it was marginally worse. Stock
+settings stand, and the only deviation from upstream is RTL. Do not re-add the
+effort multipliers if timing gets tight later — that is not where the margin
+came from.
 
 ## Other branches (not used)
 
