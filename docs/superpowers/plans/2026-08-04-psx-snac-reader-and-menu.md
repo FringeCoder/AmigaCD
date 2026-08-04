@@ -1035,7 +1035,6 @@ void snac_psx_poll(void);
 #include "snac_psx.h"
 
 static uint16_t pad[2];
-static uint32_t axes[2];
 static uint8_t  id[2];
 
 // Defined below; snac_psx_poll() calls it and C++ needs the declaration first.
@@ -1054,20 +1053,21 @@ void snac_psx_poll(void)
 {
 	if (!snac_psx_enabled()) return;
 
+	// All seven words must be read even though the axes are unused here: the
+	// core streams a fixed-length reply, and a short read leaves the next
+	// transaction misaligned. Plan 2 is what gives the axes a consumer.
 	spi_uio_cmd_cont(UIO_MM2_SNACRD);
 	uint16_t status = spi_w(0);
-	pad[0]  = spi_w(0);
-	uint16_t a0lo = spi_w(0);
-	uint16_t a0hi = spi_w(0);
-	pad[1]  = spi_w(0);
-	uint16_t a1lo = spi_w(0);
-	uint16_t a1hi = spi_w(0);
+	pad[0] = spi_w(0);
+	spi_w(0);              // axes0 low  -- Plan 2
+	spi_w(0);              // axes0 high -- Plan 2
+	pad[1] = spi_w(0);
+	spi_w(0);              // axes1 low  -- Plan 2
+	spi_w(0);              // axes1 high -- Plan 2
 	DisableIO();
 
-	id[0]   = status & 0xFF;
-	id[1]   = status >> 8;
-	axes[0] = ((uint32_t)a0hi << 16) | a0lo;
-	axes[1] = ((uint32_t)a1hi << 16) | a1lo;
+	id[0] = status & 0xFF;
+	id[1] = status >> 8;
 
 	// A port with nothing in it reports id 0 and must contribute no buttons,
 	// so an unplugged pad cannot hold a menu key down.
