@@ -7,6 +7,7 @@ against. Re-verify line numbers after moving off these.
 |---|---|---|---|
 | `kblood/Main_MiSTer-cd32-cdtv` | `amiga-console` | `52625a4` "AmigaCD: add Save settings to the console OSD" | 2026-06-14 |
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
+| ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
 | `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `d24d2b0` "autoboot added" | 2026-07-31 |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
@@ -73,6 +74,37 @@ is no hang, but if an undecoded read returns `0xFF` the akiko drain runs its
 full 128 iterations at 4 SPI reads each — 512 wasted transfers per poll. Taking
 kblood's `63d848d` (removes the drains and the trace files outright) is the
 matching userspace change.
+
+## Which core branch to build
+
+**Build `feature/misterfloppy`, not `amigacd-core`.**
+
+`amigacd-core` is deliberately kept as a clean mirror of kblood's tip so it stays
+pullable and `git fetch` never conflicts. Our RTL work sits on
+`feature/misterfloppy`, seven commits above it, and that is what produces the
+RBF in use:
+
+```bash
+git -C upstream/core-cd32-cdtv checkout feature/misterfloppy
+```
+
+Building `amigacd-core` gives a core with **no MiSTer Floppy support** — the
+userspace will send UIO `0xFA`/`0xFB`/`0xFC` that nothing decodes, the floppy
+rows will offer external drives that never respond, and it will look like a
+regression rather than a wrong branch.
+
+That branch carries the MiSTerFloppy RTL, the `paula_floppy` flux-select
+retiming, and three Quartus settings commits. Two of those (`SEED 2`, `SEED 3`)
+are dead ends kept for the record; `5ec4d2e` is live and raises
+`PLACEMENT_EFFORT_MULTIPLIER` / `ROUTER_EFFORT_MULTIPLIER` to 3.0 and drops
+`FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION` from ALWAYS to AUTOMATICALLY.
+
+**Open question:** those raised effort settings were added while chasing a
+timing failure that turned out to be logic depth, not routing. The design now
+closes at +0.143 ns — nearly 10x the pre-floppy baseline of +0.017 — so they may
+no longer be needed. Worth one build with them reverted to defaults, because a
+core that only closes at 3.0 effort is fragile. Not urgent while the margin
+holds.
 
 ## Other branches (not used)
 
