@@ -7,6 +7,7 @@ against. Re-verify line numbers after moving off these.
 |---|---|---|---|
 | `kblood/Main_MiSTer-cd32-cdtv` | `amiga-console` | `52625a4` "AmigaCD: add Save settings to the console OSD" | 2026-06-14 |
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
+| ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
 | `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `d24d2b0` "autoboot added" | 2026-07-31 |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
@@ -73,6 +74,44 @@ is no hang, but if an undecoded read returns `0xFF` the akiko drain runs its
 full 128 iterations at 4 SPI reads each — 512 wasted transfers per poll. Taking
 kblood's `63d848d` (removes the drains and the trace files outright) is the
 matching userspace change.
+
+## Which core branch to build
+
+**Build `feature/misterfloppy`, not `amigacd-core`.**
+
+`amigacd-core` is deliberately kept as a clean mirror of kblood's tip so it stays
+pullable and `git fetch` never conflicts. Our RTL work sits on
+`feature/misterfloppy`, seven commits above it, and that is what produces the
+RBF in use:
+
+```bash
+git -C upstream/core-cd32-cdtv checkout feature/misterfloppy
+```
+
+Building `amigacd-core` gives a core with **no MiSTer Floppy support** — the
+userspace will send UIO `0xFA`/`0xFB`/`0xFC` that nothing decodes, the floppy
+rows will offer external drives that never respond, and it will look like a
+regression rather than a wrong branch.
+
+That branch carries the MiSTerFloppy RTL and the `paula_floppy` flux-select
+retiming, plus four Quartus settings commits that are all dead ends kept for
+the record (`SEED 2`, `SEED 3`, raised fitter effort, and the revert of it).
+
+**`Minimig.qsf` is byte-identical to `amigacd-core`.** The raised
+`PLACEMENT_EFFORT_MULTIPLIER` / `ROUTER_EFFORT_MULTIPLIER` and
+`ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM` were added while chasing a timing
+failure diagnosed as routing, which turned out to be logic depth — the
+flux-select retiming is what actually fixed it. Tested on defaults 2026-08-03:
+
+| Fitter settings | Worst slack | ALMs |
+|---|---|---|
+| raised effort (3.0, MAXIMUM) | +0.143 ns | 23,609 |
+| **stock (kblood's)** | **+0.177 ns** | **23,555** |
+
+So the extra effort was not merely unnecessary, it was marginally worse. Stock
+settings stand, and the only deviation from upstream is RTL. Do not re-add the
+effort multipliers if timing gets tight later — that is not where the margin
+came from.
 
 ## Other branches (not used)
 
