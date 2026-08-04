@@ -100,6 +100,11 @@ int FileCreatePath(const char *dir);
 
 int FileExists(const char *name, int use_zip = 1);
 int FileCanWrite(const char *name);
+
+// True when the SPS/CAPS decoder loaded. Defined in support/minimig/ipffile.cpp,
+// which dlopen()s /media/fat/linux/libcapsimg.so at first call. Absent library
+// means IPF is simply not offered -- ADF and SCP are unaffected.
+bool caps_init(void);
 int PathIsDir(const char *name, int use_zip = 1);
 struct stat64* getPathStat(const char *path);
 

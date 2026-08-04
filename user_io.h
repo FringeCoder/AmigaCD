@@ -99,6 +99,11 @@
 #define UIO_MM2_FLP     0xF7 //0x44
 #define UIO_MM2_HDD     0xF8 //0x54
 #define UIO_MM2_JOY     0xF9 //0x64
+// MiSTer Floppy. External-drive assignment (3 bits per unit) and user-port
+// ownership. Decoded in userio.v as cmd[3:0] == 10/11/12.
+#define UIO_MM2_FLPEX01 0xFA
+#define UIO_MM2_FLPEX23 0xFB
+#define UIO_MM2_USRPORT 0xFC
 
 #define JOY_RIGHT       0x01
 #define JOY_LEFT        0x02

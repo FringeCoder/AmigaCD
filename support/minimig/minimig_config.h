@@ -29,8 +29,28 @@ typedef struct
 typedef struct
 {
 	unsigned char speed;
-	unsigned char drives;
+	unsigned char drives;      // COUNT MINUS ONE: 0 = df0 only, 1 = df0+df1
+	// Per-unit external (real) drive assignment for MiSTer Floppy.
+	// 0 = use the mounted image, 1..4 = external drive 0/A .. 3.
+	// Sized 4 for the Amiga maximum; the AmigaCD OSD exposes two today.
+	unsigned char extDrives[4];
 } mm_floppyTYPE;
+
+// The pre-extDrives layout, kept so minimig_cfg_load can still read configs
+// written before MiSTer Floppy support. Our old mm_configTYPE was field-for-field
+// identical to upstream's, so those files migrate without special-casing.
+typedef struct
+{
+	unsigned char speed;
+	unsigned char drives;
+} mm_floppyTYPEOld;
+
+// Who owns the SNAC user port. Mutually exclusive -- Minimig.sv muxes USER_OUT
+// on this and resets mt32pi when it changes.
+enum mm_userportMode {
+	mmup_mp32pi      = 0,
+	mmup_misterfloppy = 1
+};
 
 typedef struct
 {
@@ -58,6 +78,7 @@ typedef struct
 	unsigned char   cpu;
 	unsigned char   autofire;
 	char            info[64];
+	mm_userportMode userport;
 } mm_configTYPE;
 
 extern mm_configTYPE minimig_config;
@@ -82,6 +103,8 @@ void minimig_ConfigMemory(unsigned char memory);
 void minimig_ConfigCPU(unsigned char cpu);
 void minimig_ConfigChipset(unsigned char chipset);
 void minimig_ConfigFloppy(unsigned char drives, unsigned char speed);
+void minimig_ConfigFloppyExt(unsigned char drive0, unsigned char drive1, unsigned char drive2, unsigned char drive3);
+void minimig_ConfigUserPort(mm_userportMode mode);
 void minimig_ConfigAutofire(unsigned char autofire, unsigned char mask);
 
 void minimig_set_extcfg(unsigned int ext_cfg);
