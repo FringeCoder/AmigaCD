@@ -8,7 +8,7 @@ against. Re-verify line numbers after moving off these.
 | `kblood/Main_MiSTer-cd32-cdtv` | `amiga-console` | `52625a4` "AmigaCD: add Save settings to the console OSD" | 2026-06-14 |
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
-| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `d24d2b0` "autoboot added" | 2026-07-31 |
+| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
 | `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
 | ^ our core's fork point | | `3ab91cd` "Release 20260220." | 2026-02-20 |
