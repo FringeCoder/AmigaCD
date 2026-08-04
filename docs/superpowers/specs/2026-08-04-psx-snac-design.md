@@ -380,13 +380,37 @@ capability available nowhere else: picking a core with a PSX pad.
 The module then lands in Minimig already proven, and the expensive runs are spent
 on wiring that is mechanical rather than exploratory.
 
+**This is two implementation plans, not one.** The split falls where the risk
+profile changes: nothing in the first plan touches the AmigaCD core, so nothing
+in it can cost a 40-minute fitter run or regress a hardware-verified build.
+
+### Plan 1 — the reader and the menu
+
 1. `snac_psx.v` plus its testbench.
-2. Menu core: reader, UIO read, `MiSTer.ini` key.
-3. Userspace: poll, OSD navigation, mouse.
-4. AmigaCD RTL: joystick injection, user-port mux widening, csync.
-5. AmigaCD userspace: modes, OSD rows, config migration.
-6. Light pen: `agnus_beamcounter.v` latch and mux, coordinate conversion,
-   calibration.
+2. Menu core: reader, `UIO_MM2_SNACRD`, `MiSTer.ini` key.
+3. Userspace: `snac_psx_poll()`, core-identity gating, OSD navigation with edge
+   detection and auto-repeat.
+
+Deliverable: **pick and launch a core with nothing but a PSX pad attached** —
+which no MiSTer core can do today. Self-contained and independently useful; if
+Plan 2 never happens this still stands on its own.
+
+The AmigaCD core is untouched throughout, so `develop` stays shippable and the
+Mr Floppy work is unaffected.
+
+### Plan 2 — the AmigaCD core
+
+4. Mode widening: `userio.v` `user_port_mode` to `[1:0]`, through `minimig.v` and
+   `Minimig.sv`, `USER_OUT` mux to 3-way.
+5. Joystick injection into `JOY0`/`JOY1`; csync onto `USER_OUT[6]`.
+6. Userspace: per-port modes, OSD rows, config migration, stick as mouse.
+7. Light pen: `agnus_beamcounter.v` latch and mux, `BPLCON0` decode, coordinate
+   conversion, calibration.
+
+Depends on Plan 1 for a reader that is already known to work against real pads —
+which is the whole point of the ordering. Steps 4–6 are one fitter run if batched;
+step 7 is a second. Step 7 is separable and may be deferred without stranding
+anything before it.
 
 ## Corrections recorded
 
