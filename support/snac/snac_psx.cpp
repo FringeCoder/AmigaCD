@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <string.h>
+#include <linux/input.h>
 #include "../../spi.h"
 #include "../../user_io.h"
 #include "../../cfg.h"
 #include "../../menu.h"
+#include "../../hardware.h"
 #include "snac_psx.h"
 
 static uint16_t pad[2];
@@ -49,8 +51,72 @@ void snac_psx_poll(void)
 	snac_osd_keys();
 }
 
-// Task 8 fills this in; an empty body keeps this task's build clean and lets the
-// poll be verified on hardware before any key injection exists.
+// We are not an evdev device, so nothing gives us key repeat -- the repeat a
+// keyboard gets comes from EV_REP, which never reaches us. These match how the
+// OSD feels under a keyboard.
+#define SNAC_REPEAT_DELAY_MS  500
+#define SNAC_REPEAT_RATE_MS   100
+
+static uint16_t      prev_pad;
+static unsigned long repeat_at;
+static uint16_t      repeat_btn;
+
+struct snac_keymap { uint16_t btn; unsigned int key; };
+
+static const snac_keymap osd_keys[] = {
+	{ SNAC_UP,     KEY_UP    },
+	{ SNAC_DOWN,   KEY_DOWN  },
+	{ SNAC_LEFT,   KEY_LEFT  },
+	{ SNAC_RIGHT,  KEY_RIGHT },
+	{ SNAC_CROSS,  KEY_ENTER },
+	{ SNAC_CIRCLE, KEY_ESC   },
+};
+
 static void snac_osd_keys(void)
 {
+	// Both pads drive the menu: whichever one is to hand should work.
+	uint16_t now = pad[0] | pad[1];
+	uint16_t pressed = now & ~prev_pad;
+
+	// Start+Select opens the OSD, and must not also register as Start.
+	if ((now & (SNAC_START | SNAC_SELECT)) == (SNAC_START | SNAC_SELECT))
+	{
+		if (pressed & (SNAC_START | SNAC_SELECT)) menu_key_set(KEY_F12);
+		prev_pad = now;
+		return;
+	}
+
+	for (unsigned i = 0; i < sizeof(osd_keys) / sizeof(osd_keys[0]); i++)
+	{
+		if (pressed & osd_keys[i].btn)
+		{
+			menu_key_set(osd_keys[i].key);
+
+			// Only directions repeat. Fixing repeat_btn/repeat_at here for every
+			// key -- including Cross/Circle -- would let a button tap clobber a
+			// still-held direction's repeat state, stranding it un-repeating
+			// until the direction itself was released and pressed again.
+			if (osd_keys[i].btn & (SNAC_UP | SNAC_DOWN | SNAC_LEFT | SNAC_RIGHT))
+			{
+				repeat_btn = osd_keys[i].btn;
+				repeat_at  = GetTimer(SNAC_REPEAT_DELAY_MS);
+			}
+		}
+	}
+
+	// Held direction: repeat until released. Buttons deliberately do not repeat.
+	if (repeat_btn && (now & repeat_btn) && (repeat_btn & (SNAC_UP | SNAC_DOWN | SNAC_LEFT | SNAC_RIGHT)))
+	{
+		if (CheckTimer(repeat_at))
+		{
+			for (unsigned i = 0; i < sizeof(osd_keys) / sizeof(osd_keys[0]); i++)
+			{
+				if (repeat_btn == osd_keys[i].btn) menu_key_set(osd_keys[i].key);
+			}
+			repeat_at = GetTimer(SNAC_REPEAT_RATE_MS);
+		}
+	}
+	else if (!(now & repeat_btn)) repeat_btn = 0;
+
+	prev_pad = now;
 }
