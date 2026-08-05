@@ -33,6 +33,16 @@ begin
 end
 endtask
 
+// Wait for n complete port-1 polls. Synchronising on the ATT line instead of a
+// fixed delay keeps these tests correct when later tasks change poll cadence --
+// a hardcoded settle time silently stops sampling instead of failing loudly.
+task wait_polls(input integer n);
+	integer k;
+	begin
+		for (k = 0; k < n; k = k + 1) @(posedge att1);
+	end
+endtask
+
 // Port 1 pad: buttons drivable per-test (active low, so 0xFF = released), sticks centred.
 wire att1 = user_out[1];
 reg [7:0] p1_btn0 = 8'hFF;
@@ -59,7 +69,7 @@ initial begin
 	reset = 0;
 
 	// One full poll of both ports at 250 kHz is on the order of 500 us.
-	#2000000;
+	wait_polls(2);
 
 	check("port1 device id", id0, 8'h41);
 
@@ -73,24 +83,24 @@ initial begin
 	// its check runs.
 	// Byte 0 bit 5 is RIGHT, active low. Expect pad0[0].
 	p1_btn0 = 8'hFF & ~8'h20;
-	#5000000;
+	wait_polls(2);
 	check("right pressed", pad0, 16'h0001);
 
 	// Byte 1 bit 6 is X, active low. Expect pad0[4].
 	p1_btn0 = 8'hFF;
 	p1_btn1 = 8'hFF & ~8'h40;
-	#5000000;
+	wait_polls(2);
 	check("x pressed", pad0, 16'h0010);
 
 	// START is byte 0 bit 3 -> pad0[10]; SELECT is byte 0 bit 0 -> pad0[11].
 	p1_btn0 = 8'hFF & ~8'h09;
 	p1_btn1 = 8'hFF;
-	#5000000;
+	wait_polls(2);
 	check("start+select", pad0, 16'h0C00);
 
 	p1_btn0 = 8'hFF;
 	p1_btn1 = 8'hFF;
-	#5000000;
+	wait_polls(2);
 	check("all released", pad0, 16'h0000);
 
 	if (errors) begin
