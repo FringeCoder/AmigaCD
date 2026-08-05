@@ -92,3 +92,25 @@ jobs:
             bin/MiSTer
             bin/MiSTer.elf
           if-no-files-found: error
+
+  # RTL simulation. Icarus rather than ModelSim: ModelSim is not installed on the
+  # dev machine (C:\intelFPGA_lite\17.0 carries quartus only), and the testbench is
+  # plain Verilog with no vendor primitives.
+  rtl-sim:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      - name: Build testbench
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          iverilog -g2005 -Wall -o build/snac_psx_tb \
+            rtl/snac_psx.v rtl/tb/psx_pad_model.v rtl/tb/snac_psx_tb.v
+
+      - name: Run testbench
+        run: vvp build/snac_psx_tb
