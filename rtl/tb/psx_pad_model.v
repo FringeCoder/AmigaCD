@@ -25,8 +25,14 @@ reg [7:0] rx;
 reg [7:0] tx;
 event    byte_done;   // fires once per byte boundary that needs an ACK pulse
 
+// Frame is: 0=0xFF, 1=DEVICE_ID, 2=0x5A, then PAYLOAD_BYTES payload bytes at
+// indices 3 .. (2 + PAYLOAD_BYTES). A digital pad's frame ends there and it
+// releases DAT, so the master reads 0xFF for anything beyond it - a short
+// pad must not appear to keep supplying analog axis bytes it doesn't have.
 function [7:0] reply(input integer idx);
-	case (idx)
+	if (idx > (2 + PAYLOAD_BYTES))
+		reply = 8'hFF;
+	else case (idx)
 		0: reply = 8'hFF;
 		1: reply = DEVICE_ID;
 		2: reply = 8'h5A;
