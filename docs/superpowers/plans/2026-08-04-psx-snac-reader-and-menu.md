@@ -866,20 +866,21 @@ git commit -m "feat: report an unplugged SNAC port as absent"
 
 ### Task 6: Menu core integration
 
-**Files (in the Menu core fork, a separate repo):**
-- Create: `rtl/snac_psx.v` (copy), `upstream/core-menu` checkout
+> **Rewritten during execution.** The original draft assumed the Menu core's user port was
+> free. It is not — `menu.sv` already drives `USER_OUT[1] = UART_RXD` for MIDI and reads
+> `USER_IN[2,4,5,6]` for MT32-pi I2S audio, including a straight/crossed cable auto-detect.
+> Every one of those collides with the SNAC pin map, so the two are mutually exclusive and
+> the port is muxed at runtime on the `snac_psx` setting. The original also specified
+> `CLK_MHZ(50)`; `clk_sys` is **100 MHz** here (`rtl/pll/pll_0002.v`:
+> `output_clock_frequency0("100.000000 MHz")`), and 50 would have run the bus at 500 kHz.
+
+**Files (in `upstream/core-menu`, a separate repo, branch `feature/snac-psx`):**
+- Create: `rtl/snac_psx.v` (copy)
 - Modify: `files.qip`, `sys/hps_io.sv`, `menu.sv`
 
-- [ ] **Step 1: Fork and clone the Menu core**
-
-```bash
-gh repo fork MiSTer-devel/Menu_MiSTer --org FringeCoder --clone=false
-git clone https://github.com/FringeCoder/Menu_MiSTer.git upstream/core-menu
-git -C upstream/core-menu checkout -b feature/snac-psx
-```
-
-`upstream/` is not tracked by this repo, matching how `core-cd32-cdtv` and the other
-upstream checkouts are handled.
+- [x] **Step 1: Fork and clone** — done. `FringeCoder/Menu_MiSTer` forked, cloned to
+  `upstream/core-menu` (git-ignored by `.gitignore:7`, `/upstream/*/`), branch
+  `feature/snac-psx` created.
 
 - [ ] **Step 2: Copy the reader in and add it to the build**
 
@@ -887,24 +888,30 @@ upstream checkouts are handled.
 cp rtl/snac_psx.v upstream/core-menu/rtl/snac_psx.v
 ```
 
-Add to `upstream/core-menu/files.qip`, following the existing line format in that file:
+Append to `upstream/core-menu/files.qip`, matching that file's existing plain-relative-path
+convention (**not** the `[file join $::quartus(qip_path) ...]` form):
 
 ```tcl
-set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) rtl/snac_psx.v]
+set_global_assignment -name VERILOG_FILE rtl/snac_psx.v
 ```
 
-- [ ] **Step 3: Add the UIO read command to `hps_io`**
+- [ ] **Step 3: Add the UIO read and write to `hps_io`**
 
-In `upstream/core-menu/sys/hps_io.sv`, add a port to the module declaration, beside the
-existing `status_menumask` input:
+In `upstream/core-menu/sys/hps_io.sv`, add two ports beside the existing `status_menumask`
+input (line ~122) and `sdram_sz` output (line ~161):
 
 ```verilog
 	input      [111:0] snac_state,
+	output reg         snac_enable = 0,
 ```
 
-and in the command decode — the same `case` that carries `'h2E: if(byte_cnt == 1) io_dout <= status_menumask;` — add:
+In the command-decode `case` that carries `'h2E` and `'h31` (line ~522), add:
 
 ```verilog
+				// PSX SNAC: give the user port to the pad reader (1) or leave it
+				// to MT32-pi (0). Mutually exclusive -- they share every pin.
+				'hFD: if(byte_cnt == 1) snac_enable <= io_din[0];
+
 				// PSX SNAC pad state. Seven words: status, then three per port.
 				'hFE: case(byte_cnt)
 							1: io_dout <= snac_state[ 15:  0];
@@ -917,61 +924,68 @@ and in the command decode — the same `case` that carries `'h2E: if(byte_cnt ==
 						endcase
 ```
 
-`0xFE` is free: `hps_io` decodes nothing above `'h44`.
+Both are free: the highest command this file decodes is `'h43`.
 
-- [ ] **Step 4: Instantiate the reader in `menu.sv`**
-
-Add to `upstream/core-menu/menu.sv`, near the `hps_io` instantiation:
+- [ ] **Step 4: Instantiate the reader and mux the user port in `menu.sv`**
 
 ```verilog
 wire [15:0] snac_pad0, snac_pad1;
 wire [31:0] snac_axes0, snac_axes1;
 wire  [7:0] snac_id0, snac_id1;
+wire  [6:0] snac_user_out;
 
-// Word 0 is status (both device IDs); then pad, then the two axis words, per port.
+// Word 0 is status (both device IDs), then pad and axes per port. Must match the
+// word order userspace reads in snac_psx_poll().
 wire [111:0] snac_state = { snac_axes1, snac_pad1, snac_axes0, snac_pad0,
                             snac_id1, snac_id0 };
 
-snac_psx #(.CLK_MHZ(50), .BAUD_KHZ(250)) snac
+snac_psx #(.CLK_MHZ(100), .BAUD_KHZ(250)) snac
 (
 	.clk(clk_sys),
-	.reset(~pll_locked),
-	.enable(1'b1),
+	.reset(~locked),
+	.enable(snac_enable),
 	.user_in(USER_IN),
-	.user_out(USER_OUT),
+	.user_out(snac_user_out),
 	.pad0(snac_pad0), .pad1(snac_pad1),
 	.axes0(snac_axes0), .axes1(snac_axes1),
 	.id0(snac_id0), .id1(snac_id1)
 );
 ```
 
-Then pass `.snac_state(snac_state)` to the `hps_io` instantiation.
+Then replace the three existing `USER_OUT` assignments (lines ~239-241) with a mux, and
+silence the MT32-pi paths while SNAC owns the port — the I2S decoder would otherwise turn
+pad traffic into noise on the audio outputs:
 
-**Confirm `CLK_MHZ` against reality before building:** read the PLL instantiation in
-`menu.sv` and set `CLK_MHZ` to the actual frequency of whatever clock you connected to
-`.clk()`. A wrong value scales the bus clock proportionally, and at 2× the pad simply stops
-answering — an easy hour to lose.
+```verilog
+// The user port has one tenant at a time: PSX pads or MT32-pi. They collide on
+// every pin, so this is physics, not policy.
+assign USER_OUT = snac_enable ? snac_user_out : {5'b11111, UART_RXD, 1'b1};
+assign UART_TXD = snac_enable ? 1'b1 : midi_rx;
+assign AUDIO_L  = snac_enable ? 16'd0 : mt32_i2s_l;
+assign AUDIO_R  = snac_enable ? 16'd0 : mt32_i2s_r;
+```
 
-If `menu.sv` does not already declare `USER_IN`/`USER_OUT` in its port list, add them
-exactly as `Minimig.sv` declares them (`input [6:0] USER_IN, output [6:0] USER_OUT`);
-`sys_top` offers those signals to every core.
+Fold the existing `AUDIO_L`/`AUDIO_R` right-hand sides into the mux above rather than
+duplicating them. The I2S decode and the crossed-cable detect may keep running
+unconditionally — they only read `USER_IN`, and reading is harmless once their outputs are
+gated.
 
-- [ ] **Step 5: Build the core and record the fitter time**
+Pass `.snac_state(snac_state)` to the `hps_io` instantiation.
 
-Open `upstream/core-menu/menu.qpf` in Quartus Prime Lite 17.0 and run a full compile, or:
+- [ ] **Step 5: Build and record the fitter time**
 
 ```bash
 /c/intelFPGA_lite/17.0/quartus/bin64/quartus_sh --flow compile upstream/core-menu/menu.qpf
 ```
 
-Time it. The plan's sequencing argument assumes this is materially shorter than the
-AmigaCD core's ~40 minutes; **write the measured number into
-`docs/superpowers/specs/2026-08-04-psx-snac-design.md` under Open questions**, replacing
-the note that it is unmeasured.
+Time it. **Write the measured number into
+`docs/superpowers/specs/2026-08-04-psx-snac-design.md` under Open questions**, replacing the
+note that it is unmeasured — the plan's sequencing argument rests on it being far shorter
+than the AmigaCD core's ~40 minutes.
 
-Expected: compilation succeeds with no failing setup paths.
+Expected: compiles with no failing setup paths.
 
-- [ ] **Step 6: Commit both repos**
+- [ ] **Step 6: Commit**
 
 ```bash
 git -C upstream/core-menu add rtl/snac_psx.v files.qip sys/hps_io.sv menu.sv
