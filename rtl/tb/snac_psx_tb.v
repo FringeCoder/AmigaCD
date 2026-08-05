@@ -56,9 +56,24 @@ psx_pad_model #(.DEVICE_ID(8'h41), .PAYLOAD_BYTES(2)) pad_p1 (
 );
 wire dat_p1, ack_p1;
 
+// Port 2 pad: a DualShock, fixed analog axes, buttons drivable per-test.
+wire att2 = user_out[0];
+wire dat_p2, ack_p2;
+reg [7:0] p2_btn0 = 8'hFF;
+
+psx_pad_model #(.DEVICE_ID(8'h73), .PAYLOAD_BYTES(6)) pad_p2 (
+	.att(att2), .clk(user_out[5]), .cmd(user_out[2]),
+	.dat(dat_p2), .ack(ack_p2),
+	.btn0(p2_btn0), .btn1(8'hFF),
+	.ax_rx(8'h11), .ax_ry(8'h22), .ax_lx(8'h33), .ax_ly(8'h44)
+);
+
+// Both pads sit on the same wires; only the selected one drives them. The
+// model releases dat/ack high when its own ATT is high, so wired-AND is
+// the correct combination.
 always @(*) begin
-	user_in[4] = dat_p1;
-	user_in[3] = ack_p1;
+	user_in[4] = dat_p1 & dat_p2;
+	user_in[3] = ack_p1 & ack_p2;
 end
 
 initial begin
@@ -102,6 +117,15 @@ initial begin
 	p1_btn1 = 8'hFF;
 	wait_polls(2);
 	check("all released", pad0, 16'h0000);
+
+	// Port 2 carries a DualShock. Axes arrive as {LY,LX,RY,RX}.
+	wait_polls(2);
+	check("port2 device id", id1, 8'h73);
+	check("port2 axes", axes1, 32'h44332211);
+
+	// Port 1 is digital: no axes, so it must stay centred rather than
+	// picking up 0xFF padding from the short reply.
+	check("port1 axes centred", axes0, 32'h80808080);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
