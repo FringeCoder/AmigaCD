@@ -79,6 +79,16 @@ assign user_out = { 1'b1,                  // [6] csync, Plan 2
 
 wire dat_in = user_in[4];
 
+// PSX byte 0: [0] SELECT [1] L3 [2] R3 [3] START [4] UP [5] RIGHT [6] DOWN [7] LEFT
+// PSX byte 1: [0] L2 [1] R2 [2] L1 [3] R1 [4] TRIANGLE [5] O [6] X [7] SQUARE
+// All active low, hence the inversion into an active-high vector.
+function [15:0] decode(input [7:0] b0, input [7:0] b1);
+	decode = { ~b0[2], ~b0[1], ~b1[1], ~b1[0],    // R3 L3 R2 L2
+	           ~b0[0], ~b0[3], ~b1[3], ~b1[2],    // SELECT START R1 L1
+	           ~b1[4], ~b1[7], ~b1[5], ~b1[6],    // TRIANGLE SQUARE O X
+	           ~b0[4], ~b0[6], ~b0[7], ~b0[5] };  // UP DOWN LEFT RIGHT
+endfunction
+
 always @(posedge clk) begin
 	if (reset || !enable) begin
 		state   <= ST_IDLE;
@@ -159,8 +169,14 @@ always @(posedge clk) begin
 	ST_DONE: begin
 		att_n <= 1'b1;
 		scmd  <= 1'b1;
-		if (port == 1'b0) id0 <= rx_byte[1];
-		else              id1 <= rx_byte[1];
+		if (port == 1'b0) begin
+			id0  <= rx_byte[1];
+			pad0 <= decode(rx_byte[3], rx_byte[4]);
+		end
+		else begin
+			id1  <= rx_byte[1];
+			pad1 <= decode(rx_byte[3], rx_byte[4]);
+		end
 		gap   <= 0;
 		state <= ST_GAP;
 	end

@@ -33,12 +33,15 @@ begin
 end
 endtask
 
-// Port 1 pad: all buttons released (active low, so 0xFF), sticks centred.
+// Port 1 pad: buttons drivable per-test (active low, so 0xFF = released), sticks centred.
 wire att1 = user_out[1];
+reg [7:0] p1_btn0 = 8'hFF;
+reg [7:0] p1_btn1 = 8'hFF;
+
 psx_pad_model #(.DEVICE_ID(8'h41), .PAYLOAD_BYTES(2)) pad_p1 (
 	.att(att1), .clk(user_out[5]), .cmd(user_out[2]),
 	.dat(dat_p1), .ack(ack_p1),
-	.btn0(8'hFF), .btn1(8'hFF),
+	.btn0(p1_btn0), .btn1(p1_btn1),
 	.ax_rx(8'h80), .ax_ry(8'h80), .ax_lx(8'h80), .ax_ly(8'h80)
 );
 wire dat_p1, ack_p1;
@@ -59,6 +62,36 @@ initial begin
 	#2000000;
 
 	check("port1 device id", id0, 8'h41);
+
+	// Port 0 (SNAC port 1) is only re-polled roughly every 3.2 ms: the ST_GAP
+	// state waits out a full 16-bit rollover (~1.31 ms) after every port poll,
+	// twice per double-port cycle. A 2 ms settle window can land in the gap
+	// between polls and miss a button-state change entirely (observed: the
+	// "x pressed" state below was skipped over by every poll when settled with
+	// only #2000000). Settle for 5 ms - comfortably more than one full repoll
+	// period - so every state change below is guaranteed to be sampled before
+	// its check runs.
+	// Byte 0 bit 5 is RIGHT, active low. Expect pad0[0].
+	p1_btn0 = 8'hFF & ~8'h20;
+	#5000000;
+	check("right pressed", pad0, 16'h0001);
+
+	// Byte 1 bit 6 is X, active low. Expect pad0[4].
+	p1_btn0 = 8'hFF;
+	p1_btn1 = 8'hFF & ~8'h40;
+	#5000000;
+	check("x pressed", pad0, 16'h0010);
+
+	// START is byte 0 bit 3 -> pad0[10]; SELECT is byte 0 bit 0 -> pad0[11].
+	p1_btn0 = 8'hFF & ~8'h09;
+	p1_btn1 = 8'hFF;
+	#5000000;
+	check("start+select", pad0, 16'h0C00);
+
+	p1_btn0 = 8'hFF;
+	p1_btn1 = 8'hFF;
+	#5000000;
+	check("all released", pad0, 16'h0000);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
