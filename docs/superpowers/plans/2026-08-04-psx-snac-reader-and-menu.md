@@ -104,6 +104,11 @@ for a behavioural reason, not a compile error.
 `rtl/snac_psx.v`:
 
 ```verilog
+// Required: the testbench declares `timescale 1ns/1ns, and this file is compiled
+// before it. Without a directive here, Icarus mixes default and timescale-based
+// delays and the pad model's microsecond ACK pulse never resolves.
+`timescale 1ns/1ns
+
 // PSX controller reader for the MiSTer SNAC user port.
 //
 // Canonical copy lives in the AmigaCD (Main_MiSTer) repo; core repos take a copy.
@@ -156,6 +161,10 @@ endmodule
 `rtl/tb/psx_pad_model.v`:
 
 ```verilog
+// Required, and load-bearing: `#4000` below is the ACK pulse width. Without this
+// directive the delay is not interpreted in nanoseconds and ACK never deasserts.
+`timescale 1ns/1ns
+
 // Simulation model of a PSX controller. Answers the 0x01/0x42 poll with a
 // configurable device ID and payload, and pulses ACK after every byte except
 // the last, exactly as real hardware does.
