@@ -104,6 +104,22 @@ static void snac_osd_keys(void)
 		}
 	}
 
+	uint16_t dirs = now & (SNAC_UP | SNAC_DOWN | SNAC_LEFT | SNAC_RIGHT);
+
+	// The repeat target went away. If another direction is still held -- the
+	// other half of a diagonal, or the same direction on the other pad -- hand
+	// the repeat to it instead of dropping it outright. Only clear repeat_btn
+	// when no direction at all remains held.
+	if (repeat_btn && !(now & repeat_btn))
+	{
+		repeat_btn = 0;
+		if (dirs)
+		{
+			repeat_btn = dirs & (~dirs + 1);   // lowest still-held direction
+			repeat_at  = GetTimer(SNAC_REPEAT_DELAY_MS);
+		}
+	}
+
 	// Held direction: repeat until released. Buttons deliberately do not repeat.
 	if (repeat_btn && (now & repeat_btn) && (repeat_btn & (SNAC_UP | SNAC_DOWN | SNAC_LEFT | SNAC_RIGHT)))
 	{
@@ -116,7 +132,6 @@ static void snac_osd_keys(void)
 			repeat_at = GetTimer(SNAC_REPEAT_RATE_MS);
 		}
 	}
-	else if (!(now & repeat_btn)) repeat_btn = 0;
 
 	prev_pad = now;
 }
