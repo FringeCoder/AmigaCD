@@ -23,6 +23,7 @@ integer byte_idx;
 integer bit_idx;
 reg [7:0] rx;
 reg [7:0] tx;
+event    byte_done;   // fires once per byte boundary that needs an ACK pulse
 
 function [7:0] reply(input integer idx);
 	case (idx)
@@ -61,22 +62,36 @@ always @(posedge clk) if (!att) begin
 	rx[bit_idx] = cmd;
 end
 
+// Present the current bit, then advance. Bit 0 of byte 0 is already on `dat`
+// from the negedge-att handler above, so the first falling edge re-asserts it
+// (harmless) before the master's first rising-edge sample; every later bit is
+// likewise on the wire for a full clock before the master samples it. Byte
+// rollover happens here too, one falling edge later than presenting bit 7 of
+// the outgoing byte, so the new byte's bit 0 is only presented starting with
+// the next falling edge - exactly mirroring real hardware.
 always @(negedge clk) if (!att) begin
+	dat = tx[bit_idx];
 	if (bit_idx == 7) begin
 		bit_idx  = 0;
 		byte_idx = byte_idx + 1;
 		tx       = reply(byte_idx);
-		dat      = tx[0];
-		// ACK after every byte but the last of the transfer.
-		if (byte_idx < (3 + PAYLOAD_BYTES)) begin
-			ack = 1'b0;
-			#4000 ack = 1'b1;   // ~4 us low, well inside the real 2-10 us
-		end
+		// ACK after every byte but the last of the transfer. Handled by a
+		// separate process (see below) triggered via a named event, so the
+		// ~4 us pulse can't stall this always block against the next
+		// bit/byte edges.
+		if (byte_idx < (3 + PAYLOAD_BYTES)) -> byte_done;
 	end
 	else begin
 		bit_idx = bit_idx + 1;
-		dat     = tx[bit_idx];
 	end
+end
+
+// ACK pulse, decoupled from the bit/byte shift process above so its blocking
+// #4000 delay can never stall bit timing.
+always @(byte_done) begin
+	ack = 1'b0;
+	#4000;              // ~4 us low, well inside the real 2-10 us
+	ack = 1'b1;
 end
 
 endmodule
