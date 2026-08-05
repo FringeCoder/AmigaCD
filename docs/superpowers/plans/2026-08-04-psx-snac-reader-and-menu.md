@@ -397,7 +397,27 @@ git commit -m "test: PSX SNAC reader harness, with a stub that fails it"
 ### Task 2: The bus master
 
 Make the stub actually talk to the pad: drive ATT/CLK/CMD, shift eight bits per byte LSB
-first, wait for ACK, and capture the device ID.
+first, handle byte boundaries, and capture the device ID.
+
+> **Corrections applied during execution — the code blocks below are the original, defective
+> drafts. The repository is the source of truth; see commits `06e5302` and `2165a8c`.**
+>
+> - **The pad model in Task 1 Step 2 is one bit ahead of real hardware.** Its
+>   `always @(negedge clk)` block advances the bit index and *then* presents the bit; a real
+>   pad presents bit N−1 on falling edge N. Against a corrected model the original master
+>   read `ff 83 b4 fe …` instead of `ff 41 5a ff …` — every byte shifted left one with a 1
+>   injected — while the testbench stayed green. Fixed in the model, not the master.
+> - **Step 2 below states a false premise.** There is no same-cycle race on `shift_in[7]`:
+>   the nonblocking write and the state transition commit on the same edge, so the next state
+>   sees a valid byte. The capture is plain `rx_byte[bytecnt] <= shift_in;` and neither
+>   `{dat_in, shift_in[6:0]}` nor a bit-0 latch is needed.
+> - **`assign user_out`'s port-select ternaries are inverted** relative to what `reg port`
+>   means elsewhere, so the first poll addressed the empty port.
+> - **`wire ack_in` has no readers and `ST_ACK` does no ACK waiting** — it is byte-boundary
+>   bookkeeping, since renamed `ST_BYTE_DONE`. Detecting an absent pad via ACK was considered
+>   and left to Task 5, which uses the idle-bus `0xFF` signature instead.
+> - **`div == HALF` gives 101 clocks per half period** (247.5 kHz, not 250); it wants
+>   `HALF - 1`. `integer i;` is unused.
 
 **Files:**
 - Modify: `rtl/snac_psx.v`
