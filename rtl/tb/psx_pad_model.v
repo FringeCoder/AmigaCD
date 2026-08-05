@@ -1,3 +1,7 @@
+// Required, and load-bearing: `#4000` below is the ACK pulse width. Without this
+// directive the delay is not interpreted in nanoseconds and ACK never deasserts.
+`timescale 1ns/1ns
+
 // Simulation model of a PSX controller. Answers the 0x01/0x42 poll with a
 // configurable device ID and payload, and pulses ACK after every byte except
 // the last, exactly as real hardware does.

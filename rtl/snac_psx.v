@@ -1,3 +1,8 @@
+// Required: the testbench declares `timescale 1ns/1ns, and this file is compiled
+// before it. Without a directive here, Icarus mixes default and timescale-based
+// delays and the pad model's microsecond ACK pulse never resolves.
+`timescale 1ns/1ns
+
 // PSX controller reader for the MiSTer SNAC user port.
 //
 // Canonical copy lives in the AmigaCD (Main_MiSTer) repo; core repos take a copy.
