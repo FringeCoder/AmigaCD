@@ -144,14 +144,34 @@ initial begin
 	wait_polls(2);
 	check("x pressed before unplug", pad0, 16'h0010);
 
+	// Port 2's absent handling was previously only verified by assumed
+	// symmetry with port 1: p2_btn0 never changed anywhere, so pad1 read
+	// 0x0000 on absence whether or not the port-2 clearing logic actually
+	// worked. Hold a button here too so the clear check below is
+	// discriminating rather than vacuously true.
+	p2_btn0 = 8'hFF & ~8'h20;   // RIGHT held
+	wait_polls(2);
+	check("right pressed before unplug p2", pad1, 16'h0001);
+
 	pads_present = 0;
 	wait_polls(2);
 	check("absent port1 id", id0, 8'h00);
 	check("absent port2 id", id1, 8'h00);
 	check("absent port1 buttons clear", pad0, 16'h0000);
+	check("absent port2 buttons clear", pad1, 16'h0000);
 
 	pads_present = 1;
 	p1_btn1 = 8'hFF;
+	p2_btn0 = 8'hFF;
+
+	// --- Replug: the bus recovers when a pad is plugged back in ------
+	// pads_present going back to 1 above was previously only claimed by
+	// comment, not proven by any assertion, even though hot replug is a
+	// completely normal user action. Confirm both ports come back and
+	// report their real device IDs.
+	wait_polls(2);
+	check("replug port1 id", id0, 8'h41);
+	check("replug port2 id", id1, 8'h73);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
