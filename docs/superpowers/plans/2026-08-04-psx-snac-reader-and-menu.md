@@ -1130,6 +1130,26 @@ static void snac_osd_keys(void)
 `spi_w()` is `uint16_t spi_w(uint16_t)` (`spi.h:24`), and reading seven words after
 `spi_uio_cmd_cont()` matches the `UIO_GET_OSDMASK` pattern at `user_io.cpp:3778`.
 
+- [ ] **Step 4b: Hand the user port to the reader**
+
+> **Added during execution.** Task 6 established that the Menu core's user port is shared
+> with MT32-pi and defaults to MT32-pi (`output reg snac_enable = 0` in `hps_io.sv`). Nothing
+> else ever sends `0xFD`, so without this write the reader stays disabled and every poll
+> returns nothing — Task 8's hardware checks would be dead on arrival.
+
+In `user_io_init()`, after `cfg_parse()`, following the one-off config-word pattern
+`minimig_ConfigUserPort()` uses:
+
+```c
+	// The Menu core's user port is shared with MT32-pi and defaults to it.
+	// Nothing else sends this, so the reader stays idle until we ask for it.
+	if (is_menu()) spi_uio_cmd8(UIO_MM2_SNAC, cfg.snac_psx);
+```
+
+`user_io_init()` runs once per process, but `fpga_load_rbf()` → `app_restart()` `execl()`s a
+fresh process on every core switch, so this re-runs with the new core's identity already
+known and `is_menu()` answering correctly.
+
 - [ ] **Step 5: Wire it into the poll loop**
 
 In `user_io.cpp`, add the include beside the other support headers:
