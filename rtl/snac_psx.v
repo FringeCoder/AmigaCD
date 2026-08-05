@@ -169,9 +169,15 @@ always @(posedge clk) begin
 	ST_DONE: begin
 		att_n <= 1'b1;
 		scmd  <= 1'b1;
+		// An idle bus reads back all ones. 0xFF is not a device ID, so report
+		// absence rather than letting a floating bus look like a controller.
+		// pad0/pad1 are gated the same way (not just decoded from the raw
+		// bytes) so a button still held at the moment a pad is unplugged
+		// cannot stay latched: every branch below always assigns a fresh
+		// value, never leaves the old one in place.
 		if (port == 1'b0) begin
-			id0  <= rx_byte[1];
-			pad0 <= decode(rx_byte[3], rx_byte[4]);
+			id0  <= (rx_byte[1] == 8'hFF) ? 8'h00 : rx_byte[1];
+			pad0 <= (rx_byte[1] == 8'hFF) ? 16'h0000 : decode(rx_byte[3], rx_byte[4]);
 			// Only a pad in analog mode sends axes; anything else keeps centre,
 			// so a digital pad never reads as a stick held hard over.
 			axes0 <= (rx_byte[1] == 8'h73)
@@ -179,8 +185,8 @@ always @(posedge clk) begin
 			         : 32'h80808080;
 		end
 		else begin
-			id1  <= rx_byte[1];
-			pad1 <= decode(rx_byte[3], rx_byte[4]);
+			id1  <= (rx_byte[1] == 8'hFF) ? 8'h00 : rx_byte[1];
+			pad1 <= (rx_byte[1] == 8'hFF) ? 16'h0000 : decode(rx_byte[3], rx_byte[4]);
 			axes1 <= (rx_byte[1] == 8'h73)
 			         ? { rx_byte[8], rx_byte[7], rx_byte[6], rx_byte[5] }
 			         : 32'h80808080;

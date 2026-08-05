@@ -71,9 +71,15 @@ psx_pad_model #(.DEVICE_ID(8'h73), .PAYLOAD_BYTES(6)) pad_p2 (
 // Both pads sit on the same wires; only the selected one drives them. The
 // model releases dat/ack high when its own ATT is high, so wired-AND is
 // the correct combination.
+//
+// pads_present gates that wired-AND so a test can simulate both pads being
+// physically unplugged: the bus idles high (as a floating/pulled-up bus
+// does) regardless of what the still-running pad models are trying to
+// drive. Set to 0 to unplug, back to 1 if a later assertion needs the pads.
+reg pads_present = 1'b1;
 always @(*) begin
-	user_in[4] = dat_p1 & dat_p2;
-	user_in[3] = ack_p1 & ack_p2;
+	user_in[4] = pads_present ? (dat_p1 & dat_p2) : 1'b1;
+	user_in[3] = pads_present ? (ack_p1 & ack_p2) : 1'b1;
 end
 
 initial begin
@@ -126,6 +132,26 @@ initial begin
 	// Port 1 is digital: no axes, so it must stay centred rather than
 	// picking up 0xFF padding from the short reply.
 	check("port1 axes centred", axes0, 32'h80808080);
+
+	// --- Unplug: both pads absent -------------------------------------
+	// Hold a button on port 1, let it register, then simulate both pads
+	// being unplugged (idle bus reads all 0xFF) and confirm both IDs report
+	// absent (0x00) and the button vector clears. A button still held at
+	// the moment of removal must not stay latched forever - in the
+	// finished system that is a stuck menu key.
+	p1_btn0 = 8'hFF;
+	p1_btn1 = 8'hFF & ~8'h40;   // X held
+	wait_polls(2);
+	check("x pressed before unplug", pad0, 16'h0010);
+
+	pads_present = 0;
+	wait_polls(2);
+	check("absent port1 id", id0, 8'h00);
+	check("absent port2 id", id1, 8'h00);
+	check("absent port1 buttons clear", pad0, 16'h0000);
+
+	pads_present = 1;
+	p1_btn1 = 8'hFF;
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
