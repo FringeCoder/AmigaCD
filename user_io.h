@@ -104,6 +104,8 @@
 #define UIO_MM2_FLPEX01 0xFA
 #define UIO_MM2_FLPEX23 0xFB
 #define UIO_MM2_USRPORT 0xFC
+#define UIO_MM2_SNAC    0xFD  // PSX SNAC: port modes / light pen latch (Plan 2)
+#define UIO_MM2_SNACRD  0xFE  // PSX SNAC: read pad state
 
 #define JOY_RIGHT       0x01
 #define JOY_LEFT        0x02
