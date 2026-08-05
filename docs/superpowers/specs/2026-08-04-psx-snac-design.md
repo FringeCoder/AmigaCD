@@ -434,7 +434,9 @@ Also superseded: the +0.017 ns slack figure quoted from the Mr Floppy plan is th
   rather than assumed.
 - The DualShock analog-mode init sequence — needed, and its exact form is not
   yet established.
-- Menu_MiSTer fitter time, unmeasured; the sequencing argument assumes it is
-  materially shorter than 40 minutes and should be checked at step 2.
+- ~~Menu_MiSTer fitter time, unmeasured~~ — **measured 2026-08-05: 8m 49s**, against the
+  AmigaCD core's ~40 minutes. Fitter successful, worst-case setup slack +0.253 ns, no
+  failing paths, 0 errors, 0 critical warnings, 7,518 / 41,910 ALMs (18%). The sequencing
+  argument holds: bringing the reader up here is a 4.5x faster loop.
 - Whether the SuperStation's front ports expose `USER_IO[6]` to the GunCon
   composite port with the polarity `PSX.sv` drives.
