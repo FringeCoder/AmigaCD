@@ -131,3 +131,9 @@ jobs:
 
       - name: Run testbench (100 MHz)
         run: vvp build/snac_psx_tb_100
+
+      - name: Build CD32 mapping testbench
+        run: iverilog -g2005 -Wall -o build/snac_cd32_tb rtl/snac_cd32.v rtl/tb/snac_cd32_tb.v
+
+      - name: Run CD32 mapping testbench
+        run: vvp build/snac_cd32_tb
