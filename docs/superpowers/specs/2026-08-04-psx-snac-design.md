@@ -1,9 +1,11 @@
 # PSX SNAC support — design
 
-Status: design approved 2026-08-04. Plan 1 (the reader and the Menu core) is
-implemented, simulated against a testbench, fitted successfully, and
-`menu.rbf` is built. Plan 2 (the AmigaCD core) is not started. Nothing in
-either plan has been run against real hardware yet.
+Status: design approved 2026-08-04. **Plan 1 works on hardware — verified
+2026-08-06: a PSX pad on the SNAC port navigates the MiSTer Menu core and
+launches a core with no USB device attached.** No MiSTer core could do that
+before. Plan 2 (the AmigaCD core: CD32 pad, stick-as-mouse, light pen) is not
+started. Several bring-up checks remain open, including MT32-pi's own MIDI and
+audio with `snac_psx=0`; see `docs/psx-snac-hardware.md` for which.
 
 Today the SNAC user port has two possible tenants — MT32-pi and MiSTer Floppy —
 and a PlayStation pad plugged into it does nothing under any core but PSX. This

@@ -2,7 +2,13 @@
 
 Bring-up notes for a PSX pad on the SNAC user port, for the Menu core fork built
 in [Plan 1](superpowers/plans/2026-08-04-psx-snac-reader-and-menu.md). The
-checks below have **not yet been run against real hardware** — this document
+**It works.** Verified on hardware 2026-08-06: a PSX pad on SNAC port 1
+navigates the Menu core and launches a core with no USB device attached, and
+`snac_psx=0` / `=1` both behave correctly. That is the capability no MiSTer core
+had before — [SNAC input is not implemented in the menu
+core](https://misterfpga.org/viewtopic.php?t=7486).
+
+The remaining checks below have **not** been run. Each is marked. This document
 is written for the person about to run them, not as a record that they passed.
 The design background is in
 [the design doc](superpowers/specs/2026-08-04-psx-snac-design.md).
@@ -91,14 +97,17 @@ In order — each one gates the next, and `SW[1]` above must be confirmed off
 first or everything below fails silently:
 
 1. **Digital pad enumerates on port 1.** Plug one in, confirm the menu
-   responds to the D-pad.
+   responds to the D-pad. — **PASSED 2026-08-06.**
 2. **DualShock enumerates**, in both digital and analog mode (press its ANALOG
-   button). Buttons must work in both.
+   button). Buttons must work in both. — *not yet run.* Note the analog half is
+   only about the axes reaching the HPS; nothing consumes them until Plan 2.
 3. **Port 2 works**, with port 1 empty. This is the case that breaks if
    absent-pad handling regressed — a port with nothing plugged in must report
-   ID 0 and contribute no buttons.
+   ID 0 and contribute no buttons. — *not yet run.*
 4. **Nothing plugged in: the menu does not move on its own.** Phantom keys are
-   the failure this guards against.
+   the failure this guards against. Leave it sitting in the core browser for a
+   few minutes: that is the observable for both the floating-bus flicker and a
+   glitch slipping past the ACK filter. — *not yet run.*
 5. **Start+Select opens the OSD**; directions repeat at a comfortable rate; ✕
    enters, ○ goes back; a core can be launched with no USB device attached at
    all. Include diagonal D-pad rolls (e.g. Right to Down) in this check,
@@ -113,8 +122,13 @@ first or everything below fails silently:
 6. **MT32-pi regression, in reverse.** Set `snac_psx=0` and confirm MT32-pi
    MIDI and audio still work in the Menu core. This plan adds a runtime mux
    over `USER_OUT`, `UART_TXD`, `AUDIO_L` and `AUDIO_R` shared with MT32-pi,
-   and nobody has run that mux yet — it is the highest-consequence regression
-   surface in this change, and disabling the feature must be a clean no-op.
+   and it is the highest-consequence regression surface in this change:
+   disabling the feature must be a clean no-op. — **PARTLY PASSED 2026-08-06:**
+   toggling `snac_psx` between 0 and 1 behaves correctly and the menu is
+   unaffected either way, so the mux itself switches cleanly. **MT32-pi's own
+   MIDI and audio have NOT been confirmed against real MT32-pi hardware** —
+   that half of the check is still open, and is the one an MT32-pi user cares
+   about.
 
 ## Known behaviour
 
