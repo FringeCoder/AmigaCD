@@ -92,3 +92,42 @@ jobs:
             bin/MiSTer
             bin/MiSTer.elf
           if-no-files-found: error
+
+  # RTL simulation. Icarus rather than ModelSim: ModelSim is not installed on the
+  # dev machine (C:\intelFPGA_lite\17.0 carries quartus only), and the testbench is
+  # plain Verilog with no vendor primitives.
+  rtl-sim:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      # Two runs, because every timing constant in snac_psx.v is derived from
+      # CLK_KHZ and a single-rate testbench cannot see a constant that failed to
+      # scale -- the inter-poll gap was a raw counter for exactly this reason,
+      # and 50 MHz sim plus 100 MHz synthesis meant nothing ever checked it.
+      # 50 MHz is the testbench default; 100 MHz is what the Menu core
+      # instantiates. Icarus overrides a top-level parameter with -P.
+      - name: Build testbench (50 MHz)
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          iverilog -g2005 -Wall -o build/snac_psx_tb \
+            rtl/snac_psx.v rtl/tb/psx_pad_model.v rtl/tb/snac_psx_tb.v
+
+      - name: Run testbench (50 MHz)
+        run: vvp build/snac_psx_tb
+
+      - name: Build testbench (100 MHz)
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          iverilog -g2005 -Wall -Psnac_psx_tb.CLK_KHZ=100000 \
+            -o build/snac_psx_tb_100 \
+            rtl/snac_psx.v rtl/tb/psx_pad_model.v rtl/tb/snac_psx_tb.v
+
+      - name: Run testbench (100 MHz)
+        run: vvp build/snac_psx_tb_100

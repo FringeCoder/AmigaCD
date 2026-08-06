@@ -104,6 +104,11 @@
 #define UIO_MM2_FLPEX01 0xFA
 #define UIO_MM2_FLPEX23 0xFB
 #define UIO_MM2_USRPORT 0xFC
+// PSX SNAC: write. Plan 1 (Menu core) uses this as a one-bit enable
+// (cfg.snac_psx). Plan 2 (AmigaCD) widens its use to port modes / light-pen
+// latch.
+#define UIO_MM2_SNAC    0xFD
+#define UIO_MM2_SNACRD  0xFE  // PSX SNAC: read pad state
 
 #define JOY_RIGHT       0x01
 #define JOY_LEFT        0x02

@@ -74,6 +74,12 @@ This is the physical switch on pin W24, **not** an ini setting — `hdmi_audio_9
 is unrelated (it selects the 96 kHz sample rate). If a dock takes I2S audio off
 the user port, that is mutually exclusive with Mr Floppy; they are the same pins.
 
+**Also mutually exclusive with PSX SNAC pads** — see
+[`docs/psx-snac-hardware.md`](psx-snac-hardware.md). That reader uses the same
+USER_IO 0–6 for a different purpose (`CMD`/`DAT`/`CLK`/`ACK`/`ATT`), and the
+same `SW[1]` switch breaks it silently for the same reason. Mr Floppy and a
+PSX pad can never be the user port's tenant at the same time.
+
 ## Motor handling with two drives
 
 `MiSTerFloppySHUGART` is instantiated as `#(28687500, 1)` — the `1` is

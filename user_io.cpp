@@ -37,6 +37,7 @@
 #include "support/minimig/akiko_cd32.h"
 #include "support/physical_disc/physical_disc_autoboot.h"
 #include "support/minimig/cdtv_cd.h"
+#include "support/snac/snac_psx.h"
 #ifdef PROFILING
 #include "profiling.h"
 #endif
@@ -1504,6 +1505,12 @@ void user_io_init(const char *path, const char *xml)
 
 	cfg_parse();
 	cfg_print();
+
+	// Hand the SNAC user port to the PSX pad reader, or leave it with MT32-pi
+	// (the core's default) if the setting is off. Only the Menu core decodes
+	// this command, so gate on core identity rather than sending it blind.
+	if (is_menu()) spi_uio_cmd8(UIO_MM2_SNAC, cfg.snac_psx);
+
 	while (cfg.waitmount[0] && !is_menu())
 	{
 		printf("> > > wait for %s mount < < <\n", cfg.waitmount);
@@ -3844,6 +3851,7 @@ void user_io_poll()
 		diskled_is_on = 0;
 	}
 
+	snac_psx_poll();
 	if (is_megacd()) mcd_poll();
 	if (is_pce()) pcecd_poll();
 	if (is_saturn()) saturn_poll();
