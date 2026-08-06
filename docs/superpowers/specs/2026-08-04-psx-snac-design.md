@@ -442,8 +442,11 @@ Also superseded: the +0.017 ns slack figure quoted from the Mr Floppy plan is th
 
 ## Open questions
 
-- GunCon reply ID and response layout, to be confirmed against `PSX_MiSTer`
-  rather than assumed.
+- ~~GunCon reply ID and response layout~~ — **confirmed 2026-08-06** from
+  `MiSTer-devel/PSX_MiSTer` `rtl/joypad_pad.vhd`: device ID `0x63`, six payload
+  bytes (buttons LSB/MSB, X LSB/MSB, Y LSB/MSB), X in 9-bit 8 MHz dot-clock
+  ticks, Y in 9-bit scanlines, off-screen sentinel `X=0x0001, Y=0x000A`,
+  trigger on buttons-MSB bit 5 active low.
 - The DualShock analog-mode init sequence — needed, and its exact form is not
   yet established.
 - ~~Menu_MiSTer fitter time, unmeasured~~ — **re-measured 2026-08-06, commit `fd54527`:
