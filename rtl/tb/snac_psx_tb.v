@@ -92,9 +92,21 @@ psx_pad_model #(.DEVICE_ID(8'h73), .PAYLOAD_BYTES(6)) pad_p2 (
 // does) regardless of what the still-running pad models are trying to
 // drive. Set to 0 to unplug, back to 1 if a later assertion needs the pads.
 reg pads_present = 1'b1;
+
+// Test-only ACK glitch injection. Driven from the always @(*) block's own
+// sensitivity list rather than via force/release on user_in[3] directly:
+// release does not reliably re-trigger a reg driven by always @(*) in Icarus
+// (the block only re-evaluates on an event in its sensitivity list), so a
+// force/release pair left ACK stuck low well past the intended 20 ns and the
+// stuck-low level was long enough for the glitch filter to legitimately
+// accept it -- the first version of this test passed for the wrong reason
+// (it never actually exercised a 20 ns glitch). Gating through this reg
+// guarantees both edges of the pulse retrigger the block immediately.
+reg ack_glitch_n = 1'b1;   // 0 = inject a glitch (active low, like ACK itself)
+
 always @(*) begin
 	user_in[4] = pads_present ? (dat_p1 & dat_p2) : 1'b1;
-	user_in[3] = pads_present ? (ack_p1 & ack_p2) : 1'b1;
+	user_in[3] = ack_glitch_n & (pads_present ? (ack_p1 & ack_p2) : 1'b1);
 end
 
 wire sclk = user_out[5];
@@ -151,6 +163,36 @@ task measure_frame;
 	end
 endtask
 
+// Permanent regression guard for finding (b) of the 2026-08-06 re-review: a
+// single-clock read of raw ACK let a 20 ns noise pulse mid-wait be mistaken
+// for the real acknowledgement, accepting it ~8 us early and shortening the
+// byte gap from ~10 us to ~2 us. Inject exactly that glitch -- 20 ns low, 2 us
+// into byte 0's ACK wait, well under the ~200 ns glitch filter width and far
+// ahead of the pad's real ACK (~10 us later) -- and confirm the byte gap is
+// still governed by that real ACK, not the glitch.
+task measure_frame_with_ack_glitch;
+	time t_att, t_c1, t_c2, t_last, t_next;
+	integer k;
+	begin
+		@(negedge att1);          t_att  = $time;
+		@(negedge sclk);          t_c1   = $time;
+		@(negedge sclk);          t_c2   = $time;
+		for (k = 0; k < 6; k = k + 1) @(negedge sclk);
+		@(posedge sclk);          t_last = $time;   // byte 0's last clock edge; ACK wait begins here
+
+		#2000;                    // 2 us into the wait window
+		ack_glitch_n = 1'b0;
+		#20;                      // 20 ns glitch
+		ack_glitch_n = 1'b1;
+
+		@(negedge sclk);          t_next = $time;   // byte 1's first clock edge
+		$display("GLITCH TEST byte gap with injected 20 ns ACK glitch: %0d ns (baseline ~10000 ns, glitch-accepted would read ~2000 ns)",
+		          t_next - t_last);
+		check("ack glitch rejected (byte gap still ACK-driven, not glitch-driven)",
+		      ((t_next - t_last) > 8000) && ((t_next - t_last) < 16000), 1);
+	end
+endtask
+
 initial begin
 	$dumpfile("snac_psx_tb.vcd");
 	$dumpvars(0, snac_psx_tb);
@@ -160,6 +202,15 @@ initial begin
 
 	// Bus timing, measured off the wires on the first frame.
 	measure_frame;
+
+	// ACK glitch rejection (finding (b), 2026-08-06 re-review): repeat the
+	// same measurement on the very next frame, but with a 20 ns glitch
+	// injected mid-wait. The byte gap it measures is the "after" figure to
+	// compare against measure_frame's "before" -- both must land in the same
+	// ACK-driven ~10 us window for the glitch to have been proven rejected.
+	measure_frame_with_ack_glitch;
+	@(posedge att1); #1;      // let the glitched frame finish and p1_frame latch
+	check("port1 frame length unchanged by ACK glitch (clock edges)", p1_frame, 40);
 
 	// One full poll of both ports at 250 kHz is on the order of 500 us.
 	wait_polls(2);

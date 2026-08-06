@@ -67,9 +67,15 @@ that touches the Menu core.
 
 ## Fitter time
 
-Measured 2026-08-05, Menu_MiSTer fork: **8m 49s**, fitter successful, worst-case
-setup slack +0.253 ns, no failing paths, 0 errors, 0 critical warnings,
-7,518 / 41,910 ALMs (18%).
+Measured 2026-08-06, Menu_MiSTer fork commit `a6cfaeb`: **6m 45s**, fitter
+successful, worst-case setup slack **+0.366 ns**, no failing paths, 0 errors,
+0 critical warnings, 7,551 / 41,910 ALMs (18%).
+
+This figure supersedes the 2026-08-05 run (8m 49s, +0.253 ns), which measured
+code from before the ACK state machine and the widened gap counter and no
+longer reflects what ships. **Any further RTL change invalidates the figures
+above and needs a re-run** — the spec (`docs/superpowers/specs/2026-08-04-psx-snac-design.md`)
+makes worst-case setup slack the binary pass/fail gate, not an FYI.
 
 This is why Plan 1 brings the reader up in the Menu core rather than in
 AmigaCD directly: the AmigaCD core's fitter run is roughly 40 minutes, so
@@ -95,7 +101,15 @@ first or everything below fails silently:
    the failure this guards against.
 5. **Start+Select opens the OSD**; directions repeat at a comfortable rate; ✕
    enters, ○ goes back; a core can be launched with no USB device attached at
-   all.
+   all. Include diagonal D-pad rolls (e.g. Right to Down) in this check,
+   watching for a dropped move — that exercises the same-poll key-ordering fix
+   in `support/snac/snac_psx.cpp` and its one known-unfixable residual case
+   (a press and release of the same button landing in adjacent ~1.6 ms RTL
+   samples, both inside the framework's 20 ms debounce). Repeat rate itself is
+   whatever the framework uses on every other screen — 500 ms initial delay,
+   50 ms interval (`REPEATDELAY`/`REPEATRATE` in `osd.h`), not the 500/100 the
+   design spec once assumed — worth a feel check since the spec's number was
+   never the one actually shipping.
 6. **MT32-pi regression, in reverse.** Set `snac_psx=0` and confirm MT32-pi
    MIDI and audio still work in the Menu core. This plan adds a runtime mux
    over `USER_OUT`, `UART_TXD`, `AUDIO_L` and `AUDIO_R` shared with MT32-pi,
@@ -131,3 +145,24 @@ Flagged in review, not yet checked against a real controller:
   Plan 2 work — light-pen decoding, csync on `USER_OUT[6]`, and the ID itself
   is unconfirmed against `PSX_MiSTer`'s implementation. Nothing in this plan
   exercises it.
+- **A pad whose ACK latency exceeds the 100 us timeout reads as ABSENT, with
+  no diagnostic.** That is indistinguishable at the OSD from `SW[1]` being on,
+  a bad cable, or an empty port — all four look identical: ID 0, no buttons.
+  If a real pad enumerates as absent, raise `ACK_TIMEOUT_US` in
+  `rtl/snac_psx.v` before assuming the reader itself is broken, and scope
+  `USER_IO[3]` (ACK) against `USER_IO[5]` (CLK) to see how late the real pad
+  is acking relative to the 100 us window. This is the highest-probability
+  bring-up surprise — simulation's pad model always acks in 12 us and has
+  never exercised this path.
+- **ACK is now a control input, not just data.** A 2-flip-flop synchroniser
+  plus a ~200 ns glitch filter (`ACK_FILTER_CYCLES` in `rtl/snac_psx.v`) reject
+  noise on it, but that threshold has never met a real cable. If it is wrong,
+  the symptom is a pad that enumerates fine but occasionally produces wrong
+  buttons — not a hang or an absent port, which makes it easy to mistake for a
+  core or USB-side bug instead.
+- **The 20 us ATT setup and the ACK-driven inter-byte gap have never met a
+  real controller.** Both are estimates of the PSX protocol taken from
+  documentation and the DualShock's published tolerances, not measurements off
+  actual hardware. If a real pad is pickier than the model, symptoms would
+  show up as intermittent enumeration or occasional wrong bytes rather than a
+  clean failure.

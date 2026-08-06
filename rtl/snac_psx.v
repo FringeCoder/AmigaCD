@@ -60,9 +60,9 @@ localparam integer HALF = CLK_KHZ / (BAUD_KHZ * 2);
 // that fell out of reusing HALF is far short of that.
 // ST_ATT is followed by one half bus-clock period in ST_BYTE before the first
 // falling edge, so it waits out the remainder and the measured ATT-low-to-first-
-// clock-edge is exactly ATT_SETUP_US. (HALF is two orders of magnitude smaller
-// than ATT_SETUP at every supported clk rate, so the subtraction cannot go
-// negative.)
+// clock-edge is exactly ATT_SETUP_US. (HALF is one order of magnitude smaller
+// than ATT_SETUP at every supported clk rate -- 2 us vs 20 us -- so the
+// subtraction cannot go negative.)
 localparam integer ATT_SETUP_US = 20;
 localparam integer ATT_SETUP    = (CLK_KHZ * ATT_SETUP_US) / 1000;
 localparam integer ATT_WAIT     = ATT_SETUP - HALF;
@@ -75,6 +75,18 @@ localparam integer ATT_WAIT     = ATT_SETUP - HALF;
 // and the loop keeps cycling instead of stalling.
 localparam integer ACK_TIMEOUT_US = 100;
 localparam integer ACK_TIMEOUT    = (CLK_KHZ * ACK_TIMEOUT_US) / 1000;
+
+// ACK is a level-sensitive control input sampled over a whole wait window, not
+// a single point like dat_in (which has 2 us of setup and needs nothing more):
+// a single-clock read of the raw pin let a 20 ns noise pulse be mistaken for a
+// real acknowledgement and shortened the frame by a byte time. Two flip-flops
+// synchronise it into this clock domain, and it is only accepted once it has
+// read low for ACK_FILTER_CYCLES consecutive synchronised samples (roughly 20
+// clocks, ~200 ns, at every supported clk rate). A real ACK pulse is at least
+// 2 us, comfortably wider than the filter, so this cannot produce a false
+// negative.
+localparam integer ACK_FILTER_NS     = 200;
+localparam integer ACK_FILTER_CYCLES = (CLK_KHZ * ACK_FILTER_NS) / 1000000;
 
 // Gap between ports and between polls of the same port: ~1.3 ms, scaled from
 // clk so the cadence does not silently halve or double with the clock rate.
@@ -102,6 +114,11 @@ reg  [7:0] shift_in;
 reg  [7:0] rx_byte [0:8];
 reg [19:0] gap;
 
+// ACK synchroniser + glitch filter state (see ACK_FILTER_CYCLES above).
+reg        ack_n_meta, ack_n_sync;
+reg [15:0] ack_low_cnt;
+reg        ack_n_filtered;
+
 // Command bytes: 0x01 selects the controller, 0x42 is the poll, then zeroes.
 function [7:0] cmd_byte(input [3:0] idx);
 	case (idx)
@@ -119,8 +136,38 @@ assign user_out = { 1'b1,                  // [6] csync, Plan 2
                     (port == 1'b0) ? att_n : 1'b1,   // [1] ~ATT port 1
                     (port == 1'b1) ? att_n : 1'b1 }; // [0] ~ATT port 2
 
+// dat_in is sampled at one point (ST_BYTE's rising edge) with 2 us of setup
+// behind it, so it needs no synchroniser: whatever value is on the pin has
+// long since settled. ack_n is read across a whole wait window instead, which
+// is why it gets the synchroniser + glitch filter below and dat_in does not.
 wire dat_in = user_in[4];
 wire ack_n  = user_in[3];   // active low, driven by the selected device
+
+// 2-flip-flop synchroniser, then a low-time counter: ack_n_filtered only
+// drops once ack_n_sync has read low for ACK_FILTER_CYCLES consecutive
+// clocks, and snaps back high on the very next non-low sample so a genuine
+// ACK pulse's trailing edge is not stretched or delayed.
+always @(posedge clk) begin
+	if (reset) begin
+		ack_n_meta     <= 1'b1;
+		ack_n_sync     <= 1'b1;
+		ack_low_cnt    <= 0;
+		ack_n_filtered <= 1'b1;
+	end
+	else begin
+		ack_n_meta <= ack_n;
+		ack_n_sync <= ack_n_meta;
+
+		if (ack_n_sync) begin
+			ack_low_cnt    <= 0;
+			ack_n_filtered <= 1'b1;
+		end
+		else if (ack_low_cnt == ACK_FILTER_CYCLES - 1)
+			ack_n_filtered <= 1'b0;
+		else
+			ack_low_cnt <= ack_low_cnt + 1'b1;
+	end
+end
 
 // PSX byte 0: [0] SELECT [1] L3 [2] R3 [3] START [4] UP [5] RIGHT [6] DOWN [7] LEFT
 // PSX byte 1: [0] L2 [1] R2 [2] L1 [3] R1 [4] TRIANGLE [5] O [6] X [7] SQUARE
@@ -215,7 +262,7 @@ always @(posedge clk) begin
 	// so the transaction ends here and the untouched tail of rx_byte stays at
 	// the 0xFF the ST_IDLE prefill put there.
 	ST_ACK_WAIT: begin
-		if (!ack_n) begin
+		if (!ack_n_filtered) begin
 			bytecnt   <= bytecnt + 1'b1;
 			shift_out <= cmd_byte(bytecnt + 4'd1);
 			div       <= 0;

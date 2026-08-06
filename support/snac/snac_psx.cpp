@@ -94,11 +94,26 @@ static void snac_osd_keys(void)
 	uint16_t pressed   = work      & ~prev_work;
 	uint16_t released  = prev_work & ~work;
 
+	// menu_key is a single latched level (menu_key_set() above, menu.cpp:568-572):
+	// only the LAST call made this invocation survives. A same-poll roll across
+	// a diagonal (e.g. Right released and Down pressed inside one ~1.6 ms RTL
+	// sample) used to interleave presses and releases in table order and could
+	// let a release overwrite a press, destroying it with no later edge to
+	// re-emit it. Two passes -- all releases, then all presses -- fix that: the
+	// surviving level is always a press when one occurred this poll, and a
+	// clobbered upstroke is harmless because the framework re-arms repeat off
+	// c1 != c2 regardless of which level was seen in between.
+	//
+	// Residual case this ordering cannot fix: a press lands in RTL sample N and
+	// the same button's release lands in sample N+1, with both falling inside
+	// the 20 ms debounce window at menu.cpp:580-584 -- the debounce only ever
+	// sees the later level. Fixing that needs deferring releases until nothing
+	// is held, which is a separate design change; not attempted here.
 	for (unsigned i = 0; i < sizeof(osd_keys) / sizeof(osd_keys[0]); i++)
-	{
-		if (pressed  & osd_keys[i].btn) menu_key_set(osd_keys[i].key);
 		if (released & osd_keys[i].btn) menu_key_set(UPSTROKE | osd_keys[i].key);
-	}
+
+	for (unsigned i = 0; i < sizeof(osd_keys) / sizeof(osd_keys[0]); i++)
+		if (pressed  & osd_keys[i].btn) menu_key_set(osd_keys[i].key);
 
 	prev_pad = now;
 }
