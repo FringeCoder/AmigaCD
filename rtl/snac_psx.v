@@ -11,9 +11,25 @@
 // Bus: 250 kHz, LSB first, CMD driven on CLK falling edge, DAT sampled on rising.
 // Both ports share CLK/CMD/DAT/ACK and are selected by their own ATT line, so one
 // master serves both, polled in sequence.
+//
+// Flow control is by ACK, not by counting: the device pulses ACK low some
+// microseconds after the last clock edge of every byte except the final byte of
+// its frame. The master must wait for that pulse before clocking the next byte,
+// and must end the transaction when it does not arrive. Free-running instead
+// (clock the next byte after a fixed short delay, always send a fixed nine
+// bytes) works against a simulation model that answers instantly but not
+// against real hardware: an original DualShock has not even acknowledged byte N
+// by the time a free-running master has begun byte N+1, and a five-byte digital
+// frame gets four surplus bytes clocked at it after it has already let go of the
+// bus.
+//
+// The clk frequency is given in kHz, not MHz: Minimig's pixel-domain clock is
+// 28.375 MHz, which an integer MHz cannot express, and every derived timing
+// constant below - including the inter-poll gap - is scaled from it so poll
+// cadence is the same wall-clock interval at every supported clk rate.
 module snac_psx #(
-	parameter CLK_MHZ  = 50,   // frequency of clk, MHz
-	parameter BAUD_KHZ = 250   // PSX bus clock, kHz
+	parameter integer CLK_KHZ  = 50000,   // frequency of clk, kHz
+	parameter integer BAUD_KHZ = 250      // PSX bus clock, kHz
 ) (
 	input             clk,
 	input             reset,
@@ -38,15 +54,41 @@ module snac_psx #(
 
 // Bus clock generation. Half-period counter: at 50 MHz and 250 kHz that is 100
 // clocks per half period.
-localparam integer HALF = (CLK_MHZ * 1000) / (BAUD_KHZ * 2);
+localparam integer HALF = CLK_KHZ / (BAUD_KHZ * 2);
+
+// ATT low to the first clock edge. Real consoles allow 10-20 us here; the 2 us
+// that fell out of reusing HALF is far short of that.
+// ST_ATT is followed by one half bus-clock period in ST_BYTE before the first
+// falling edge, so it waits out the remainder and the measured ATT-low-to-first-
+// clock-edge is exactly ATT_SETUP_US. (HALF is two orders of magnitude smaller
+// than ATT_SETUP at every supported clk rate, so the subtraction cannot go
+// negative.)
+localparam integer ATT_SETUP_US = 20;
+localparam integer ATT_SETUP    = (CLK_KHZ * ATT_SETUP_US) / 1000;
+localparam integer ATT_WAIT     = ATT_SETUP - HALF;
+
+// How long to wait for ACK after a byte before declaring the frame over.
+// A real pad acks 10-20 us after the last clock edge (worst-case third-party
+// units are still well under 50 us), so 100 us is more than double the worst
+// plausible latency; and because an absent port burns the timeout only once per
+// poll, against a ~1.3 ms inter-poll gap, it costs under 8% of the poll period
+// and the loop keeps cycling instead of stalling.
+localparam integer ACK_TIMEOUT_US = 100;
+localparam integer ACK_TIMEOUT    = (CLK_KHZ * ACK_TIMEOUT_US) / 1000;
+
+// Gap between ports and between polls of the same port: ~1.3 ms, scaled from
+// clk so the cadence does not silently halve or double with the clock rate.
+localparam integer GAP_CYCLES = (CLK_KHZ * 13) / 10;
 
 localparam ST_IDLE      = 3'd0;
 localparam ST_ATT       = 3'd1;
 localparam ST_BYTE      = 3'd2;
 localparam ST_BYTE_DONE = 3'd3;
-localparam ST_DONE      = 3'd4;
-localparam ST_GAP       = 3'd5;
+localparam ST_ACK_WAIT  = 3'd4;
+localparam ST_DONE      = 3'd5;
+localparam ST_GAP       = 3'd6;
 
+integer    i;
 reg  [2:0] state;
 reg [15:0] div;
 reg  [3:0] bitcnt;
@@ -58,7 +100,7 @@ reg        att_n;
 reg  [7:0] shift_out;
 reg  [7:0] shift_in;
 reg  [7:0] rx_byte [0:8];
-reg [15:0] gap;
+reg [19:0] gap;
 
 // Command bytes: 0x01 selects the controller, 0x42 is the poll, then zeroes.
 function [7:0] cmd_byte(input [3:0] idx);
@@ -78,6 +120,7 @@ assign user_out = { 1'b1,                  // [6] csync, Plan 2
                     (port == 1'b1) ? att_n : 1'b1 }; // [0] ~ATT port 2
 
 wire dat_in = user_in[4];
+wire ack_n  = user_in[3];   // active low, driven by the selected device
 
 // PSX byte 0: [0] SELECT [1] L3 [2] R3 [3] START [4] UP [5] RIGHT [6] DOWN [7] LEFT
 // PSX byte 1: [0] L2 [1] R2 [2] L1 [3] R1 [4] TRIANGLE [5] O [6] X [7] SQUARE
@@ -116,12 +159,18 @@ always @(posedge clk) begin
 		bitcnt    <= 0;
 		shift_out <= cmd_byte(4'd0);
 		div       <= 0;
+		// Prefill the receive buffer with the idle-bus value. A frame that ends
+		// early (a five-byte digital pad, or no device at all) leaves the tail
+		// untouched, and it must read exactly as it would have if the bus had
+		// been clocked and found floating high - that is what the decode below
+		// and the "0xFF means absent" rule are written against.
+		for (i = 0; i < 9; i = i + 1) rx_byte[i] <= 8'hFF;
 		state     <= ST_ATT;
 	end
 
 	// Settle time after ATT falls before the first clock edge.
 	ST_ATT: begin
-		if (div == HALF - 1) begin
+		if (div == ATT_WAIT - 1) begin
 			div   <= 0;
 			scmd  <= shift_out[0];
 			state <= ST_BYTE;
@@ -153,17 +202,27 @@ always @(posedge clk) begin
 
 	ST_BYTE_DONE: begin
 		rx_byte[bytecnt] <= shift_in;
+		div <= 0;
 		// Nine bytes covers ID + 0x5A + six payload bytes, which is every device
-		// type we care about. Short replies simply read back as 0xFF.
-		if (bytecnt == 4'd8) begin
-			state <= ST_DONE;
-		end
-		else begin
+		// type we care about, and is also the longest frame any of them sends -
+		// so there is nothing left to ask for and no ACK to wait for.
+		if (bytecnt == 4'd8) state <= ST_DONE;
+		else                 state <= ST_ACK_WAIT;
+	end
+
+	// Flow control. The device acks every byte it intends to follow with
+	// another one; silence means its frame is over (or nothing is plugged in),
+	// so the transaction ends here and the untouched tail of rx_byte stays at
+	// the 0xFF the ST_IDLE prefill put there.
+	ST_ACK_WAIT: begin
+		if (!ack_n) begin
 			bytecnt   <= bytecnt + 1'b1;
 			shift_out <= cmd_byte(bytecnt + 4'd1);
 			div       <= 0;
 			state     <= ST_BYTE;
 		end
+		else if (div == ACK_TIMEOUT - 1) state <= ST_DONE;
+		else div <= div + 1'b1;
 	end
 
 	ST_DONE: begin
@@ -197,7 +256,7 @@ always @(posedge clk) begin
 
 	// Gap between ports, and between polls of the same port.
 	ST_GAP: begin
-		if (gap == 16'hFFFF) begin
+		if (gap == GAP_CYCLES - 1) begin
 			port  <= ~port;
 			state <= ST_IDLE;
 		end
