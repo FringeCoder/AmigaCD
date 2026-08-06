@@ -79,6 +79,33 @@ typedef struct
 	char             info[64];
 } mm_configTYPE_NoExtFloppy;
 
+// The config layout as it was before PSX SNAC, i.e. every AmigaCD.cfg written
+// between the MiSTer Floppy change and this one. snac[2] went onto the end, so
+// a file of this size loaded into the new struct would leave snac[] as garbage
+// rather than misaligning -- but the size check is what tells the two apart,
+// and without this struct there is nothing to compare against.
+typedef struct
+{
+	char             id[8];
+	unsigned short   version;
+	unsigned short   ext_cfg2;
+	char             kickstart[992];
+	char             label[32];
+	unsigned short   ext_cfg;
+	unsigned char    memory;
+	unsigned char    chipset;
+	mm_floppyTYPE    floppy;
+	unsigned char    disable_ar3;
+	unsigned char    ide_cfg;
+	unsigned char    scanlines;
+	unsigned char    audio;
+	mm_hardfileTYPE  hardfile[4];
+	unsigned char    cpu;
+	unsigned char    autofire;
+	char             info[64];
+	mm_userportMode  userport;
+} mm_configTYPE_NoSnac;
+
 mm_configTYPE minimig_config = { };
 static unsigned char romkey[3072];
 
@@ -715,7 +742,7 @@ static void ApplyConfiguration(char reloadkickstart)
 	minimig_ConfigAutofire(minimig_config.autofire, 0xC);
 	minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
 	                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
-	minimig_ConfigUserPort(minimig_config.userport);
+	minimig_ConfigSnac();
 	minimig_set_extcfg(minimig_get_extcfg() & ~1);
 }
 
@@ -764,6 +791,43 @@ int minimig_cfg_load(int num)
 				minimig_config.autofire = oldconf.autofire;
 				memcpy(minimig_config.info, oldconf.info, sizeof(oldconf.info));
 				minimig_config.userport = mmup_mp32pi;
+				minimig_config.snac[0] = mmsp_off;
+				minimig_config.snac[1] = mmsp_off;
+				result = 1;
+			}
+			else BootPrint("Cannot migrate configuration file\n");
+		}
+		else if (size == sizeof(mm_configTYPE_NoSnac))
+		{
+			// Written before PSX SNAC. Copy field by field -- a straight memcpy
+			// would leave snac[] holding whatever garbage followed the file on
+			// disk instead of a defined "both ports off".
+			printf("Pre PSX SNAC configuration file, migrating.\n");
+			static mm_configTYPE_NoSnac oldconf = {};
+			if (FileLoadConfig(filename, &oldconf, sizeof(oldconf))
+			    && !strncmp(oldconf.id, config_id, sizeof(minimig_config.id))
+			    && oldconf.floppy.drives <= 4)
+			{
+				memcpy(minimig_config.id, oldconf.id, sizeof(oldconf.id));
+				minimig_config.version  = oldconf.version;
+				minimig_config.ext_cfg2 = oldconf.ext_cfg2;
+				memcpy(minimig_config.kickstart, oldconf.kickstart, sizeof(oldconf.kickstart));
+				memcpy(minimig_config.label,     oldconf.label,     sizeof(oldconf.label));
+				minimig_config.ext_cfg     = oldconf.ext_cfg;
+				minimig_config.memory      = oldconf.memory;
+				minimig_config.chipset     = oldconf.chipset;
+				minimig_config.floppy      = oldconf.floppy;
+				minimig_config.disable_ar3 = oldconf.disable_ar3;
+				minimig_config.ide_cfg     = oldconf.ide_cfg;
+				minimig_config.scanlines   = oldconf.scanlines;
+				minimig_config.audio       = oldconf.audio;
+				memcpy(minimig_config.hardfile, oldconf.hardfile, sizeof(oldconf.hardfile));
+				minimig_config.cpu      = oldconf.cpu;
+				minimig_config.autofire = oldconf.autofire;
+				memcpy(minimig_config.info, oldconf.info, sizeof(oldconf.info));
+				minimig_config.userport = oldconf.userport;
+				minimig_config.snac[0] = mmsp_off;
+				minimig_config.snac[1] = mmsp_off;
 				result = 1;
 			}
 			else BootPrint("Cannot migrate configuration file\n");
@@ -1186,12 +1250,15 @@ void minimig_ConfigFloppyExt(unsigned char drive0, unsigned char drive1, unsigne
 	spi_uio_cmd8(UIO_MM2_FLPEX23, ((drive3 & 0x07) << 3) | (drive2 & 0x07));
 }
 
-// Hand the SNAC user port to MiSTer Floppy or to MT32-pi. Minimig.sv muxes
-// USER_OUT on this bit and resets mt32pi on the change, so the two can never
-// drive the port at once.
-void minimig_ConfigUserPort(mm_userportMode mode)
+// One command carries both the tenant and the per-port modes, so they can never
+// be set inconsistently. Bits 1:0 keep their old meaning, which is why widening
+// the payload needs no config migration for the tenant itself.
+void minimig_ConfigSnac(void)
 {
-	spi_uio_cmd8(UIO_MM2_USRPORT, (mode == mmup_misterfloppy) ? 1 : 0);
+	unsigned char p1 = minimig_config.snac[0] & 0x07;
+	unsigned char p2 = minimig_config.snac[1] & 0x07;
+	uint16_t param = (uint16_t)((p2 << 11) | (p1 << 8) | (minimig_config.userport & 0x03));
+	spi_uio_cmd16(UIO_MM2_USRPORT, param);
 }
 
 void minimig_ConfigAutofire(unsigned char autofire, unsigned char mask)

@@ -48,8 +48,20 @@ typedef struct
 // Who owns the SNAC user port. Mutually exclusive -- Minimig.sv muxes USER_OUT
 // on this and resets mt32pi when it changes.
 enum mm_userportMode {
-	mmup_mp32pi      = 0,
-	mmup_misterfloppy = 1
+	mmup_mp32pi       = 0,
+	mmup_misterfloppy = 1,
+	mmup_snacpsx      = 2
+};
+
+// What a SNAC port drives on the Amiga side. Pad and mouse are independent
+// signals in userio.v, so "both" is not a compromise -- it is the classic
+// Amiga arrangement of mouse in port 1, joystick in port 2.
+enum mm_snacPortMode {
+	mmsp_off       = 0,
+	mmsp_pad       = 1,
+	mmsp_mouse     = 2,
+	mmsp_pad_mouse = 3,
+	mmsp_lightgun  = 4
 };
 
 typedef struct
@@ -79,6 +91,7 @@ typedef struct
 	unsigned char   autofire;
 	char            info[64];
 	mm_userportMode userport;
+	unsigned char   snac[2];   // mm_snacPortMode per SNAC port
 } mm_configTYPE;
 
 extern mm_configTYPE minimig_config;
@@ -104,7 +117,7 @@ void minimig_ConfigCPU(unsigned char cpu);
 void minimig_ConfigChipset(unsigned char chipset);
 void minimig_ConfigFloppy(unsigned char drives, unsigned char speed);
 void minimig_ConfigFloppyExt(unsigned char drive0, unsigned char drive1, unsigned char drive2, unsigned char drive3);
-void minimig_ConfigUserPort(mm_userportMode mode);
+void minimig_ConfigSnac(void);
 void minimig_ConfigAutofire(unsigned char autofire, unsigned char mask);
 
 void minimig_set_extcfg(unsigned int ext_cfg);

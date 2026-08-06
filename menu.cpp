@@ -6982,18 +6982,20 @@ void HandleUI(void)
 	{
 		OsdSetTitle("Advanced", 0);
 		helptext_idx = 0;
-		menumask = 0x7;             // User Port, Ethernet, Back
+		int snac = (minimig_config.userport == mmup_snacpsx);
+		menumask = snac ? 0x1F : 0x7;   // User Port[, Port 1, Port 2], Ethernet, Back
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 
 		m = 0;
 		OsdWrite(m++, "", 0, 0);
 
-		// The SNAC user port is shared with MT32-pi: Minimig.sv muxes USER_OUT
-		// on this and resets mt32pi when it changes, so the two are mutually
-		// exclusive by construction.
+		// The SNAC user port is shared with MT32-pi and MiSTer Floppy:
+		// Minimig.sv muxes USER_OUT on this and resets mt32pi when it changes,
+		// so the three tenants are mutually exclusive by construction.
 		strcpy(s, " User Port: ");
-		strcat(s, (minimig_config.userport == mmup_misterfloppy) ? "MiSTer Floppy" : "MT32-Pi");
+		strcat(s, snac                                           ? "PSX SNAC" :
+		          (minimig_config.userport == mmup_misterfloppy) ? "MiSTer Floppy" : "MT32-Pi");
 		OsdWrite(m++, s, menusub == 0, 0);
 
 		// Board detection, straight from mister_floppy_status in Minimig.sv:
@@ -7011,6 +7013,19 @@ void HandleUI(void)
 			OsdWrite(m++, s, 0, 1);
 		}
 
+		// Per-port SNAC mode. Pad and mouse are independent signals in
+		// userio.v, so both at once is deliberate: mouse in port 1, joystick
+		// in port 2, the classic Amiga arrangement.
+		if (snac)
+		{
+			static const char *modes[] = { "Off", "Pad", "Mouse", "Pad + Mouse", "Light Gun" };
+			for (int p = 0; p < 2; p++)
+			{
+				sprintf(s, "   Port %d  : %s", p + 1, modes[minimig_config.snac[p] & 0x07]);
+				OsdWrite(m++, s, menusub == (uint32_t)(1 + p), 0);
+			}
+		}
+
 		OsdWrite(m++, "", 0, 0);
 
 		// A2065 ZorroII Ethernet. Mirrors the row on the full Minimig Chipset
@@ -7018,14 +7033,14 @@ void HandleUI(void)
 		// drift apart in behaviour.
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		OsdWrite(m++, s, menusub == 1, 0);
+		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 3 : 1), 0);
 
 		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
 		OsdWrite(m++, " is always present either way.", 0, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 2, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 4 : 2), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -7043,14 +7058,26 @@ void HandleUI(void)
 		}
 		else if (select || minus || plus)
 		{
-			if (menusub == 0) // User Port: MiSTer Floppy <-> MT32-pi
+			// Two SNAC port rows only exist while SNAC is the tenant, so
+			// Ethernet and Back slide down the menusub list when it is.
+			int      snac     = (minimig_config.userport == mmup_snacpsx);
+			uint32_t eth_row  = snac ? 3 : 1;
+			uint32_t back_row = snac ? 4 : 2;
+
+			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
-				minimig_config.userport = (minimig_config.userport == mmup_misterfloppy)
-				                        ? mmup_mp32pi : mmup_misterfloppy;
-				minimig_ConfigUserPort(minimig_config.userport);
+				minimig_config.userport = (mm_userportMode)((minimig_config.userport + 1) % 3);
+				minimig_ConfigSnac();
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 1) // Ethernet interface
+			else if (snac && (menusub == 1 || menusub == 2)) // SNAC port 1/2 mode
+			{
+				uint32_t p = menusub - 1;
+				minimig_config.snac[p] = (minimig_config.snac[p] + 1) % 5;
+				minimig_ConfigSnac();
+				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == eth_row) // Ethernet interface
 			{
 				// OFF -> eth0 -> eth1 -> macvlan -> tap0, skipping anything this
 				// box cannot support (no second NIC, no tun driver, no macvlan).
@@ -7065,7 +7092,7 @@ void HandleUI(void)
 				a2065_set_iface(m2);
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 2 && select) // Back
+			else if (menusub == back_row && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 6;   // Advanced row

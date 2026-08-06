@@ -4,10 +4,12 @@
 #include "../../cfg.h"
 #include "../../menu.h"
 #include "../../input.h"
+#include "../minimig/minimig_config.h"
 #include "snac_psx.h"
 
 static uint16_t pad[2];
 static uint8_t  id[2];
+static uint32_t axes[2];
 
 // Defined below; snac_psx_poll() calls it and C++ needs the declaration first.
 static void snac_osd_keys(void);
@@ -17,26 +19,33 @@ int snac_psx_enabled(void)
 	// Gated on core identity, never on probing the bus: a UIO read to a core
 	// with no decode for it returns whatever the bus floats to, and a false
 	// positive means phantom menu keys.
-	if (!cfg.snac_psx) return 0;
-	return is_menu();
+	if (is_menu()) return cfg.snac_psx;
+	// AmigaCD asks the core, not the ini: the modes live in AmigaCD.cfg so they
+	// can differ per saved configuration.
+	if (is_amigacd()) return minimig_config.userport == mmup_snacpsx;
+	return 0;
 }
 
 void snac_psx_poll(void)
 {
 	if (!snac_psx_enabled()) return;
 
-	// All seven words must be read even though the axes are unused here: the
-	// core streams a fixed-length reply, and a short read leaves the next
-	// transaction misaligned. Plan 2 is what gives the axes a consumer.
+	// All seven words are read every time: the core streams a fixed-length
+	// reply, and a short read leaves the next transaction misaligned. Plan 1
+	// (Menu core) had no consumer for the axes and discarded them; Task 4
+	// (the analog-stick mouse) is what reads axes[] from here on.
 	spi_uio_cmd_cont(UIO_MM2_SNACRD);
-	uint16_t status = spi_w(0);
-	pad[0] = spi_w(0);
-	spi_w(0);              // axes0 low  -- Plan 2
-	spi_w(0);              // axes0 high -- Plan 2
-	pad[1] = spi_w(0);
-	spi_w(0);              // axes1 low  -- Plan 2
-	spi_w(0);              // axes1 high -- Plan 2
+	uint16_t status   = spi_w(0);
+	pad[0]             = spi_w(0);
+	uint16_t axes0_lo  = spi_w(0);
+	uint16_t axes0_hi  = spi_w(0);
+	pad[1]             = spi_w(0);
+	uint16_t axes1_lo  = spi_w(0);
+	uint16_t axes1_hi  = spi_w(0);
 	DisableIO();
+
+	axes[0] = ((uint32_t)axes0_hi << 16) | axes0_lo;
+	axes[1] = ((uint32_t)axes1_hi << 16) | axes1_lo;
 
 	id[0] = status & 0xFF;
 	id[1] = status >> 8;
