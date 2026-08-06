@@ -7018,7 +7018,12 @@ void HandleUI(void)
 		// in port 2, the classic Amiga arrangement.
 		if (snac)
 		{
-			static const char *modes[] = { "Off", "Pad", "Mouse", "Pad + Mouse", "Light Gun" };
+			// Sized to the full 3-bit field the RTL reads, not just the enum's
+			// defined range: a hand-edited or corrupted config reaches here
+			// through the raw memcpy in the full-size load path, and an
+			// out-of-range value must render as text rather than read past the end.
+			static const char *modes[8] = { "Off", "Pad", "Mouse", "Pad + Mouse", "Light Gun",
+			                                "Invalid", "Invalid", "Invalid" };
 			for (int p = 0; p < 2; p++)
 			{
 				sprintf(s, "   Port %d  : %s", p + 1, modes[minimig_config.snac[p] & 0x07]);
