@@ -589,9 +589,16 @@ void minimig_ConfigSnac(void)
 }
 ```
 
-Replace the `minimig_ConfigUserPort()` call in the config-apply path (line 717) with
-`minimig_ConfigSnac()`, and delete `minimig_ConfigUserPort()` — it is now a strict subset
-and two functions writing the same register is how they drift apart.
+Delete `minimig_ConfigUserPort()` — it is now a strict subset, and two functions writing the
+same register is how they drift apart. It has **two** call sites, both of which must move to
+`minimig_ConfigSnac()`:
+
+- `support/minimig/minimig_config.cpp:717`, the config-apply path.
+- `menu.cpp:7049`, where cycling the User Port row applies the change immediately.
+
+Remove its declaration from `support/minimig/minimig_config.h:106` as well. Missing either
+call site is a build failure, which is the good case; missing the header leaves a dangling
+declaration that compiles and confuses the next reader.
 
 - [ ] **Step 4: Gate the poll on AmigaCD too**
 
@@ -777,34 +784,48 @@ position, which is most of them.
 - [ ] **Step 2: Decode the latch write in `userio.v`**
 
 The latch is loaded by userspace, not by beam coincidence, so it arrives as a UIO write like
-every other MM2 command. In `rtl/userio.v`, beside `userport_cfg_sel` (line 435):
+every other MM2 command. It needs 11 bits of `vpos` plus 8 bits of `hpos[8:1]` — 19 bits,
+which does not fit one 16-bit word — and `userio.v`'s MM2 decode handles one word per
+command. So it takes **two commands**, exactly as MiSTer Floppy's 12-bit external-drive
+config was split across `0xFA`/`0xFB`.
+
+Both are free in AmigaCD's decode: `0xFC` is the tenant, `0xFE` is the pad-state read, and
+AmigaCD does not use `0xFD` at all (see "Two decisions" — that is the Menu core's enable,
+and the two cores decode independently).
+
+In `rtl/userio.v`, beside `userport_cfg_sel` (line 435):
 
 ```verilog
-wire lpen_cfg_sel = (cmd[3:0] == 15);   // UIO_MM2_LPEN, 0xFF
+wire lpenv_cfg_sel = (cmd[3:0] == 13);  // UIO_MM2_LPENV, 0xFD -- vertical
+wire lpenh_cfg_sel = (cmd[3:0] == 15);  // UIO_MM2_LPENH, 0xFF -- horizontal, latches
 ```
 
 and in the same decode block as line 472:
 
 ```verilog
-				if (lpen_cfg_sel)     {lpen_vpos, lpen_hpos} <= {IO_DIN[15:8], IO_DIN[7:0]};
+				if (lpenv_cfg_sel)    lpen_vpos <= IO_DIN[10:0];
+				if (lpenh_cfg_sel)    lpen_hpos <= IO_DIN[8:0];
 ```
 
-Two 16-bit words are needed for 11 + 8 bits, so send `vpos` first then `hpos`, latching on
-the second — or widen to a single word by dropping `vpos[10:8]`, which only matter above
-line 255 and are outside any light-gun-usable display. **Take the two-word form**: the
-narrow one silently breaks on tall PAL screens.
+Send vertical first, then horizontal. Nothing reads the pair until the Amiga next reads
+`VPOSR`/`VHPOSR`, so a partially-updated latch is only ever one poll stale — no handshake
+is needed, and adding one would be more machinery than the problem deserves.
 
 Declare `output reg [10:0] lpen_vpos` and `output reg [8:0] lpen_hpos` in the port list, and
 pass both through `rtl/minimig.v` to `agnus`, following the `floppy_ext_drive` path added
 for MiSTer Floppy — that is the closest existing example of a userspace-written value
 reaching deep into the core.
 
-- [ ] **Step 3: Add the UIO command**
+- [ ] **Step 3: Add the UIO commands**
 
 In `user_io.h`, after `UIO_MM2_SNACRD`:
 
 ```c
-#define UIO_MM2_LPEN    0xFF  // PSX SNAC: light-pen latch, vpos then hpos
+// Light-pen latch, AmigaCD only. Two commands because 11 bits of vpos plus 8 of
+// hpos do not fit one word. 0xFD is the Menu core's SNAC enable; the two cores
+// decode independently and never see each other's traffic.
+#define UIO_MM2_LPENV   0xFD  // PSX SNAC: light-pen vertical position
+#define UIO_MM2_LPENH   0xFF  // PSX SNAC: light-pen horizontal position
 ```
 
 - [ ] **Step 4: Convert gun coordinates in userspace**
@@ -841,10 +862,11 @@ static void snac_lightpen(int port)
 	if (hpos < 0) hpos = 0; if (hpos > 0xFF) hpos = 0xFF;
 	if (vpos < 0) vpos = 0; if (vpos > 0x7FF) vpos = 0x7FF;
 
-	spi_uio_cmd_cont(UIO_MM2_LPEN);
-	spi_w((uint16_t)vpos);
-	spi_w((uint16_t)hpos);
-	DisableIO();
+	// Vertical first, then horizontal -- the horizontal write is the one the
+	// Amiga side reads against, so ordering keeps a stale pair impossible to
+	// observe as a wrong position, only as a one-poll-old one.
+	spi_uio_cmd16(UIO_MM2_LPENV, (uint16_t)vpos);
+	spi_uio_cmd16(UIO_MM2_LPENH, (uint16_t)hpos);
 }
 ```
 
