@@ -1,11 +1,9 @@
-#include <stdio.h>
-#include <string.h>
 #include <linux/input.h>
 #include "../../spi.h"
 #include "../../user_io.h"
 #include "../../cfg.h"
 #include "../../menu.h"
-#include "../../hardware.h"
+#include "../../input.h"
 #include "snac_psx.h"
 
 static uint16_t pad[2];
@@ -51,15 +49,17 @@ void snac_psx_poll(void)
 	snac_osd_keys();
 }
 
-// We are not an evdev device, so nothing gives us key repeat -- the repeat a
-// keyboard gets comes from EV_REP, which never reaches us. These match how the
-// OSD feels under a keyboard.
-#define SNAC_REPEAT_DELAY_MS  500
-#define SNAC_REPEAT_RATE_MS   100
-
-static uint16_t      prev_pad;
-static unsigned long repeat_at;
-static uint16_t      repeat_btn;
+// menu_key_set() latches a level, not an event: menu_key_get() (menu.cpp)
+// derives press/release edges itself by diffing against its own previous
+// value, and generates its own auto-repeat for the screens that want it
+// (e.g. MENU_FILE_SELECT2, the core browser). So this side must mirror the
+// keyboard path in user_io.cpp exactly: send the key on the press edge and
+// UPSTROKE|key on the release edge, and nothing else. Do NOT add local
+// repeat here -- re-sending an unchanged level produces no edge and can
+// never be observed by menu_key_get(), and for MENU_FILE_SELECT2 it cannot
+// even be stopped once started because the pad can't clear a level that
+// framework repeat keeps re-latching to the same value.
+static uint16_t prev_pad;
 
 struct snac_keymap { uint16_t btn; unsigned int key; };
 
@@ -76,61 +76,28 @@ static void snac_osd_keys(void)
 {
 	// Both pads drive the menu: whichever one is to hand should work.
 	uint16_t now = pad[0] | pad[1];
-	uint16_t pressed = now & ~prev_pad;
 
-	// Start+Select opens the OSD, and must not also register as Start.
-	if ((now & (SNAC_START | SNAC_SELECT)) == (SNAC_START | SNAC_SELECT))
-	{
-		if (pressed & (SNAC_START | SNAC_SELECT)) menu_key_set(KEY_F12);
-		prev_pad = now;
-		return;
-	}
+	// Start+Select toggles the OSD. Edge-detect the combo itself (not the
+	// individual buttons) so a second combo produces a fresh press edge and
+	// can close what the first combo opened.
+	const uint16_t combo = SNAC_START | SNAC_SELECT;
+	bool combo_now  = (now      & combo) == combo;
+	bool combo_prev = (prev_pad & combo) == combo;
+	if (combo_now && !combo_prev) menu_key_set(KEY_F12);
+	else if (!combo_now && combo_prev) menu_key_set(UPSTROKE | KEY_F12);
+
+	// Mask Start/Select out of the working set and fall through instead of
+	// returning: holding the combo must not swallow a press of any other
+	// button that lands while it's held.
+	uint16_t work      = now      & ~combo;
+	uint16_t prev_work = prev_pad & ~combo;
+	uint16_t pressed   = work      & ~prev_work;
+	uint16_t released  = prev_work & ~work;
 
 	for (unsigned i = 0; i < sizeof(osd_keys) / sizeof(osd_keys[0]); i++)
 	{
-		if (pressed & osd_keys[i].btn)
-		{
-			menu_key_set(osd_keys[i].key);
-
-			// Only directions repeat. Fixing repeat_btn/repeat_at here for every
-			// key -- including Cross/Circle -- would let a button tap clobber a
-			// still-held direction's repeat state, stranding it un-repeating
-			// until the direction itself was released and pressed again.
-			if (osd_keys[i].btn & (SNAC_UP | SNAC_DOWN | SNAC_LEFT | SNAC_RIGHT))
-			{
-				repeat_btn = osd_keys[i].btn;
-				repeat_at  = GetTimer(SNAC_REPEAT_DELAY_MS);
-			}
-		}
-	}
-
-	uint16_t dirs = now & (SNAC_UP | SNAC_DOWN | SNAC_LEFT | SNAC_RIGHT);
-
-	// The repeat target went away. If another direction is still held -- the
-	// other half of a diagonal, or the same direction on the other pad -- hand
-	// the repeat to it instead of dropping it outright. Only clear repeat_btn
-	// when no direction at all remains held.
-	if (repeat_btn && !(now & repeat_btn))
-	{
-		repeat_btn = 0;
-		if (dirs)
-		{
-			repeat_btn = dirs & (~dirs + 1);   // lowest still-held direction
-			repeat_at  = GetTimer(SNAC_REPEAT_DELAY_MS);
-		}
-	}
-
-	// Held direction: repeat until released. Buttons deliberately do not repeat.
-	if (repeat_btn && (now & repeat_btn) && (repeat_btn & (SNAC_UP | SNAC_DOWN | SNAC_LEFT | SNAC_RIGHT)))
-	{
-		if (CheckTimer(repeat_at))
-		{
-			for (unsigned i = 0; i < sizeof(osd_keys) / sizeof(osd_keys[0]); i++)
-			{
-				if (repeat_btn == osd_keys[i].btn) menu_key_set(osd_keys[i].key);
-			}
-			repeat_at = GetTimer(SNAC_REPEAT_RATE_MS);
-		}
+		if (pressed  & osd_keys[i].btn) menu_key_set(osd_keys[i].key);
+		if (released & osd_keys[i].btn) menu_key_set(UPSTROKE | osd_keys[i].key);
 	}
 
 	prev_pad = now;

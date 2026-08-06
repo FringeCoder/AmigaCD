@@ -99,7 +99,7 @@ for a behavioural reason, not a compile error.
 - Produces: `snac_psx` module with the port list below. Every later RTL task and both core
   repos depend on these exact names and widths.
 
-- [ ] **Step 1: Create the stub with the final port list**
+- [x] **Step 1: Create the stub with the final port list**
 
 `rtl/snac_psx.v`:
 
@@ -156,7 +156,7 @@ end
 endmodule
 ```
 
-- [ ] **Step 2: Create the pad model**
+- [x] **Step 2: Create the pad model**
 
 `rtl/tb/psx_pad_model.v`:
 
@@ -245,7 +245,18 @@ end
 endmodule
 ```
 
-- [ ] **Step 3: Create the testbench with the first assertion**
+> **Correction applied during execution — the block above is the original, defective draft.
+> The repository is the source of truth; see commits `06e5302` and `2165a8c`.**
+>
+> **This pad model is one bit ahead of real hardware.** Its `always @(negedge clk)` block
+> advances the bit index and *then* presents the bit; a real pad presents bit N−1 on falling
+> edge N. Against a corrected model the master built in Task 2 originally read
+> `ff 83 b4 fe …` instead of `ff 41 5a ff …` — every byte shifted left one with a 1 injected —
+> while the testbench stayed green throughout Task 1. Fixed in the model, not the master.
+> Read this before Task 2, not after: anyone reading linearly otherwise copies the defective
+> oracle in Step 2 above and only learns it was wrong once they reach Task 2.
+
+- [x] **Step 3: Create the testbench with the first assertion**
 
 `rtl/tb/snac_psx_tb.v`:
 
@@ -323,7 +334,7 @@ end
 endmodule
 ```
 
-- [ ] **Step 4: Document why RTL is in this repo**
+- [x] **Step 4: Document why RTL is in this repo**
 
 `rtl/README.md`:
 
@@ -345,7 +356,7 @@ Simulation uses Icarus Verilog, not ModelSim, which is not installed on the dev
 machine. See the `rtl-sim` job in `.github/workflows/build.yml`.
 ```
 
-- [ ] **Step 5: Add the CI simulation job**
+- [x] **Step 5: Add the CI simulation job**
 
 Append to `.github/workflows/build.yml`, at the same indent level as `build:` (i.e. a
 second entry under `jobs:`):
@@ -374,7 +385,7 @@ second entry under `jobs:`):
         run: vvp build/snac_psx_tb
 ```
 
-- [ ] **Step 6: Run the test locally if Icarus is available, otherwise push and read CI**
+- [x] **Step 6: Run the test locally if Icarus is available, otherwise push and read CI**
 
 Local (only if `iverilog` is installed — it is not, as of writing):
 
@@ -385,7 +396,7 @@ iverilog -g2005 -Wall -o build/snac_psx_tb rtl/snac_psx.v rtl/tb/psx_pad_model.v
 Expected: `FAIL port1 device id: got 0 (0x0), want 65 (0x41)` then `1 FAILURE(S)`, and a
 non-zero exit from `vvp`. The stub reports nothing, which is the point.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rtl .github/workflows/build.yml
@@ -401,12 +412,9 @@ first, handle byte boundaries, and capture the device ID.
 
 > **Corrections applied during execution — the code blocks below are the original, defective
 > drafts. The repository is the source of truth; see commits `06e5302` and `2165a8c`.**
+> (The pad-model bug this fixed against is noted at Task 1 Step 2, where the defective code
+> actually is.)
 >
-> - **The pad model in Task 1 Step 2 is one bit ahead of real hardware.** Its
->   `always @(negedge clk)` block advances the bit index and *then* presents the bit; a real
->   pad presents bit N−1 on falling edge N. Against a corrected model the original master
->   read `ff 83 b4 fe …` instead of `ff 41 5a ff …` — every byte shifted left one with a 1
->   injected — while the testbench stayed green. Fixed in the model, not the master.
 > - **Step 2 below states a false premise.** There is no same-cycle race on `shift_in[7]`:
 >   the nonblocking write and the state transition commit on the same edge, so the next state
 >   sees a valid byte. The capture is plain `rx_byte[bytecnt] <= shift_in;` and neither
@@ -427,7 +435,7 @@ first, handle byte boundaries, and capture the device ID.
 - Produces: `id0` reporting the real device ID byte; internal `rx_byte[0..8]` capture that
   Tasks 3–4 decode.
 
-- [ ] **Step 1: Replace the stub body with the master**
+- [x] **Step 1: Replace the stub body with the master**
 
 In `rtl/snac_psx.v`, replace everything between the port list's closing `);` and
 `endmodule` with:
@@ -579,7 +587,7 @@ always @(posedge clk) begin
 end
 ```
 
-- [ ] **Step 2: Fix the last-bit capture**
+- [x] **Step 2: Fix the last-bit capture**
 
 `shift_in[bitcnt]` for bit 7 is written in the same cycle `ST_ACK` reads it, so `ST_ACK`
 reconstructs the byte as `{dat_in, shift_in[6:0]}` above. Confirm that line reads exactly
@@ -587,7 +595,7 @@ that — a plain `shift_in` there drops the MSB, and the device ID would come ba
 masked to `0x41 & 0x7F`, which happens to look correct and would hide the bug until a pad
 with the high bit set (`0x73`, `0xFF`) appears.
 
-- [ ] **Step 3: Run the testbench**
+- [x] **Step 3: Run the testbench**
 
 ```bash
 iverilog -g2005 -Wall -o build/snac_psx_tb rtl/snac_psx.v rtl/tb/psx_pad_model.v rtl/tb/snac_psx_tb.v && vvp build/snac_psx_tb
@@ -595,7 +603,7 @@ iverilog -g2005 -Wall -o build/snac_psx_tb rtl/snac_psx.v rtl/tb/psx_pad_model.v
 
 Expected: `PASS port1 device id` then `ALL TESTS PASSED`, exit 0.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add rtl/snac_psx.v
@@ -614,7 +622,7 @@ git commit -m "feat: PSX SNAC bus master, device ID readback"
 - Produces: `pad0` / `pad1` in the bit order given in the Task 1 port comment. Plan 2 maps
   these to CD32 buttons; userspace maps them to OSD keys.
 
-- [ ] **Step 1: Add failing assertions to the testbench**
+- [x] **Step 1: Add failing assertions to the testbench**
 
 In `rtl/tb/snac_psx_tb.v`, make the port-1 pad's buttons drivable and assert the mapping.
 Replace the `psx_pad_model` instantiation for port 1 and add checks:
@@ -657,7 +665,7 @@ and, in the `initial` block after the existing device-ID check:
 	check("all released", pad0, 16'h0000);
 ```
 
-- [ ] **Step 2: Run the testbench to verify the new checks fail**
+- [x] **Step 2: Run the testbench to verify the new checks fail**
 
 ```bash
 iverilog -g2005 -Wall -o build/snac_psx_tb rtl/snac_psx.v rtl/tb/psx_pad_model.v rtl/tb/snac_psx_tb.v && vvp build/snac_psx_tb
@@ -667,7 +675,7 @@ Expected: `PASS port1 device id`, then `FAIL right pressed`, `FAIL x pressed`,
 `FAIL start+select`, `4 FAILURE(S)` — `pad0` is still held at zero by the reset branch.
 (`all released` passes trivially; that is fine, it guards the opposite direction later.)
 
-- [ ] **Step 3: Decode the buttons**
+- [x] **Step 3: Decode the buttons**
 
 In `rtl/snac_psx.v`, add above the `always` block:
 
@@ -696,11 +704,11 @@ and in `ST_DONE`, replace the two ID assignments with:
 		end
 ```
 
-- [ ] **Step 4: Run the testbench to verify it passes**
+- [x] **Step 4: Run the testbench to verify it passes**
 
 Same command. Expected: all five checks `PASS`, `ALL TESTS PASSED`, exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add rtl/snac_psx.v rtl/tb/snac_psx_tb.v
@@ -721,7 +729,7 @@ git commit -m "feat: decode PSX digital pad buttons"
 analog mode needs a config-mode command sequence, which is **Plan 2's** problem (the mouse
 depends on it). This task reads whatever mode the pad is already in.
 
-- [ ] **Step 1: Add the port-2 pad model and axis assertions**
+- [x] **Step 1: Add the port-2 pad model and axis assertions**
 
 In `rtl/tb/snac_psx_tb.v`, add a second model and its wiring:
 
@@ -761,11 +769,11 @@ Delete the earlier single-pad version of that `always` block. Then add checks:
 	check("port1 axes centred", axes0, 32'h80808080);
 ```
 
-- [ ] **Step 2: Run to verify the new checks fail**
+- [x] **Step 2: Run to verify the new checks fail**
 
 Expected: `FAIL port2 device id: got 0 (0x0), want 115 (0x73)` and `FAIL port2 axes`.
 
-- [ ] **Step 3: Capture the axes**
+- [x] **Step 3: Capture the axes**
 
 In `rtl/snac_psx.v` `ST_DONE`, extend both branches:
 
@@ -788,11 +796,11 @@ In `rtl/snac_psx.v` `ST_DONE`, extend both branches:
 		end
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Expected: every check `PASS`, `ALL TESTS PASSED`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add rtl/snac_psx.v rtl/tb/snac_psx_tb.v
@@ -810,7 +818,7 @@ with it.
 **Files:**
 - Modify: `rtl/snac_psx.v`, `rtl/tb/snac_psx_tb.v`
 
-- [ ] **Step 1: Add the assertion**
+- [x] **Step 1: Add the assertion**
 
 In `rtl/tb/snac_psx_tb.v`, add a third port state where neither model answers. The simplest
 form: force the shared inputs high for a while and check both IDs clear.
@@ -827,12 +835,12 @@ form: force the shared inputs high for a while and check both IDs clear.
 	release user_in[3];
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Expected: `FAIL absent port1: got 255 (0xff), want 0 (0x0)` — an idle bus reads as `0xFF`,
 which is not a device.
 
-- [ ] **Step 3: Treat 0xFF as absent**
+- [x] **Step 3: Treat 0xFF as absent**
 
 In `rtl/snac_psx.v` `ST_DONE`, wrap the ID assignment:
 
@@ -851,11 +859,11 @@ In `rtl/snac_psx.v` `ST_DONE`, wrap the ID assignment:
 and the mirror image for port 2. Note the button vector must clear too — otherwise
 unplugging a pad mid-press leaves that button stuck on forever.
 
-- [ ] **Step 4: Run the full testbench**
+- [x] **Step 4: Run the full testbench**
 
 Expected: every check `PASS`, `ALL TESTS PASSED`, exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add rtl/snac_psx.v rtl/tb/snac_psx_tb.v
@@ -882,7 +890,7 @@ git commit -m "feat: report an unplugged SNAC port as absent"
   `upstream/core-menu` (git-ignored by `.gitignore:7`, `/upstream/*/`), branch
   `feature/snac-psx` created.
 
-- [ ] **Step 2: Copy the reader in and add it to the build**
+- [x] **Step 2: Copy the reader in and add it to the build**
 
 ```bash
 cp rtl/snac_psx.v upstream/core-menu/rtl/snac_psx.v
@@ -895,7 +903,7 @@ convention (**not** the `[file join $::quartus(qip_path) ...]` form):
 set_global_assignment -name VERILOG_FILE rtl/snac_psx.v
 ```
 
-- [ ] **Step 3: Add the UIO read and write to `hps_io`**
+- [x] **Step 3: Add the UIO read and write to `hps_io`**
 
 In `upstream/core-menu/sys/hps_io.sv`, add two ports beside the existing `status_menumask`
 input (line ~122) and `sdram_sz` output (line ~161):
@@ -926,7 +934,7 @@ In the command-decode `case` that carries `'h2E` and `'h31` (line ~522), add:
 
 Both are free: the highest command this file decodes is `'h43`.
 
-- [ ] **Step 4: Instantiate the reader and mux the user port in `menu.sv`**
+- [x] **Step 4: Instantiate the reader and mux the user port in `menu.sv`**
 
 ```verilog
 wire [15:0] snac_pad0, snac_pad1;
@@ -972,7 +980,7 @@ gated.
 
 Pass `.snac_state(snac_state)` to the `hps_io` instantiation.
 
-- [ ] **Step 5: Build and record the fitter time**
+- [x] **Step 5: Build and record the fitter time**
 
 ```bash
 /c/intelFPGA_lite/17.0/quartus/bin64/quartus_sh --flow compile upstream/core-menu/menu.qpf
@@ -985,7 +993,7 @@ than the AmigaCD core's ~40 minutes.
 
 Expected: compiles with no failing setup paths.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git -C upstream/core-menu add rtl/snac_psx.v files.qip sys/hps_io.sv menu.sv
@@ -1004,7 +1012,7 @@ git -C upstream/core-menu commit -m "feat: read PSX pads on the SNAC user port"
 - Produces: `void snac_psx_poll(void)` and `int snac_psx_enabled(void)`, called from
   `user_io_poll()`. Task 8 adds the OSD-key injection inside `snac_psx_poll()`.
 
-- [ ] **Step 1: Add the UIO command defines**
+- [x] **Step 1: Add the UIO command defines**
 
 In `user_io.h`, after `#define UIO_MM2_USRPORT 0xFC` (line 105):
 
@@ -1013,7 +1021,7 @@ In `user_io.h`, after `#define UIO_MM2_USRPORT 0xFC` (line 105):
 #define UIO_MM2_SNACRD  0xFE  // PSX SNAC: read pad state
 ```
 
-- [ ] **Step 2: Add the ini key**
+- [x] **Step 2: Add the ini key**
 
 In `cfg.h`, add to `cfg_t` immediately before the closing `} cfg_t;` (line 115):
 
@@ -1027,7 +1035,7 @@ In `cfg.cpp`, add to `ini_vars[]` immediately before the closing `};` (line 148)
 	{ "SNAC_PSX", (void*)(&(cfg.snac_psx)), UINT8, 0, 1 },
 ```
 
-- [ ] **Step 3: Write the header**
+- [x] **Step 3: Write the header**
 
 `support/snac/snac_psx.h`:
 
@@ -1064,7 +1072,7 @@ void snac_psx_poll(void);
 #endif
 ```
 
-- [ ] **Step 4: Write the poll**
+- [x] **Step 4: Write the poll**
 
 `support/snac/snac_psx.cpp`:
 
@@ -1130,7 +1138,7 @@ static void snac_osd_keys(void)
 `spi_w()` is `uint16_t spi_w(uint16_t)` (`spi.h:24`), and reading seven words after
 `spi_uio_cmd_cont()` matches the `UIO_GET_OSDMASK` pattern at `user_io.cpp:3778`.
 
-- [ ] **Step 4b: Hand the user port to the reader**
+- [x] **Step 4b: Hand the user port to the reader**
 
 > **Added during execution.** Task 6 established that the Menu core's user port is shared
 > with MT32-pi and defaults to MT32-pi (`output reg snac_enable = 0` in `hps_io.sv`). Nothing
@@ -1150,7 +1158,7 @@ In `user_io_init()`, after `cfg_parse()`, following the one-off config-word patt
 fresh process on every core switch, so this re-runs with the new core's identity already
 known and `is_menu()` answering correctly.
 
-- [ ] **Step 5: Wire it into the poll loop**
+- [x] **Step 5: Wire it into the poll loop**
 
 In `user_io.cpp`, add the include beside the other support headers:
 
@@ -1169,7 +1177,7 @@ per-core polls near line 3846, before `if (is_megacd()) mcd_poll();`:
 The function returns immediately unless `snac_psx_enabled()`, so the cost under every other
 core is one branch.
 
-- [ ] **Step 6: Build**
+- [x] **Step 6: Build**
 
 ```bash
 make
@@ -1178,7 +1186,7 @@ make
 Expected: builds clean, **zero new warnings**. If the toolchain is unavailable locally,
 push and read the `build` job in CI — it is the authority here, as the README records.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add support/snac user_io.h user_io.cpp cfg.h cfg.cpp
@@ -1196,7 +1204,7 @@ git commit -m "feat: read PSX SNAC pad state from the core"
 **Interfaces:**
 - Consumes: `pad[]` from Task 7, `menu_key_set()` from `menu.h`.
 
-- [ ] **Step 1: Add edge detection and auto-repeat**
+- [x] **Step 1: Add edge detection and auto-repeat**
 
 Replace the empty `snac_osd_keys()` body from Task 7 with the following, and add the
 statics above it. `GetTimer`/`CheckTimer` return `unsigned long` (`hardware.h:6-7`), so the
@@ -1269,7 +1277,7 @@ static void snac_osd_keys(void)
 Add `#include "../../hardware.h"` for `GetTimer`/`CheckTimer`, and
 `#include <linux/input.h>` for the `KEY_*` codes — the same header `input.cpp` uses.
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 ```bash
 make
@@ -1277,7 +1285,7 @@ make
 
 Expected: clean, zero new warnings.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add support/snac/snac_psx.cpp
@@ -1308,7 +1316,7 @@ Run these in order and record the result of each:
 6. **Start+Select opens the OSD**; directions repeat at a comfortable rate; ✕ enters, ○ goes
    back; a core can be launched with no USB device attached at all.
 
-- [ ] **Step 5: Write the hardware note**
+- [x] **Step 5: Write the hardware note**
 
 Create `docs/psx-snac-hardware.md` recording: the pin map table from this plan, that `SW[1]`
 must be off and why, the measured Menu core fitter time from Task 6, that `update_all`

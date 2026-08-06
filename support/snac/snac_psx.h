@@ -20,6 +20,10 @@
 #define SNAC_R1      0x0200
 #define SNAC_START   0x0400
 #define SNAC_SELECT  0x0800
+#define SNAC_L2      0x1000
+#define SNAC_R2      0x2000
+#define SNAC_L3      0x4000
+#define SNAC_R3      0x8000
 
 // Non-zero when this core is one we read SNAC pads from, and the user asked for it.
 int  snac_psx_enabled(void);

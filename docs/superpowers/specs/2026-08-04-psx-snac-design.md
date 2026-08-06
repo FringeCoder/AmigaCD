@@ -1,6 +1,9 @@
 # PSX SNAC support — design
 
-Status: design approved 2026-08-04. Not implemented, not compiled, no RTL built.
+Status: design approved 2026-08-04. Plan 1 (the reader and the Menu core) is
+implemented, simulated against a testbench, fitted successfully, and
+`menu.rbf` is built. Plan 2 (the AmigaCD core) is not started. Nothing in
+either plan has been run against real hardware yet.
 
 Today the SNAC user port has two possible tenants — MT32-pi and MiSTer Floppy —
 and a PlayStation pad plugged into it does nothing under any core but PSX. This
@@ -135,13 +138,16 @@ register. A standalone module is also the only part of this work that can be
 tested without hardware (see Verification).
 
 Responsibilities: drive `CLK`/`CMD`/ATT, clock the `0x01` → `0x42` controller
-poll, decode the reply ID, present results. Reply IDs `0x41` (digital), `0x73`
-(DualShock analog), `0x53` (config mode) and `0x63` (GunCon) — the GunCon ID to
-be confirmed against `PSX_MiSTer`'s implementation before it is relied on.
+poll, decode the reply ID, present results. The reply ID byte distinguishes
+`0x41` (digital), `0x73` (DualShock analog) and `0x63` (GunCon) — the GunCon ID
+to be confirmed against `PSX_MiSTer`'s implementation before it is relied on.
+`0x53` (config mode) is not currently decoded; the RTL only special-cases
+`0x73` for the analog axes and `0xFF` for "nothing plugged in".
 
-Outputs per port: an 11-bit joystick vector shaped exactly like `JOY0`/`JOY1`,
-four 8-bit analog axes, and a presence/type flag distinguishing "nothing
-plugged in" from each pad type.
+Outputs per port: a 16-bit PSX-native button vector (see
+`support/snac/snac_psx.h`), four 8-bit analog axes, and a presence/type flag
+distinguishing "nothing plugged in" from each pad type. Reshaping that vector
+into an 11-bit `JOY0`/`JOY1`-style vector is Plan 2's job, not Plan 1's.
 
 `~csync`, derived from the core's H/V sync, is driven onto `USER_OUT[6]` whenever
 a port is in light-gun mode.
@@ -220,10 +226,14 @@ The read follows the `UIO_GET_OSDMASK` pattern already in the tree
 Seven words — one status word (presence and device ID per port), then three per
 port for the joystick bits and four axes.
 
-`snac_psx_poll()` joins the Minimig branch of `user_io_poll()`
-(`user_io.cpp:3216-3234`), beside `akiko_cd32_poll()` and `a2065_poll()`, and
-gains a second call site under `is_menu()`. It runs only when the user port is in
-PSX SNAC mode. The RTL reader polls the pads on its own clock; the HPS samples
+`snac_psx_poll()` is a single unconditional call in `user_io_poll()`
+(`user_io.cpp:3854`), ahead of the `is_megacd()`/`is_pce()`/... core-specific
+polls rather than folded into the Minimig branch beside `akiko_cd32_poll()`
+(`user_io.cpp:3224`) or `a2065_poll()` (`user_io.cpp:3242`). `snac_psx_poll()`
+gates itself on `snac_psx_enabled()` (core identity plus the `.ini` flag), so
+the unconditional call site is cheap and correct without needing a branch at
+the call site — simpler than the originally planned second call site under
+`is_menu()`. The RTL reader polls the pads on its own clock; the HPS samples
 the latest capture, so the two rates are decoupled and the in-core button path
 never waits on Linux.
 

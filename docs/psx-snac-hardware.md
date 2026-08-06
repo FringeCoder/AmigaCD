@@ -35,8 +35,7 @@ adapter is wired to (`docs/superpowers/specs/2026-08-04-psx-snac-design.md`):
 | 3 | in | `ACK` |
 | 4 | in | `DAT` |
 | 5 | out | `CLK` |
-| 6 | out | csync to the GunCon (`USER_OUT[6] <= ~csync` in `PSX.sv`) — unused by
-this plan, wired by Plan 2 |
+| 6 | out | csync to the GunCon (`USER_OUT[6] <= ~csync` in `PSX.sv`) — unused by this plan, wired by Plan 2 |
 
 Both ports share `CMD`/`CLK`/`DAT`/`ACK` and are selected by their own `~ATT`
 line, so two pads cost one bus master, polled in sequence. This is total
@@ -47,8 +46,12 @@ a policy this project chose.
 
 ## Install
 
-Copy `bin/MiSTer` to `/media/fat/MiSTer` and the built `menu.rbf` to
-`/media/fat/menu.rbf`. Add to `/media/fat/MiSTer.ini`:
+`menu.rbf` is built from the fork
+[`FringeCoder/Menu_MiSTer`](https://github.com/FringeCoder/Menu_MiSTer), branch
+`feature/snac-psx` — that is where the SNAC pad reader and the OSD-navigation
+glue for the Menu core actually live; this repo only carries the userspace
+poll and the docs. Copy `bin/MiSTer` to `/media/fat/MiSTer` and that fork's
+built `menu.rbf` to `/media/fat/menu.rbf`. Add to `/media/fat/MiSTer.ini`:
 
 ```ini
 snac_psx=1
@@ -71,9 +74,10 @@ setup slack +0.253 ns, no failing paths, 0 errors, 0 critical warnings,
 This is why Plan 1 brings the reader up in the Menu core rather than in
 AmigaCD directly: the AmigaCD core's fitter run is roughly 40 minutes, so
 iterating on bus timing, ACK handling and reply IDs here instead is a
-4.5x faster loop. The module then lands in AmigaCD (Plan 2) already proven
-against real pads, and the expensive runs are spent on wiring rather than
-exploration.
+4.5x faster loop. The intent is for the module to land in AmigaCD (Plan 2)
+once it has been proven against real pads here first, so the expensive runs
+are spent on wiring rather than exploration — nothing has been run against
+real hardware yet (see the checklist below).
 
 ## Running the checks
 
@@ -92,6 +96,25 @@ first or everything below fails silently:
 5. **Start+Select opens the OSD**; directions repeat at a comfortable rate; ✕
    enters, ○ goes back; a core can be launched with no USB device attached at
    all.
+6. **MT32-pi regression, in reverse.** Set `snac_psx=0` and confirm MT32-pi
+   MIDI and audio still work in the Menu core. This plan adds a runtime mux
+   over `USER_OUT`, `UART_TXD`, `AUDIO_L` and `AUDIO_R` shared with MT32-pi,
+   and nobody has run that mux yet — it is the highest-consequence regression
+   surface in this change, and disabling the feature must be a clean no-op.
+
+## Known behaviour
+
+Both pads are OR-ed together so that "whichever pad is to hand" works. Two
+consequences follow directly from that and are expected, not bugs:
+
+- **Start+Select can be split across two pads.** One pad holding Start and
+  the other holding Select opens (or closes) the OSD exactly like a single
+  pad holding both.
+- **A button held on one pad suppresses that button's press edge on the
+  other.** Edges are detected on the OR of both pads, so if pad A is already
+  holding, say, ✕, pad B pressing ✕ produces no new edge until pad A's ✕ is
+  released. This is a shared-state artifact of OR-ing two pads into one
+  logical input, not a per-pad bug.
 
 ## Things simulation cannot settle
 
