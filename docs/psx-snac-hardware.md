@@ -67,9 +67,9 @@ that touches the Menu core.
 
 ## Fitter time
 
-Measured 2026-08-06, Menu_MiSTer fork commit `a6cfaeb`: **6m 45s**, fitter
-successful, worst-case setup slack **+0.366 ns**, no failing paths, 0 errors,
-0 critical warnings, 7,551 / 41,910 ALMs (18%).
+Measured 2026-08-06, Menu_MiSTer fork commit `fd54527`: **6m 52s**, fitter
+successful, worst-case setup slack **+0.478 ns**, no failing paths, 0 errors,
+0 critical warnings, 7,542 / 41,910 ALMs (18%).
 
 This figure supersedes the 2026-08-05 run (8m 49s, +0.253 ns), which measured
 code from before the ACK state machine and the widened gap counter and no
