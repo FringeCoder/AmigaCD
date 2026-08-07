@@ -284,16 +284,18 @@ always @(posedge clk) begin
 		if (port == 1'b0) begin
 			id0  <= (rx_byte[1] == 8'hFF) ? 8'h00 : rx_byte[1];
 			pad0 <= (rx_byte[1] == 8'hFF) ? 16'h0000 : decode(rx_byte[3], rx_byte[4]);
-			// Only a pad in analog mode sends axes; anything else keeps centre,
-			// so a digital pad never reads as a stick held hard over.
-			axes0 <= (rx_byte[1] == 8'h73)
+			// A pad in analog mode (0x73) sends stick axes, and a GunCon
+			// (0x63) carries its X/Y coordinates in the same four bytes;
+			// anything else (a digital pad, or nothing plugged in) keeps
+			// centre, so a digital pad never reads as a stick held hard over.
+			axes0 <= (rx_byte[1] == 8'h73 || rx_byte[1] == 8'h63)
 			         ? { rx_byte[8], rx_byte[7], rx_byte[6], rx_byte[5] }
 			         : 32'h80808080;
 		end
 		else begin
 			id1  <= (rx_byte[1] == 8'hFF) ? 8'h00 : rx_byte[1];
 			pad1 <= (rx_byte[1] == 8'hFF) ? 16'h0000 : decode(rx_byte[3], rx_byte[4]);
-			axes1 <= (rx_byte[1] == 8'h73)
+			axes1 <= (rx_byte[1] == 8'h73 || rx_byte[1] == 8'h63)
 			         ? { rx_byte[8], rx_byte[7], rx_byte[6], rx_byte[5] }
 			         : 32'h80808080;
 		end
