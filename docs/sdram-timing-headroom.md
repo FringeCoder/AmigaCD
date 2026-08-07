@@ -102,7 +102,78 @@ path — the binding constraint is the single-cycle path *internal* to `sdram_ct
 
 Recording this because the idea is an obvious one to have twice.
 
-## What would actually buy headroom
+## THE DESIGNATED NEXT FIX: reduce fan-in pressure on `sd_addr`
+
+**Status: not attempted. This is the one to reach for when the problem returns — and it
+will.**
+
+`emu|ram1|sd_addr` has now been the destination of the binding path on **three separate
+occasions**, with a different source register each time. That is the signature of an
+over-loaded register, not of any one bad path:
+
+| Occasion | Source of the worst path | Destination | Slack |
+|---|---|---|---|
+| PSX SNAC added, before retiming | `ram1\|sdram_state[2]` | `sd_addr[7]` | −0.627 |
+| ” (2nd and 3rd worst) | `USERIO1\|floppy_ext_drive[5]`, `sdram_state[0]` | `sd_addr[7]` | −0.255, −0.197 |
+| After the state-decode retiming | `minimig\|ciab:CIAB1\|regportb[6]` | `sd_addr[8]` | −0.040 |
+| Light pen + read path added | `USERIO1\|floppy_ext_drive[4]` (all three worst) | `sd_addr[7]` | −0.180 |
+
+Two things worth drawing out. First, **MiSTer Floppy is implicated in two of the three** —
+this pressure is not caused by PSX SNAC and predates it. Second, each fix so far has only
+moved *which* source wins the race; the destination never changes.
+
+### Why it keeps happening
+
+`sd_addr` is 13 bits wide, drives a device pin, and is loaded in `rtl/sdram_ctrl.v` from
+three different sources plus a state decode:
+
+- `chipAddr` at the CHIP slot (line ~334)
+- `writeAddr` at CPU_WRITECACHE (~352)
+- `cpuAddr` at CPU_READCACHE (~363)
+- `{1'b1, casaddr}` at the CAS state (~377), with `cas_dqm` overriding `[12:11]`
+
+Every one of those sources arrives from a different region of the die — Agnus and the chip
+DMA arbiter on one side, the CPU wrapper and write buffer on another. The register cannot
+be placed near all of them, so whichever source the fitter leaves furthest away becomes the
+critical path. The measured cost is routing, not logic: the original failure carried
+**4.728 ns of pure interconnect** on the final hop into `sd_addr[7]|d`.
+
+That is why seeds and retiming only ever buy a temporary reprieve, and why adding *any*
+logic anywhere re-rolls it.
+
+### The fix, in outline
+
+Split the load so the chip path and the CPU path do not share the same physical register:
+
+1. Give the chip slot its own address register, and the CPU slots theirs.
+2. Select between them as late as possible — ideally at the output, where the choice is
+   already known a cycle ahead because `slot_type` is registered.
+3. Let the fitter place each near its own source region.
+
+**What must be checked before writing any of it:**
+
+- `sd_addr` drives a pin, so an output-side mux adds delay on the pin path. Confirm the pin
+  timing has room, or the fix trades one violation for another.
+- The CAS state (`sd_addr <= {1'b1, casaddr}`, plus the `cas_dqm` override on `[12:11]`)
+  writes the *same* register on a later cycle. Any split must keep that behaviour bit-exact,
+  including the partial `[12:11]` write.
+- `sd_ba` and `casaddr` are loaded in the same concatenation and may need the same treatment.
+
+### Do NOT reach for these instead
+
+They have been measured and are dead ends — see the experiments above:
+
+- Seeds: 0.27 ns of spread, and it is luck, not engineering.
+- Wider multicycle from Agnus: no effect; the binding path is internal to `sdram_ctrl`.
+- Quartus register retiming: already on in the committed `.qsf`.
+- Raised fitter effort: `PHYSICAL_SYNTHESIS_EFFORT EXTRA` is already on.
+
+### When to do it
+
+When a change fails timing on `sd_addr` and a seed sweep does not recover it — or sooner, if
+someone is planning a feature larger than the ~62 ALMs that started all this.
+
+## Other things that would buy headroom
 
 In rough order of payoff against risk. **None of these has been attempted**, and all of them
 are changes to a memory controller in a core that is in daily use — the failure mode is
@@ -150,9 +221,7 @@ from.
 
 ### 2. Reduce fan-in pressure on `sd_addr`
 
-Three sources feed it (`chipAddr`, `writeAddr`, `cpuAddr`, lines 334/352/363) plus the state
-decode. Splitting the mux so the chip path — the one that fails — does not share logic with
-the CPU path may let the fitter place them apart.
+**Promoted — see "THE DESIGNATED NEXT FIX" above.**
 
 ### 3. LogicLock the new logic away from the SDRAM region
 
