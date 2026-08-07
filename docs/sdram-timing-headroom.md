@@ -120,14 +120,33 @@ if(~chipDMA | ~chipRW) begin
     {sd_ba,sd_addr,casaddr[8:0]} <= chipAddr;
 ```
 
-The decision inputs (`chipDMA`, `chipRW`) and the address are all stable long before state 0
-arrives — they move on the 7.09 MHz Amiga cadence. So the *selection* could be computed and
-registered during state 15, leaving state 0 to load an already-muxed, already-selected
-value. That removes the state decode from the critical path without changing when anything
-is actually presented to the SDRAM.
+This splits into two halves with very different verdicts.
 
-Cost: the pipeline register, and a careful argument that every input really is stable a
-cycle earlier — including on the first access after reset and around refresh slots.
+**The decode half is sound, and is what was built.** Only states 0 and 2 drive `sd_addr`,
+and the next-state expression is right there in the counter. Registering the two decodes
+from that same expression gives signals that are true on exactly the cycles
+`sdram_state == 0` and `== 2`, with no assumption about clock ratios:
+
+```verilog
+next_state  = (~old_7m & c_7m) ? 4'd0 : (sdram_state + 1'd1);
+sdram_state <= next_state;
+state_is_0  <= (next_state == 4'd0);
+state_is_2  <= (next_state == 4'd2);
+```
+
+The data path is untouched, so the existing multicycles still govern it unchanged.
+
+**The mux half is NOT sound — do not build it.** The original suggestion here was to compute
+the slot-type decision and the address selection during state 15. That rests on the claim
+that `chipDMA`, `chipRW` and `chipAddr` are "stable long before state 0 arrives". They are
+not. `c_7m` is the Amiga `c1` phase (`Minimig.sv:657`), and `chipdma_arb` is clocked from
+that same `c1` (`Minimig.sv:701`) — so the arbiter's outputs change on the very edge that
+resets `sdram_state` to 0. Sampling them during state 15 captures the **previous** Amiga
+cycle's request: a stale address handed to the SDRAM, which is the exact corruption mode
+this work is trying to avoid.
+
+Recorded because the idea reads as obviously correct until you trace where `c_7m` comes
+from.
 
 ### 2. Reduce fan-in pressure on `sd_addr`
 
@@ -150,10 +169,21 @@ quartus_fit Minimig --seed=3 \
   --set=PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION=ON
 ```
 
-**Result: −0.358 ns, 23,602 ALMs.** Identical slack to seed 3 without retiming. The ALM count
-moved slightly, so the options did take effect — they simply cannot help this path. That is
-consistent with the diagnosis: the cost is interconnect around a congested register, and
-moving a register boundary does not relieve routing congestion.
+**Result: −0.358 ns — and the experiment was worthless.** `Minimig.qsf:35-38` already carries
+`PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON` and `PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON`,
+along with `PHYSICAL_SYNTHESIS_EFFORT EXTRA`. The run set options that were already set,
+which is precisely why it reproduced seed 3's slack exactly. It says nothing about whether
+retiming can help.
+
+**The real lesson is about the tool.** `quartus_fit --set=X=Y` and `--seed=N` do **not** apply
+per-invocation — they are written permanently into the `.qsf`. Worse, the rewrite expanded
+every `source sys/sys.tcl` / `source files.qip` include into ~260 lines of literal inline
+assignments while leaving the `source` lines in place, so the whole design ended up declared
+twice. The next compile crashed with `Fatal Error: Access Violation` inside the STA engine's
+wildcard keeper matching (`add_keeper_to_vector_if_wildcard_matches`).
+
+Never pass `--set` or `--seed` to `quartus_fit` in this repository. To try fitter settings,
+copy the project to scratch, or edit the `.qsf` deliberately and revert it deliberately.
 
 ### Known dead ends
 
