@@ -110,6 +110,12 @@
 #define UIO_MM2_SNAC    0xFD
 #define UIO_MM2_SNACRD  0xFE  // PSX SNAC: read pad state
 
+// Light-pen latch, AmigaCD only. Two commands because 11 bits of vpos plus 8 of
+// hpos do not fit one word. 0xFD is the Menu core's SNAC enable; the two cores
+// decode independently and never see each other's traffic.
+#define UIO_MM2_LPENV   0xFD  // PSX SNAC: light-pen vertical position
+#define UIO_MM2_LPENH   0xFF  // PSX SNAC: light-pen horizontal position
+
 #define JOY_RIGHT       0x01
 #define JOY_LEFT        0x02
 #define JOY_DOWN        0x04

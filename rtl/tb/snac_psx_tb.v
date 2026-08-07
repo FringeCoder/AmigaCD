@@ -64,8 +64,20 @@ wire dat_p1, ack_p1;
 reg [7:0] p1_btn0 = 8'hFF;
 reg [7:0] p1_btn1 = 8'hFF;
 
+// port{1,2}_is_gun swap which model actually answers a port's ATT, by
+// forcing the *other* model's own att input high (idle) so it never
+// responds: only one device may drive the shared DAT/ACK wires at a time,
+// and the model has no runtime device-select input of its own (DEVICE_ID
+// is a compile-time parameter), so the mux has to live out here.
+reg port1_is_gun = 1'b0;
+reg port2_is_gun = 1'b0;
+wire att1_pad = port1_is_gun ? 1'b1 : att1;
+wire att1_gun = port1_is_gun ? att1 : 1'b1;
+wire att2_pad = port2_is_gun ? 1'b1 : att2;
+wire att2_gun = port2_is_gun ? att2 : 1'b1;
+
 psx_pad_model #(.DEVICE_ID(8'h41), .PAYLOAD_BYTES(2)) pad_p1 (
-	.att(att1), .clk(user_out[5]), .cmd(user_out[2]),
+	.att(att1_pad), .clk(user_out[5]), .cmd(user_out[2]),
 	.dat(dat_p1), .ack(ack_p1),
 	.btn0(p1_btn0), .btn1(p1_btn1),
 	.ax_rx(8'h80), .ax_ry(8'h80), .ax_lx(8'h80), .ax_ly(8'h80)
@@ -77,10 +89,36 @@ wire dat_p2, ack_p2;
 reg [7:0] p2_btn0 = 8'hFF;
 
 psx_pad_model #(.DEVICE_ID(8'h73), .PAYLOAD_BYTES(6)) pad_p2 (
-	.att(att2), .clk(user_out[5]), .cmd(user_out[2]),
+	.att(att2_pad), .clk(user_out[5]), .cmd(user_out[2]),
 	.dat(dat_p2), .ack(ack_p2),
 	.btn0(p2_btn0), .btn1(8'hFF),
 	.ax_rx(8'h11), .ax_ry(8'h22), .ax_lx(8'h33), .ax_ly(8'h44)
+);
+
+// GunCon (device 0x63), one model per port, wired through the att{1,2}_gun
+// mux above. Its payload is laid out buttonsLSB, buttonsMSB, X LSB, X MSB,
+// Y LSB, Y MSB (rtl/snac_psx.v's GunCon comment, sourced from
+// PSX_MiSTer/rtl/joypad_pad.vhd), which lands on the model's btn0/btn1/
+// ax_rx/ax_ry/ax_lx/ax_ly ports in that order.
+reg [15:0] gun1_x = 16'h0000, gun1_y = 16'h0000;
+reg [15:0] gun2_x = 16'h0000, gun2_y = 16'h0000;
+wire dat_gun1, ack_gun1;
+wire dat_gun2, ack_gun2;
+
+psx_pad_model #(.DEVICE_ID(8'h63), .PAYLOAD_BYTES(6)) gun_p1 (
+	.att(att1_gun), .clk(user_out[5]), .cmd(user_out[2]),
+	.dat(dat_gun1), .ack(ack_gun1),
+	.btn0(8'hFF), .btn1(8'hFF),
+	.ax_rx(gun1_x[7:0]), .ax_ry(gun1_x[15:8]),
+	.ax_lx(gun1_y[7:0]), .ax_ly(gun1_y[15:8])
+);
+
+psx_pad_model #(.DEVICE_ID(8'h63), .PAYLOAD_BYTES(6)) gun_p2 (
+	.att(att2_gun), .clk(user_out[5]), .cmd(user_out[2]),
+	.dat(dat_gun2), .ack(ack_gun2),
+	.btn0(8'hFF), .btn1(8'hFF),
+	.ax_rx(gun2_x[7:0]), .ax_ry(gun2_x[15:8]),
+	.ax_lx(gun2_y[7:0]), .ax_ly(gun2_y[15:8])
 );
 
 // Both pads sit on the same wires; only the selected one drives them. The
@@ -105,8 +143,8 @@ reg pads_present = 1'b1;
 reg ack_glitch_n = 1'b1;   // 0 = inject a glitch (active low, like ACK itself)
 
 always @(*) begin
-	user_in[4] = pads_present ? (dat_p1 & dat_p2) : 1'b1;
-	user_in[3] = ack_glitch_n & (pads_present ? (ack_p1 & ack_p2) : 1'b1);
+	user_in[4] = pads_present ? (dat_p1 & dat_gun1 & dat_p2 & dat_gun2) : 1'b1;
+	user_in[3] = ack_glitch_n & (pads_present ? (ack_p1 & ack_gun1 & ack_p2 & ack_gun2) : 1'b1);
 end
 
 wire sclk = user_out[5];
@@ -343,6 +381,50 @@ initial begin
 	enable = 1;
 	wait_polls(2);
 	check("re-enabled port1 id", id0, 8'h41);
+
+	// --- GunCon (device 0x63): coordinates must reach axes -------------
+	// Regression test for the bug this change fixes: the axes gate in
+	// snac_psx.v used to check only rx_byte[1] == 8'h73 (DualShock
+	// analog), so a GunCon answering 0x63 fell through to the centred
+	// sentinel and its light-gun position never reached software.
+	port1_is_gun = 1'b1;
+	gun1_x = 16'h0140;   // 320
+	gun1_y = 16'h00F0;   // 240
+	wait_polls(2);
+	check("guncon port1 device id", id0, 8'h63);
+	check("guncon port1 axes (X low16, Y high16)", axes0, {gun1_y, gun1_x});
+
+	// Same check on port 2, with different coordinates so a port1/port2
+	// mixup in the fix (e.g. widening the gate on axes0 but not axes1)
+	// would be caught rather than passing by coincidence.
+	port1_is_gun = 1'b0;
+	port2_is_gun = 1'b1;
+	gun2_x = 16'h0064;   // 100
+	gun2_y = 16'h0032;   // 50
+	wait_polls(2);
+	check("guncon port2 device id", id1, 8'h63);
+	check("guncon port2 axes (X low16, Y high16)", axes1, {gun2_y, gun2_x});
+
+	// Off-screen sentinel: PSX_MiSTer's GunCon reports X=0x0001, Y=0x000A
+	// when aimed off the visible picture. That must reach axes exactly as
+	// any other coordinate would -- passed through unaltered, not
+	// special-cased or clamped to the 0x80808080 "no axes" centre value.
+	port2_is_gun = 1'b0;
+	port1_is_gun = 1'b1;
+	gun1_x = 16'h0001;
+	gun1_y = 16'h000A;
+	wait_polls(2);
+	check("guncon off-screen sentinel device id", id0, 8'h63);
+	check("guncon off-screen sentinel passed through", axes0, {gun1_y, gun1_x});
+
+	// A digital pad (0x41) must still centre: widening the gate to admit
+	// 0x63 must not also admit anything else. Swap port 1 back to the
+	// resident digital pad and confirm axes0 returns to the centre
+	// sentinel.
+	port1_is_gun = 1'b0;
+	wait_polls(2);
+	check("digital pad still centred after guncon gate widened", id0, 8'h41);
+	check("digital pad axes still centred", axes0, 32'h80808080);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);

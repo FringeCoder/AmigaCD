@@ -9,20 +9,49 @@ both stock upstream features.
 
 ## Setup
 
-**1. Put the binary on the SD card** as `/media/fat/MiSTer_AmigaCD`:
+**1. Stage the files.** `./scripts/stage-output.sh --binary` collects everything
+into `output/`, always overwriting — both cores plus the binary from CI. The
+binary comes from CI because the Windows dev machine has no ARM cross-toolchain,
+so `make` cannot run there; `scripts/deploy-from-ci.sh` exists for the same
+reason. To build and push from WSL instead:
 
 ```bash
 ./scripts/wsl-build.sh deploy      # needs ./host or $MISTER_HOST
 ```
 
-**2. Add to `/media/fat/MiSTer.ini`:**
+**2. Copy to the SD card:**
+
+| File | Goes to |
+|---|---|
+| `MiSTer_AmigaCD` | `/media/fat/MiSTer_AmigaCD` |
+| `MiSTer` | `/media/fat/MiSTer` — replaces the stock main binary |
+| `amigacd.rbf` | `/media/fat/_Computer/` |
+| `menu.rbf` | `/media/fat/menu.rbf` |
+
+**3. Add to `/media/fat/MiSTer.ini`:**
 
 ```ini
 [AmigaCD]
 main=MiSTer_AmigaCD
+
+snac_psx=1
 ```
 
-That's it. Load the AmigaCD core and it restarts into our binary.
+Load the AmigaCD core and it restarts into our binary.
+
+### Why the binary is installed twice
+
+`MiSTer` and `MiSTer_AmigaCD` are the **same build under two names**, and both
+are needed once PSX SNAC is in play.
+
+`main=` only redirects the core whose section it appears under. Everything else
+— including the **boot menu** — keeps running whatever is at `/media/fat/MiSTer`.
+The Menu core's SNAC pad navigation lives in userspace, so installing only
+`MiSTer_AmigaCD` gives you a pad that works inside AmigaCD and does nothing in
+the menu, with no error to explain the difference.
+
+If you do not use the SNAC pad in the boot menu, the stock `MiSTer` binary is
+fine and only `MiSTer_AmigaCD` is required.
 
 ## Testing with a pre-rename core
 
