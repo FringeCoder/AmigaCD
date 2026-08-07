@@ -156,8 +156,10 @@ static void snac_lightpen(void)
 
 		int hpos = ((int)gx * 125) / 280 + cfg_gun_offset_x;
 		int vpos = (int)gy + cfg_gun_offset_y;
-		if (hpos < 0) hpos = 0; if (hpos > 0xFF) hpos = 0xFF;
-		if (vpos < 0) vpos = 0; if (vpos > 0x7FF) vpos = 0x7FF;
+		if (hpos < 0)     hpos = 0;
+		if (hpos > 0xFF)  hpos = 0xFF;
+		if (vpos < 0)     vpos = 0;
+		if (vpos > 0x7FF) vpos = 0x7FF;
 
 		// Vertical first, then horizontal -- the horizontal write is the one the
 		// Amiga side reads against, so ordering keeps a stale pair impossible to
