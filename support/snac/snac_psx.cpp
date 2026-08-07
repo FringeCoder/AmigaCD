@@ -14,6 +14,7 @@ static uint32_t axes[2];
 // Defined below; snac_psx_poll() calls them and C++ needs the declarations first.
 static void snac_osd_keys(void);
 static void snac_mouse(void);
+static void snac_lightpen(void);
 
 int snac_psx_enabled(void)
 {
@@ -58,6 +59,7 @@ void snac_psx_poll(void)
 
 	snac_mouse();
 	snac_osd_keys();
+	snac_lightpen();
 }
 
 // Stick deflection is a velocity, not a position: subtract centre, apply a
@@ -105,6 +107,63 @@ static void snac_mouse(void)
 		int dx = snac_axis_delta(lx, &mouse_frac_x);
 		int dy = snac_axis_delta(ly, &mouse_frac_y);
 		if (dx || dy) user_io_mouse(0, dx, dy, 0);
+	}
+}
+
+// GunCon X is in 8 MHz dot-clock ticks (125 ns each); the Amiga's VHPOSR reads
+// hpos[8:1], one step of which is 280 ns. So one gun tick is 125/280 of an
+// Amiga step. Y is already in scanlines and needs only an offset.
+//
+// Calibration lives here rather than in RTL precisely so it can be adjusted
+// without a 40-minute Quartus run. Not yet persisted to AmigaCD.cfg (that
+// would need a minimig_config.h/.cpp migration of its own) -- edit and
+// rebuild to calibrate for now.
+static int cfg_gun_offset_x = 0;
+static int cfg_gun_offset_y = 0;
+
+#define SNAC_GUN_OFFSCREEN_X 0x0001
+#define SNAC_GUN_OFFSCREEN_Y 0x000A
+
+// rtl/snac_psx.v packs the last four payload bytes into axes the same way
+// for every device (it does not know or care which one it is talking to):
+//   axes <= { rx_byte[8], rx_byte[7], rx_byte[6], rx_byte[5] }
+// For a GunCon those four bytes are, in wire order, X-LSB, X-MSB, Y-LSB,
+// Y-MSB (see rtl/snac_psx.v's device-ID comment and the GunCon reply layout
+// this task's brief confirms from PSX_MiSTer's joypad_pad.vhd), so
+//   axes[7:0]   = rx_byte[5] = X-LSB
+//   axes[15:8]  = rx_byte[6] = X-MSB (bit 0 only; X is 9 bits)
+//   axes[23:16] = rx_byte[7] = Y-LSB
+//   axes[31:24] = rx_byte[8] = Y-MSB (bit 0 only; Y is 9 bits)
+// which makes axes[8:0] the 9-bit X and (axes>>16)[8:0] the 9-bit Y -- the
+// same masks the brief gave, verified against the actual concatenation
+// rather than assumed from it.
+static void snac_lightpen(void)
+{
+	if (!is_amigacd()) return;
+
+	for (int p = 0; p < 2; p++)
+	{
+		unsigned char mode = minimig_config.snac[p] & 0x07;
+		if (mode != mmsp_lightgun) continue;
+		if (id[p] != 0x63) continue;   // axes are only meaningful from a GunCon
+
+		uint16_t gx = (uint16_t)(axes[p] & 0x01FF);          // X, 9 bits
+		uint16_t gy = (uint16_t)((axes[p] >> 16) & 0x01FF);  // Y, 9 bits
+
+		// Pointing off the screen is a real state, not an error: the Amiga side
+		// must simply not latch, leaving the last position alone.
+		if (gx == SNAC_GUN_OFFSCREEN_X && gy == SNAC_GUN_OFFSCREEN_Y) continue;
+
+		int hpos = ((int)gx * 125) / 280 + cfg_gun_offset_x;
+		int vpos = (int)gy + cfg_gun_offset_y;
+		if (hpos < 0) hpos = 0; if (hpos > 0xFF) hpos = 0xFF;
+		if (vpos < 0) vpos = 0; if (vpos > 0x7FF) vpos = 0x7FF;
+
+		// Vertical first, then horizontal -- the horizontal write is the one the
+		// Amiga side reads against, so ordering keeps a stale pair impossible to
+		// observe as a wrong position, only as a one-poll-old one.
+		spi_uio_cmd16(UIO_MM2_LPENV, (uint16_t)vpos);
+		spi_uio_cmd16(UIO_MM2_LPENH, (uint16_t)hpos);
 	}
 }
 
