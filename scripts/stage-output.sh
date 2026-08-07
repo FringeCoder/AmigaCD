@@ -13,6 +13,14 @@
 #   menu.rbf         -> /media/fat/            (the boot menu core)
 #   MiSTer_AmigaCD   -> /media/fat/            (needs [AmigaCD] main=MiSTer_AmigaCD
 #                                               in MiSTer.ini -- see docs/deployment.md)
+#   MiSTer           -> /media/fat/            (the SAME build, replacing the stock
+#                                               main binary)
+#
+# The binary is staged under BOTH names on purpose, and they are byte-identical.
+# `main=` only redirects the AmigaCD core, so the boot menu still runs whatever
+# is at /media/fat/MiSTer -- and the Menu core's PSX SNAC OSD navigation lives in
+# userspace, so without replacing that one too the pad does nothing in the menu.
+# See docs/psx-snac-hardware.md:59.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -65,10 +73,14 @@ if [ "${1:-}" = "--binary" ]; then
         gh run download "$RUN_ID" --repo "$REPO_SLUG" --dir "$tmp" >/dev/null 2>&1 || true
         elf=$(find "$tmp" -name 'MiSTer.elf' -o -name 'MiSTer' | head -1)
         if [ -n "$elf" ]; then
-            cp -f "$elf" "$OUT/MiSTer_AmigaCD"
             SHA=$(gh run view "$RUN_ID" --repo "$REPO_SLUG" --json headSha -q '.headSha' | cut -c1-7)
-            printf "  %-18s %9d bytes  from CI run %s (%s)\n" \
-                "MiSTer_AmigaCD" "$(stat -c%s "$OUT/MiSTer_AmigaCD")" "$RUN_ID" "$SHA"
+            # Same build under both names -- see the header for why the stock
+            # main binary has to be replaced too.
+            for name in MiSTer_AmigaCD MiSTer; do
+                cp -f "$elf" "$OUT/$name"
+                printf "  %-18s %9d bytes  from CI run %s (%s)\n" \
+                    "$name" "$(stat -c%s "$OUT/$name")" "$RUN_ID" "$SHA"
+            done
         else
             echo "MISSING  no MiSTer binary in run $RUN_ID's artifacts" >&2
             rc=1
@@ -78,5 +90,40 @@ if [ "${1:-}" = "--binary" ]; then
 else
     echo "  (skipping the binary; pass --binary to fetch it from CI)"
 fi
+
+cat > "$OUT/WHERE-THESE-GO.txt" <<'MANIFEST'
+Copy to the MiSTer SD card:
+
+  amigacd.rbf      -> /media/fat/_Computer/AmigaCD.rbf   (or wherever you keep cores)
+  menu.rbf         -> /media/fat/menu.rbf
+  MiSTer_AmigaCD   -> /media/fat/MiSTer_AmigaCD
+  MiSTer           -> /media/fat/MiSTer                  (replaces the stock binary)
+
+MiSTer and MiSTer_AmigaCD are the SAME build under two names. Both are needed:
+`main=` only redirects the AmigaCD core, so the boot menu keeps running
+/media/fat/MiSTer, and the Menu core's PSX SNAC pad navigation lives in
+userspace -- without replacing that one the pad does nothing in the menu.
+
+/media/fat/MiSTer.ini needs both of these:
+
+  [AmigaCD]
+  main=MiSTer_AmigaCD
+
+  snac_psx=1
+
+The first selects our binary for the AmigaCD core. The second enables the pad in
+the boot menu, and is read by whichever binary is running at boot.
+
+Two traps:
+
+- update_all OVERWRITES menu.rbf with the stock one, silently dropping SNAC pad
+  support from the boot menu until you copy it back.
+- SW[1] on the DE10-Nano must be OFF. It steals three of the user port's pins
+  and fails silently.
+
+The binary is unstripped: same code as a stripped build, ~200 KB larger, and a
+crash under gdb gives a named backtrace instead of `?? ()`.
+MANIFEST
+echo "  WHERE-THESE-GO.txt   written"
 
 exit $rc
