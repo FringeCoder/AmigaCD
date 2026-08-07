@@ -11,8 +11,9 @@ static uint16_t pad[2];
 static uint8_t  id[2];
 static uint32_t axes[2];
 
-// Defined below; snac_psx_poll() calls it and C++ needs the declaration first.
+// Defined below; snac_psx_poll() calls them and C++ needs the declarations first.
 static void snac_osd_keys(void);
+static void snac_mouse(void);
 
 int snac_psx_enabled(void)
 {
@@ -55,7 +56,56 @@ void snac_psx_poll(void)
 	if (!id[0]) pad[0] = 0;
 	if (!id[1]) pad[1] = 0;
 
+	snac_mouse();
 	snac_osd_keys();
+}
+
+// Stick deflection is a velocity, not a position: subtract centre, apply a
+// deadzone, scale, and accumulate the fraction so slow movement does not
+// quantise to zero. The pointer tolerates a frame of lag where buttons do not,
+// which is why this half lives here and the buttons live in RTL.
+#define SNAC_MOUSE_DEADZONE 24
+#define SNAC_MOUSE_DIV      12
+
+static int mouse_frac_x, mouse_frac_y;
+
+static int snac_axis_delta(uint8_t v, int *frac)
+{
+	int d = (int)v - 128;
+	if (d > -SNAC_MOUSE_DEADZONE && d < SNAC_MOUSE_DEADZONE) return 0;
+	*frac += d;
+	int out = *frac / SNAC_MOUSE_DIV;
+	*frac -= out * SNAC_MOUSE_DIV;
+	return out;
+}
+
+static void snac_mouse(void)
+{
+	// minimig_config.snac[] is AmigaCD's per-port setting; it is a single
+	// global that a core switch does not clear, so without this guard a
+	// mouse mode configured under AmigaCD would keep firing user_io_mouse()
+	// from a stale value after switching back to the Menu core.
+	if (!is_amigacd()) return;
+
+	for (int p = 0; p < 2; p++)
+	{
+		unsigned char mode = minimig_config.snac[p] & 0x07;
+		if (mode != mmsp_mouse && mode != mmsp_pad_mouse) continue;
+		if (id[p] != 0x73) continue;   // axes are only valid in analog mode
+
+		// rtl/snac_psx.v's axes0/axes1 comment reads "{LY, LX, RY, RX}, 8 bits
+		// each" and the ST_DONE assignment is
+		//   axes0 <= { rx_byte[8], rx_byte[7], rx_byte[6], rx_byte[5] };
+		// Verilog concatenation puts the first operand in the MSB, so
+		// axes[31:24]=LY, axes[23:16]=LX, axes[15:8]=RY, axes[7:0]=RX. The
+		// left stick is the pointer.
+		uint8_t lx = (axes[p] >> 16) & 0xFF;
+		uint8_t ly = (axes[p] >> 24) & 0xFF;
+
+		int dx = snac_axis_delta(lx, &mouse_frac_x);
+		int dy = snac_axis_delta(ly, &mouse_frac_y);
+		if (dx || dy) user_io_mouse(0, dx, dy, 0);
+	}
 }
 
 // menu_key_set() latches a level, not an event: menu_key_get() (menu.cpp)
