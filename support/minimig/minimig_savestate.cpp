@@ -1,10 +1,9 @@
 // Save state payload format helpers.
 //
 // Deliberately free of MiSTer headers so tests/Makefile can build it with the
-// host compiler. Only <stdint.h>, <string.h> and our own headers.
+// host compiler. Only <stdint.h> and our own headers.
 
 #include <stdint.h>
-#include <string.h>
 
 #include "minimig_savestate.h"
 
@@ -26,13 +25,21 @@ bool ss_header_parse(const uint32_t *win, uint32_t win_words, ss_header_t *out)
 	if (h.magic != SS_MAGIC) return false;
 	if (h.version != SS_VERSION) return false;
 
+	// core_words and host_words are raw, untrusted uint32_t values straight
+	// from the file. Adding two of them can wrap a uint32_t, and a wrapped
+	// sum would slip past every check below (and later alias the host block
+	// onto unrelated memory via ss_host_block_offset()). Do the bounds
+	// arithmetic in 64 bits so no attainable pair of values can wrap.
+	uint64_t core_words = h.core_words;
+	uint64_t host_words = h.host_words;
+
 	// length counts everything after word 1.
 	if (h.length < SS_HEADER_TAIL_WORDS) return false;
 	if (h.length > win_words - 2) return false;
-	if (h.core_words + h.host_words != h.length - SS_HEADER_TAIL_WORDS) return false;
+	if (core_words + host_words != (uint64_t)h.length - SS_HEADER_TAIL_WORDS) return false;
 
 	// Core payload starts at word 8 and must fit.
-	if (8u + h.core_words + h.host_words > win_words) return false;
+	if (8u + core_words + host_words > win_words) return false;
 
 	if (crc32_compute((const uint8_t *)&win[8], (int)(h.core_words * 4)) != h.core_crc32)
 		return false;

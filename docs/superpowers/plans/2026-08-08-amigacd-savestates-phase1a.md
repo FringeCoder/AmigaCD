@@ -183,6 +183,19 @@ int main(void)
 	win[1] = SS_MAX_WORDS + 100;
 	check("length past window rejected", !ss_header_parse(win, SS_MAX_WORDS, &h));
 
+	// core_words + host_words must not be allowed to wrap a uint32_t. Here
+	// core_words = 0xFFFFFFF9 and host_words = 10 wrap to 3, which matches
+	// length - SS_HEADER_TAIL_WORDS (9 - 6) and slips under win_words in the
+	// naive additive bounds checks. core_crc32 = 0 matches what the buggy CRC
+	// call produces for a negative cast length, so only the overflow guard
+	// itself can catch this.
+	build_window(win, 3);
+	win[1] = 9;
+	win[4] = 0xFFFFFFF9u;
+	win[5] = 10;
+	win[6] = 0;
+	check("overflowing core_words+host_words rejected", !ss_header_parse(win, SS_MAX_WORDS, &h));
+
 	// A truncated file arrives as a zero tail because the host memsets the
 	// window before reading (user_io.cpp:1998). That must not parse.
 	memset(win, 0, sizeof(win));
@@ -316,10 +329,9 @@ Create `support/minimig/minimig_savestate.cpp`:
 // Save state payload format helpers.
 //
 // Deliberately free of MiSTer headers so tests/Makefile can build it with the
-// host compiler. Only <stdint.h>, <string.h> and our own headers.
+// host compiler. Only <stdint.h> and our own headers.
 
 #include <stdint.h>
-#include <string.h>
 
 #include "minimig_savestate.h"
 
@@ -341,13 +353,21 @@ bool ss_header_parse(const uint32_t *win, uint32_t win_words, ss_header_t *out)
 	if (h.magic != SS_MAGIC) return false;
 	if (h.version != SS_VERSION) return false;
 
+	// core_words and host_words are raw, untrusted uint32_t values straight
+	// from the file. Adding two of them can wrap a uint32_t, and a wrapped
+	// sum would slip past every check below (and later alias the host block
+	// onto unrelated memory via ss_host_block_offset()). Do the bounds
+	// arithmetic in 64 bits so no attainable pair of values can wrap.
+	uint64_t core_words = h.core_words;
+	uint64_t host_words = h.host_words;
+
 	// length counts everything after word 1.
 	if (h.length < SS_HEADER_TAIL_WORDS) return false;
 	if (h.length > win_words - 2) return false;
-	if (h.core_words + h.host_words != h.length - SS_HEADER_TAIL_WORDS) return false;
+	if (core_words + host_words != (uint64_t)h.length - SS_HEADER_TAIL_WORDS) return false;
 
 	// Core payload starts at word 8 and must fit.
-	if (8u + h.core_words + h.host_words > win_words) return false;
+	if (8u + core_words + host_words > win_words) return false;
 
 	if (crc32_compute((const uint8_t *)&win[8], (int)(h.core_words * 4)) != h.core_crc32)
 		return false;

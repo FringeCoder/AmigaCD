@@ -58,6 +58,19 @@ int main(void)
 	win[1] = SS_MAX_WORDS + 100;
 	check("length past window rejected", !ss_header_parse(win, SS_MAX_WORDS, &h));
 
+	// core_words + host_words must not be allowed to wrap a uint32_t. Here
+	// core_words = 0xFFFFFFF9 and host_words = 10 wrap to 3, which matches
+	// length - SS_HEADER_TAIL_WORDS (9 - 6) and slips under win_words in the
+	// naive additive bounds checks. core_crc32 = 0 matches what the buggy CRC
+	// call produces for a negative cast length, so only the overflow guard
+	// itself can catch this.
+	build_window(win, 3);
+	win[1] = 9;
+	win[4] = 0xFFFFFFF9u;
+	win[5] = 10;
+	win[6] = 0;
+	check("overflowing core_words+host_words rejected", !ss_header_parse(win, SS_MAX_WORDS, &h));
+
 	// A truncated file arrives as a zero tail because the host memsets the
 	// window before reading (user_io.cpp:1998). That must not parse.
 	memset(win, 0, sizeof(win));
