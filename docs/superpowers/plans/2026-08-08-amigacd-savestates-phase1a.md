@@ -499,7 +499,7 @@ endtask
 initial begin
 	// The canonical CRC-32 check value.
 	feed_string("123456789", 9);
-	check("check vector 123456789", 32'hCBF43F26);
+	check("check vector 123456789", 32'hCBF43926);
 
 	// A single byte, verified against the same reflected 0xEDB88320 CRC the
 	// host uses in minimig_a2065_crc32.cpp.
@@ -512,7 +512,7 @@ initial begin
 
 	// init must be able to restart cleanly after a previous run.
 	feed_string("123456789", 9);
-	check("restart after reuse", 32'hCBF43F26);
+	check("restart after reuse", 32'hCBF43926);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
