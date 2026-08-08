@@ -15,7 +15,7 @@
 /* External references — resolved at link time */
 extern volatile uint8_t *boardram;
 extern int mungepacket(uint8_t *packet, int len);
-extern uint32_t crc32_compute(const uint8_t *data, int len);
+#include "minimig_crc32.h"
 extern void ethernet_send(const uint8_t *frame, int len);
 
 /* Register accessors from registers.cpp */

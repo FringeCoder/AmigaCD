@@ -137,3 +137,14 @@ jobs:
 
       - name: Run CD32 mapping testbench
         run: vvp build/snac_cd32_tb
+
+  # Native unit tests for dependency-free host modules. Separate from the ARM
+  # cross-build because these run on the CI host directly.
+  host-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run native unit tests
+        run: make -C tests
