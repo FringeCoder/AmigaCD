@@ -144,6 +144,12 @@ jobs:
       - name: Run save state CRC testbench
         run: vvp build/ss_crc32_tb
 
+      - name: Build quiesce testbench
+        run: iverilog -g2005 -Wall -o build/ss_quiesce_tb rtl/ss_quiesce.v rtl/tb/ss_quiesce_tb.v
+
+      - name: Run quiesce testbench
+        run: vvp build/ss_quiesce_tb
+
   # Native unit tests for dependency-free host modules. Separate from the ARM
   # cross-build because these run on the CI host directly.
   host-test:
