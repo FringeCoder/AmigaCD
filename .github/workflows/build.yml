@@ -150,6 +150,12 @@ jobs:
       - name: Run quiesce testbench
         run: vvp build/ss_quiesce_tb
 
+      - name: Build state serialiser testbench
+        run: iverilog -g2005 -Wall -o build/ss_serdes_tb rtl/ss_serdes.v rtl/tb/ss_serdes_tb.v
+
+      - name: Run state serialiser testbench
+        run: vvp build/ss_serdes_tb
+
   # Native unit tests for dependency-free host modules. Separate from the ARM
   # cross-build because these run on the CI host directly.
   host-test:
