@@ -208,19 +208,8 @@ ss_crc32 crc (.clk(clk), .init(crc_init), .wr(crc_wr), .byte_in(crc_byte), .crc_
 // including the one in ss_ctrl_tb.v.
 reg [31:0] crc_shift;
 reg [2:0]  crc_bytes_left;
-
-always @(posedge clk) begin
-	crc_wr <= 1'b0;
-	if (!rst_n) begin
-		crc_bytes_left <= 3'd0;
-	end
-	else if (crc_bytes_left != 3'd0) begin
-		crc_byte       <= crc_shift[7:0];
-		crc_wr         <= 1'b1;
-		crc_shift      <= {8'd0, crc_shift[31:8]};
-		crc_bytes_left <= crc_bytes_left - 3'd1;
-	end
-end
+// The feeder itself sits inside the writer's always block below, next to
+// queue_word(), which is the only other thing that drives these two.
 
 // A word is "in flight" until the CRC has consumed all four of its bytes
 // and the DDR3 write that carries it has been accepted. Nothing queues a
@@ -278,11 +267,31 @@ always @(posedge clk) begin
 		drain_idx        <= 16'd0;
 		pair_count       <= 24'd0;
 		pending_low_held <= 1'b0;
+		crc_wr           <= 1'b0;
+		crc_bytes_left   <= 3'd0;
 	end
 	else begin
 		ser_save_start <= 1'b0;
 		dma_start      <= 1'b0;
 		crc_init       <= 1'b0;
+
+		// CRC byte feeder. It lives in this block, rather than one of its
+		// own, because queue_word() below also drives crc_shift and
+		// crc_bytes_left: two always blocks writing the same reg is a
+		// multiple-driver error in synthesis (Quartus 10028) even though
+		// Icarus accepts it, so the split version could never be built.
+		// The two never fire on the same cycle -- queue_word is only
+		// called when word_busy is false, and word_busy includes
+		// crc_bytes_left != 0 -- and where they would, queue_word's later
+		// assignment wins, which is the precedence the split version's
+		// behaviour relied on anyway.
+		crc_wr <= 1'b0;
+		if (crc_bytes_left != 3'd0) begin
+			crc_byte       <= crc_shift[7:0];
+			crc_wr         <= 1'b1;
+			crc_shift      <= {8'd0, crc_shift[31:8]};
+			crc_bytes_left <= crc_bytes_left - 3'd1;
+		end
 
 		// DDR3 write handshake: hold until the arbiter accepts. Safe as a
 		// single-entry buffer because word_busy gates every producer of
