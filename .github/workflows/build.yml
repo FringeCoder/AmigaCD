@@ -162,6 +162,15 @@ jobs:
       - name: Run chip RAM readout testbench
         run: vvp build/ss_dma_tb
 
+      - name: Build save state controller testbench
+        run: |
+          iverilog -g2005 -Wall -o build/ss_ctrl_tb \
+            rtl/ss_ctrl.v rtl/ss_crc32.v rtl/ss_quiesce.v rtl/ss_serdes.v \
+            rtl/ss_dma.v rtl/tb/ss_ctrl_tb.v
+
+      - name: Run save state controller testbench
+        run: vvp build/ss_ctrl_tb
+
   # Native unit tests for dependency-free host modules. Separate from the ARM
   # cross-build because these run on the CI host directly.
   host-test:
