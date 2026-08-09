@@ -28,6 +28,8 @@ integer           cap_idx;
 integer           errors = 0;
 integer           trial;
 integer           k;
+integer           b;
+reg  [31:0]       expect_word;
 
 ss_serdes #(.WIDTH(WIDTH)) dut
 (
@@ -63,6 +65,23 @@ begin
 	if (cap_idx !== WORDS) begin
 		$display("FAIL word count: got %0d, want %0d", cap_idx, WORDS);
 		errors = errors + 1;
+	end
+
+	// Check the emitted words against the source vector directly, not just
+	// the round trip. A round trip alone cannot tell a correct
+	// least-significant-word-first encoding from any self-consistent wrong
+	// one -- feeding the words back in the order they came out cancels a
+	// symmetric bug. These checks pin the external contract: word k is
+	// bits [k*32 +: 32] of state_in, and the ragged top word is zero-padded.
+	for (k = 0; k < WORDS; k = k + 1) begin
+		expect_word = 32'd0;
+		for (b = 0; b < 32; b = b + 1) begin
+			if ((k*32 + b) < WIDTH) expect_word[b] = value[k*32 + b];
+		end
+		if (captured[k] !== expect_word) begin
+			$display("FAIL word %0d: got %08h, want %08h", k, captured[k], expect_word);
+			errors = errors + 1;
+		end
 	end
 
 	restored = {WIDTH{1'bx}};
