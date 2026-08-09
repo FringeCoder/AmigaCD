@@ -70,6 +70,15 @@ module ss_serdes
 localparam WORDS   = (WIDTH + 31) / 32;
 localparam PADDED  = WORDS * 32;
 
+// Despite the name, this is not physically shifted: each word is read from
+// or written to shifter[count*32 +: 32] directly. An actual shift-by-32
+// register (`shifter <= {32'd0, shifter[PADDED-1:32]}` /
+// `shifter <= {word_in, shifter[PADDED-1:32]}`) was the first cut, but for
+// WORDS == 1 (WIDTH <= 32, which includes this module's own default
+// parameter) PADDED == 32 and PADDED-1:32 is 31:32 -- an out-of-order
+// part-select that Icarus rejects at elaboration, not just at run time, so
+// the single-word case could never even compile. Indexed part-selects
+// addressed by `count` have no such degenerate width.
 reg [PADDED-1:0] shifter;
 reg [15:0]       count;
 reg              saving;
@@ -107,9 +116,8 @@ always @(posedge clk) begin
 			save_finish <= 1'b0;
 		end
 		else if (saving) begin
-			word_out   <= shifter[31:0];
+			word_out   <= shifter[count*32 +: 32];
 			word_valid <= 1'b1;
-			shifter    <= {32'd0, shifter[PADDED-1:32]};
 			count      <= count + 16'd1;
 			if (count == (WORDS - 1)) begin
 				saving      <= 1'b0;
@@ -134,8 +142,8 @@ always @(posedge clk) begin
 			load_finish <= 1'b0;
 		end
 		else if (loading && word_in_valid) begin
-			shifter <= {word_in, shifter[PADDED-1:32]};
-			count   <= count + 16'd1;
+			shifter[count*32 +: 32] <= word_in;
+			count                   <= count + 16'd1;
 			if (count == (WORDS - 1)) begin
 				loading    <= 1'b0;
 				load_latch <= 1'b1;
