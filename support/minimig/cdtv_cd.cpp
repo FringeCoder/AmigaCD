@@ -70,7 +70,22 @@ static void cdtv_diag(const char *fmt, ...)
 // (hps_ext.v cdtv_cs_sec). Each spi_w pushes one byte into the bridge's
 // 8 KB sector staging FIFO; the bridge's drain FSM master-writes them to
 // chip RAM at `acr` via chipdma_arb.
+// The same sub-channel is READABLE (UIO 0x62): each read returns the FIFO's
+// free space in 32-byte units, rounded down — 255 = empty, 0 = full
+// (cdtv_bridge.v sec_space). This is the CDTV analogue of the CD32 path's
+// sec_req credit: the push direction has no handshake, so without reading the
+// credit first we can overrun the FIFO and cdtv_bridge's overflow guard drops
+// the excess bytes SILENTLY. That matters because a save state freezes
+// chipdma_arb's bridge grants for the whole ~0.2 s chip RAM dump, during which
+// the FIFO cannot drain a single byte.
 #define CDTV_SEC_ADDR      0xF820
+#define CDTV_SEC_SPACE_UNIT 32       // cdtv_bridge.v: sec_space is sec_free[12:5]
+// Upper bound on how long we will wait for room in the sector FIFO before
+// giving up and failing the READ. The only thing that legitimately blocks the
+// drain for a long stretch is a save state dump (~0.2 s), so 2 s is an order
+// of magnitude of headroom — and being bounded is what guarantees the MiSTer
+// poll loop can never wedge here no matter what the core is doing.
+#define CDTV_SEC_WAIT_MS   2000
 // Phase-1e STCH-inject sub-channel: io_din[6]=1 inside the CDTV class
 // (hps_ext.v cdtv_cs_stch). Any byte written here pulses cdtv_bridge.stch.
 #define CDTV_STCH_ADDR     0xF840
@@ -277,13 +292,58 @@ static void cdtv_push_reply(const uint8_t *buf, int len)
 #endif
 }
 
+// Read the bridge's sector-FIFO credit and convert it to bytes. The bridge
+// reports whole 32-byte units and rounds DOWN, so this never over-promises.
+// One read strobe is enough — sec_space is combinational status, exactly like
+// akiko_read_sec_counter's 1-byte read on the CD32 sec sub-channel.
+static int cdtv_sec_space_bytes(void)
+{
+	uint16_t v;
+	EnableIO();
+	spi8(UIO_DMA_READ);
+	spi32_w(CDTV_SEC_ADDR);
+	v = (uint16_t)spi_w(0);
+	DisableIO();
+	return (int)(v & 0xff) * CDTV_SEC_SPACE_UNIT;
+}
+
 // Stream `len` bytes into the CDTV bridge's sector staging FIFO. The bridge's
 // drain FSM (cdtv_bridge.v:4b) pops bytes one-at-a-time and master-writes them
-// to chip RAM at acr via chipdma_arb's cdtv port. Caller is responsible for
-// honoring the 8 KB FIFO bound; we hand off 2 KB (one cooked sector) per call.
-static void cdtv_push_sector(const uint8_t *buf, int len)
+// to chip RAM at acr via chipdma_arb's cdtv port.
+//
+// Credit-gated: we read the FIFO's free space first and refuse to start the
+// burst until the whole sector fits. cdtv_bridge's push path has no
+// backpressure — when the FIFO is full it drops bytes without telling anyone —
+// so this read is the only thing standing between a stalled drain and silent
+// CD data corruption. The stall that motivated it is a save state: the freeze
+// ties chipdma_arb's dma_hold high for the entire ~0.2 s chip RAM dump, so the
+// drain FSM gets no slots at all and 8 KB of FIFO absorbs only ~53 ms of a 1x
+// stream.
+//
+// Cannot deadlock. The wait is bounded (CDTV_SEC_WAIT_MS) and, more
+// fundamentally, nothing the core needs in order to drain the FIFO comes from
+// this thread: the drain is FPGA-side (bridge DMAC + INT2 re-arm by the CDTV
+// BIOS), and the save state machine is entirely in RTL. Blocking here stalls
+// only our own producer, which is the point.
+//
+// Returns false if the FIFO never made room; the caller fails the READ rather
+// than pushing bytes it knows will be thrown away.
+static bool cdtv_push_sector(const uint8_t *buf, int len)
 {
-	if (len <= 0) return;
+	if (len <= 0) return true;
+
+	int waited_ms = 0;
+	while (cdtv_sec_space_bytes() < len) {
+		if (waited_ms >= CDTV_SEC_WAIT_MS) {
+			cdtv_dbg("sector FIFO has no room for %d bytes after %d ms — failing READ",
+			         len, waited_ms);
+			return false;
+		}
+		usleep(1000);
+		waited_ms++;
+	}
+	if (waited_ms) cdtv_dbg("sector FIFO throttle: waited %d ms for %d bytes", waited_ms, len);
+
 	EnableIO();
 	spi8(UIO_DMA_WRITE);
 	spi32_w(CDTV_SEC_ADDR);
@@ -291,6 +351,7 @@ static void cdtv_push_sector(const uint8_t *buf, int len)
 		spi_w(buf[i]);
 	}
 	DisableIO();
+	return true;
 }
 
 // -----------------------------------------------------------------------------
@@ -871,14 +932,23 @@ static void cdtv_dispatch(void)
 					default:   src = raw + 16; len = cd_sectorsize; break;
 				}
 
-				cdtv_push_sector(src, len);
+				if (!cdtv_push_sector(src, len)) {
+					// Credit gate gave up — the bridge FIFO never made room.
+					// Report an error rather than push bytes the overflow
+					// guard would drop, which would corrupt the transfer
+					// invisibly and leave the title reading garbage.
+					cdtv_dbg("READ DATA aborted at lba=%u — sector FIFO stalled", lba + s);
+					failed = true;
+					break;
+				}
 
 				// Pace producer ≈ drain rate. Bridge drain FSM pumps ~280 ns/byte
 				// → ~575 µs per 2 KB sector. SPI push is ~1.6 µs/byte → 3.3 ms per
 				// sector. Bare push edges past drain across many sectors and can
-				// fill the 8 KB FIFO; the overflow guard then DROPS subsequent
-				// bytes silently. 1 ms sleep is enough margin for drain to catch
-				// up between sectors without slowing the producer noticeably.
+				// fill the 8 KB FIFO. The credit gate in cdtv_push_sector is now
+				// what makes that SAFE; this sleep is kept purely as pacing so the
+				// timing of a normal read is unchanged from before the gate
+				// existed, and so the common case never has to spin on the credit.
 				if (s + 1 < nsec) usleep(1000);
 			}
 
