@@ -311,15 +311,22 @@ safe to wire straight onto `sdram_ctrl`'s CPU port
   physically impossible under the old held-`sd_cs` protocol -- documented in
   both files' headers.
 
-- **`upstream/core-cd32-cdtv/rtl/ss_dma.v`** -- refreshed to match
-  (`diff` confirmed empty). Note: despite this task's original report
-  claiming this file was part of commit `5c95c28`, `git ls-files` shows it
-  was never actually tracked -- the whole `upstream/*/` tree is gitignored
-  (`.gitignore:7`) and this file had only ever existed on disk, untracked.
-  It is force-added (`git add -f`) in this fix's commit so "refresh ... in
-  the same commit" is literally true going forward; flagging the discrepancy
-  here rather than silently letting the earlier report's claim stand
-  uncorrected.
+- **`upstream/core-cd32-cdtv/rtl/ss_dma.v`** -- refreshed on disk to match
+  (`diff` confirmed empty). This could **not** actually go into the same
+  git commit, and I want to correct the record rather than repeat the
+  earlier report's claim: `upstream/core-cd32-cdtv/` is not a plain
+  directory in this repo, it is a *separate git repository* (it has its own
+  `upstream/core-cd32-cdtv/.git`) with no `.gitmodules` entry registering it
+  as a submodule. `.gitignore:7`'s `/upstream/*/` rule is a symptom of the
+  same fact, not the cause. `git add -f` on a path inside a nested `.git`
+  is a silent no-op in the outer repo -- it reports success but stages
+  nothing, which is exactly what happened here and, per `git log --all`,
+  also explains why the original report's claim that this file was part of
+  commit `5c95c28` does not hold up: `git ls-files` shows it was never
+  tracked by this repo at any point in its history. The file on disk is
+  correct and byte-identical to `rtl/ss_dma.v`; it just isn't, and can't be,
+  version-controlled from here without first turning that directory into a
+  real submodule or dropping the nested `.git`.
 
 ### Proof the new bench actually catches the old defect
 
