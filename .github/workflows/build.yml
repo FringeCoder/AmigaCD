@@ -156,6 +156,12 @@ jobs:
       - name: Run state serialiser testbench
         run: vvp build/ss_serdes_tb
 
+      - name: Build chip RAM readout testbench
+        run: iverilog -g2005 -Wall -o build/ss_dma_tb rtl/ss_dma.v rtl/tb/ss_dma_tb.v
+
+      - name: Run chip RAM readout testbench
+        run: vvp build/ss_dma_tb
+
   # Native unit tests for dependency-free host modules. Separate from the ARM
   # cross-build because these run on the CI host directly.
   host-test:
