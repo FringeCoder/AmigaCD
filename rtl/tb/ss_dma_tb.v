@@ -1,28 +1,27 @@
 `timescale 1ns/1ns
 
-// Mock SDRAM CPU port. Returns a value derived from the address after a
-// per-word programmable latency, so the DUT cannot pass by assuming a fixed
-// response time. Unlike a naive "if (sd_cs && !sd_ready)" latency counter
-// (which can never re-arm on the cycle it fires, since it gates on its own
-// previous output), this one can assert sd_ready on the clock edge right
-// after the previous one -- latency 0 for word 0 does exactly that.
+// Mock SDRAM CPU port. Models cpu_cache_new.v's actual bus-cycle protocol,
+// not just a convenient stand-in: `sd_ready` is a *level*, asserted after a
+// per-word programmable latency and held for as long as `sd_cs` stays
+// asserted, and it only clears when `sd_cs` drops (matching
+// cpu_cache_new.v:490, `if (!cpu_cs) cpu_ack <= 1'b0`). While `sd_ready` is
+// already up and `sd_cs` is still asserted, the mock refuses to service a
+// new address -- it holds the same `sd_rd`/`committed_addr` regardless of
+// what the DUT's `sd_addr` does underneath it, matching the real cache's
+// state machine sitting in CPU_SM_WAIT/CPU_SM_FILLW until `sd_cs` drops.
 //
-// Latency 0 for word 1 (or any word after the first) was tried and
-// deliberately rejected: it is not just untested, it is unphysical for this
-// protocol shape. sd_addr is a single register that ss_dma only advances in
-// response to observing the previous word's ready -- one edge after that
-// ready commits. A mock that also decides "is word N+1 ready" on that same
-// edge necessarily reads the pre-advance (stale) address, because both
-// reactions fire off the same event in the same clock edge; no requester
-// could present the new address any earlier without seeing the future. Model
-// this with `sd_addr` directly (address 0x30, latency 0,0,2,0,0) and the
-// mock itself desyncs from the address it is supposed to be reading --
-// confirmed by a cycle-by-cycle trace, not just asserted. So word 0 gets
-// latency 0 (its address comes from `start`, set up a full cycle earlier by
-// an unrelated event, so it is already settled) and every later word gets
-// the tightest latency the protocol can actually deliver, 1, instead of the
-// brief's uniformly generous >=3 -- which leaves two cycles of slack that
-// could hide an off-by-one in exactly this minimum-turnaround path.
+// This replaces an earlier mock that pulsed `sd_ready` for one cycle and
+// re-armed on `sd_cs` staying high across word boundaries. That mock could
+// not catch a DUT that (incorrectly) holds `sd_cs` high for a whole burst:
+// it would happily keep pulsing a fresh `sd_ready` every cycle regardless
+// of `sd_cs`, hiding exactly the defect this bench now exists to catch.
+//
+// Because the real protocol requires `sd_cs` to drop for at least one cycle
+// between words (see rtl/ss_dma.v's header comment), and the DUT already
+// has the new address ready the same cycle it reasserts `sd_cs`, latency 0
+// is physically fine for *every* word, not just the first -- there is no
+// same-edge race with the previous word's ready the way there was under
+// the old held-`sd_cs` protocol.
 
 module ss_dma_tb;
 
@@ -51,17 +50,35 @@ integer i;
 
 reg [15:0] got [0:15];
 
-// Per-word extra wait cycles beyond the first opportunity. Index resets to 0
+// Per-word extra wait cycles beyond the first opportunity a fresh access
+// (sd_cs asserted, sd_ready not yet up) can be serviced. Index resets to 0
 // on every `start` pulse so each transfer's plan is independent.
 reg [3:0] lat_plan [0:15];
 integer   word_idx;
 integer   wait_cnt;
 
-// Tracks how many times sd_cs has fallen from 1 to 0 since the last `start`,
-// to confirm it deasserts exactly once, at the end of the transfer, and
-// never glitches low mid-burst.
+// The address the mock most recently committed a word to, latched only
+// when a fresh access begins servicing (sd_cs high, sd_ready not yet up)
+// and held constant thereafter even if sd_cs stays up and sd_addr keeps
+// moving underneath it -- exactly the real cache's behaviour.
+reg [24:1] committed_addr;
+
+// Tracks how many times sd_cs has fallen from 1 to 0 since the last
+// `start`. Under the per-word handshake this must happen exactly once per
+// word (every word's capture drops sd_cs, whether into the inter-word gap
+// or into the final idle) and never mid-word.
 reg     prev_cs = 0;
 integer cs_drop_count;
+
+// Records the committed address behind each word the DUT actually claims
+// to have captured (`word_valid`). A regression to holding sd_cs across a
+// whole burst makes the mock freeze on the first address forever (see
+// mock rationale above), so every word_valid pulse after the first would
+// replay the same committed_addr -- caught here as a duplicate, loudly,
+// rather than surfacing only as a subtly wrong word count.
+reg [24:1] svc_hist [0:31];
+integer    svc_count;
+integer    j;
 
 ss_dma dut
 (
@@ -76,30 +93,39 @@ ss_dma dut
 
 always #5 clk = ~clk;
 
-// Mock memory: contents are 0xC000 + address. Ready fires as soon as
-// wait_cnt reaches the plan's target for the current word; unlike a
-// counter gated on the previous ready value, this can re-fire on the very
-// next cycle when the next word's target is also 0.
+// Mock memory: contents are 0xC000 + address. sd_ready is a level: it goes
+// up once the current access's latency target is met and stays up until
+// sd_cs drops. While sd_cs is low, the access is over: clear sd_ready and
+// reset the latency counter so the next access starts a fresh countdown.
+// While sd_cs is high and sd_ready is already up, do nothing -- refuse to
+// service a new address, matching the real cache's refusal to leave
+// CPU_SM_WAIT/CPU_SM_FILLW while cpu_cs stays asserted.
 always @(posedge clk) begin
-	sd_ready <= 1'b0;
 	if (!rst_n) begin
 		word_idx <= 0;
 		wait_cnt <= 0;
+		sd_ready <= 1'b0;
 	end
 	else if (start) begin
 		word_idx <= 0;
 		wait_cnt <= 0;
+		sd_ready <= 1'b0;
 	end
-	else if (sd_cs) begin
+	else if (!sd_cs) begin
+		sd_ready <= 1'b0;
+		wait_cnt <= 0;
+	end
+	else if (!sd_ready) begin
 		if (wait_cnt >= lat_plan[word_idx]) begin
-			sd_rd    <= 16'hC000 + {8'd0, sd_addr[8:1]};
-			sd_ready <= 1'b1;
-			wait_cnt <= 0;
-			word_idx <= word_idx + 1;
+			committed_addr <= sd_addr;
+			sd_rd          <= 16'hC000 + {8'd0, sd_addr[8:1]};
+			sd_ready       <= 1'b1;
+			wait_cnt       <= 0;
+			word_idx       <= word_idx + 1;
 		end
 		else wait_cnt <= wait_cnt + 1;
 	end
-	else wait_cnt <= 0;
+	// else: sd_cs && sd_ready both already up -- hold everything.
 end
 
 always @(posedge clk) begin
@@ -109,11 +135,28 @@ always @(posedge clk) begin
 	end
 end
 
-// cs-glitch watchdog: count 1->0 transitions of sd_cs, reset per transfer.
+// cs-glitch/cadence watchdog: count 1->0 transitions of sd_cs, reset per
+// transfer.
 always @(posedge clk) begin
 	if (start) cs_drop_count <= 0;
 	else if (prev_cs && !sd_cs) cs_drop_count <= cs_drop_count + 1;
 	prev_cs <= sd_cs;
+end
+
+// Duplicate-address watchdog: reset per transfer, check every captured
+// word's committed_addr against every prior one this transfer.
+always @(posedge clk) begin
+	if (start) svc_count <= 0;
+	else if (word_valid) begin
+		for (j = 0; j < svc_count; j = j + 1) begin
+			if (svc_hist[j] === committed_addr) begin
+				$display("FAIL duplicate address serviced in one transfer: 0x%06h", committed_addr);
+				errors = errors + 1;
+			end
+		end
+		svc_hist[svc_count] <= committed_addr;
+		svc_count <= svc_count + 1;
+	end
 end
 
 task check(input [255:0] name, input integer actual, input integer want);
@@ -167,7 +210,7 @@ initial begin
 	for (i = 0; i < 4; i = i + 1)
 		check("word contents", got[i], 16'hC000 + 16'h0010 + i);
 	check("cs released after done", sd_cs, 1'b0);
-	check("cs drops exactly once", cs_drop_count, 1);
+	check("cs drops once per word", cs_drop_count, 4);
 
 	// -- Transfer 2: a second transfer must work without an intervening reset.
 	for (i = 0; i < 16; i = i + 1) lat_plan[i] = 3;
@@ -175,21 +218,18 @@ initial begin
 
 	check("second transfer count", got_count, 2);
 	check("second transfer first word", got[0], 16'hC000 + 16'h0020);
-	check("second transfer cs drops exactly once", cs_drop_count, 1);
+	check("second transfer cs drops once per word", cs_drop_count, 2);
 
-	// -- Transfer 3: minimum-turnaround ready. Word 0 fires the instant its
-	// address is presented (latency 0); every later word fires at latency 1,
-	// the tightest spacing this protocol can physically deliver (see the
-	// file header). A DUT that drops a word, or that double-counts because
-	// it re-samples a word it already consumed, fails the per-word content
-	// check below (each expected value is computed independently from the
-	// known address sequence, not from whatever the mock happened to last
-	// drive).
-	lat_plan[0] = 0;
-	lat_plan[1] = 1;
-	lat_plan[2] = 1;
-	lat_plan[3] = 1;
-	lat_plan[4] = 1;
+	// -- Transfer 3: minimum-turnaround ready -- every word serviced at
+	// latency 0. Under the per-word handshake this is physically fine for
+	// every word (not just the first): the DUT already holds the next
+	// address the same cycle it reasserts sd_cs after the mandatory
+	// inter-word gap, so there is no same-edge race with the previous
+	// word's ready the way there was when sd_cs stayed up for the whole
+	// burst (see file header). A DUT that drops a word, double-counts, or
+	// regresses to holding sd_cs across words fails the per-word content
+	// check or the duplicate-address watchdog below.
+	for (i = 0; i < 16; i = i + 1) lat_plan[i] = 0;
 	// Address kept under 24'h100: the mock derives sd_rd from sd_addr[8:1],
 	// an 8-bit slice, so an address at or past 0x100 wraps to 0 there and
 	// would desync this check's independently-computed expectations from
@@ -199,9 +239,24 @@ initial begin
 	check("min-turnaround transfer count", got_count, 5);
 	for (i = 0; i < 5; i = i + 1)
 		check("min-turnaround word contents", got[i], 16'hC000 + 16'h0030 + i);
-	check("min-turnaround cs drops exactly once", cs_drop_count, 1);
+	check("min-turnaround cs drops once per word", cs_drop_count, 5);
 
-	// -- Transfer 4: zero-length transfer must terminate, not hang, and must
+	// -- Transfer 4: mixed per-word latency, to confirm words are entirely
+	// independent under the per-word handshake (no interaction between one
+	// word's latency and the next's, since sd_cs always fully drops and
+	// re-asserts between them).
+	lat_plan[0] = 2;
+	lat_plan[1] = 0;
+	lat_plan[2] = 4;
+	lat_plan[3] = 1;
+	run_transfer(24'h000060, 24'd4);
+
+	check("mixed-latency transfer count", got_count, 4);
+	for (i = 0; i < 4; i = i + 1)
+		check("mixed-latency word contents", got[i], 16'hC000 + 16'h0060 + i);
+	check("mixed-latency cs drops once per word", cs_drop_count, 4);
+
+	// -- Transfer 5: zero-length transfer must terminate, not hang, and must
 	// never assert sd_cs at all.
 	got_count = 0;
 	base_addr  = 24'h000040;
@@ -229,6 +284,24 @@ initial begin
 	check("sd_uds_n asserted (active low)", sd_uds_n, 1'b0);
 	check("sd_lds_n asserted (active low)", sd_lds_n, 1'b0);
 	check("sd_cache_inhibit asserted during transfer", sd_cache_inhibit, 1'b1);
+	wait_done;
+	@(negedge clk);
+
+	// -- cache_inhibit must stay asserted through the inter-word gap, not
+	// just while sd_cs happens to be high. This is the direct regression
+	// test for the defect this bench was rewritten to catch: a burst-style
+	// implementation would never produce a gap to sample here, and a
+	// per-word implementation that mistakenly tied sd_cache_inhibit to
+	// sd_cs (instead of "transfer in progress") would read 0 at this point.
+	for (i = 0; i < 16; i = i + 1) lat_plan[i] = 1;
+	got_count = 0;
+	base_addr  = 24'h000070;
+	word_count = 24'd2;
+	@(negedge clk); start = 1;
+	@(negedge clk); start = 0;
+	@(negedge sd_cs);
+	check("sd_cache_inhibit stays asserted during inter-word gap", sd_cache_inhibit, 1'b1);
+	check("sd_cs is actually low during the sampled gap", sd_cs, 1'b0);
 	wait_done;
 	@(negedge clk);
 
