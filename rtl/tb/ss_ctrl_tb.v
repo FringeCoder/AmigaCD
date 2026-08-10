@@ -124,6 +124,11 @@ always @(posedge clk) begin
 end
 
 // Read a 32-bit word out of the mock DDR3 by word index.
+function [15:0] bswap16;
+	input [15:0] v;
+	bswap16 = {v[7:0], v[15:8]};
+endfunction
+
 function [31:0] ddr_word;
 	input integer idx;
 begin
@@ -202,10 +207,15 @@ initial begin
 
 	// Chip RAM packed two 16-bit words per 32-bit word, low word first, in
 	// ascending address order.
-	check("chip word 0", ddr_word(10), {16'hD001, 16'hD000});
-	check("chip word 1", ddr_word(11), {16'hD003, 16'hD002});
-	check("chip word 2", ddr_word(12), {16'hD005, 16'hD004});
-	check("chip word 3", ddr_word(13), {16'hD007, 16'hD006});
+	// Chip RAM must land in the file in 68k byte order, so a state file can be
+	// read directly as Amiga memory. Each SDRAM word's high byte belongs at the
+	// lower file offset; without the swap every Amiga word reads reversed and
+	// nothing in the payload is interpretable (measured on hardware,
+	// 2026-08-10, on the first real save state).
+	check("chip word 0", ddr_word(10), {bswap16(16'hD001), bswap16(16'hD000)});
+	check("chip word 1", ddr_word(11), {bswap16(16'hD003), bswap16(16'hD002)});
+	check("chip word 2", ddr_word(12), {bswap16(16'hD005), bswap16(16'hD004)});
+	check("chip word 3", ddr_word(13), {bswap16(16'hD007), bswap16(16'hD006)});
 
 	// core_crc32 against an independently computed reference over the exact
 	// bytes above, least-significant byte of each word first. A design that
@@ -215,10 +225,10 @@ initial begin
 	crc_acc = 32'hFFFFFFFF;
 	crc_word_step(32'h89ABCDEF);
 	crc_word_step(32'h01234567);
-	crc_word_step({16'hD001, 16'hD000});
-	crc_word_step({16'hD003, 16'hD002});
-	crc_word_step({16'hD005, 16'hD004});
-	crc_word_step({16'hD007, 16'hD006});
+	crc_word_step({bswap16(16'hD001), bswap16(16'hD000)});
+	crc_word_step({bswap16(16'hD003), bswap16(16'hD002)});
+	crc_word_step({bswap16(16'hD005), bswap16(16'hD004)});
+	crc_word_step({bswap16(16'hD007), bswap16(16'hD006)});
 	expect_crc = ~crc_acc;
 	check("core_crc32", ddr_word(6), expect_crc);
 

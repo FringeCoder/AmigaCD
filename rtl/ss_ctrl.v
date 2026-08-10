@@ -399,7 +399,17 @@ always @(posedge clk) begin
 					pending_low_held <= 1'b1;
 				end
 				else begin
-					queue_word({dma_word_out, chip_low});
+					// Byte-swap each 16-bit word into the pair. The pair is
+					// written to DDR3 as one little-endian 32-bit word, so
+					// without this each Amiga word's two bytes land reversed
+					// in the file and nothing in the payload can be read as
+					// Amiga memory -- measured on hardware on the first real
+					// save state, 2026-08-10.
+					//
+					// Done here rather than in ss_dma, which stays a plain
+					// memory reader with no opinion about endianness.
+					queue_word({dma_word_out[7:0], dma_word_out[15:8],
+					            chip_low[7:0],     chip_low[15:8]});
 					pending_low_held <= 1'b0;
 					state            <= S_CHIP_DRAIN;
 				end
