@@ -6937,7 +6937,8 @@ void HandleUI(void)
 	{
 		OsdSetTitle("Settings", 0);
 		helptext_idx = 0;
-		menumask = 0x1F;           // FastRAM, D-Cache, Main ROM, Ext ROM, Back
+		// FastRAM, D-Cache, Main ROM, Ext ROM, Save slot, Save state, Back.
+		menumask = 0x7F;
 		parentstate = menustate;
 
 		m = 0;
@@ -6980,8 +6981,23 @@ void HandleUI(void)
 		}
 		OsdWrite(m++, s, menusub == 3, 0);
 
+		// Save states. These rows were originally added to MENU_MINIMIG_CHIPSET1,
+		// which the AmigaCD console variant never reaches -- menu.cpp:5859 sends
+		// it straight to MENU_AMIGACD_MAIN1 and its own menu tree. The rows
+		// existed but were unreachable on the only variant that wanted them.
+		OsdWrite(m++, "", 0, 0);
+		{
+			int ss_blocked = minimig_ss_blocked();
+
+			strcpy(s, " Save slot: ");
+			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
+			OsdWrite(m++, s, menusub == 4, ss_blocked);
+
+			OsdWrite(m++, " Save state", menusub == 5, ss_blocked);
+		}
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 4, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 6, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -7044,7 +7060,25 @@ void HandleUI(void)
 					SelectFile(Selected_F[5], "ROM", SCANO_DIR | SCANO_UMOUNT, MENU_AMIGACD_EXTROMFILE_SELECTED, MENU_AMIGACD_SETTINGS1);
 				}
 			}
-			else if (menusub == 4 && select) // Back
+			else if (menusub == 4 && !minimig_ss_blocked()) // Save slot 1-4
+			{
+				int slot = minimig_config.ss_slot & 3;
+				slot = minus ? (slot + 3) & 3 : (slot + 1) & 3;
+				minimig_config.ss_slot = (unsigned char)slot;
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 5 && select && !minimig_ss_blocked()) // Save state
+			{
+				// The core edge-detects this in RTL (Minimig.sv ss_save_edge),
+				// so a set/clear pair here is one save, and a bit left high
+				// cannot re-arm. Everything after this is RTL: quiesce, freeze,
+				// capture, then the host poller writes the window to disk.
+				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+				user_io_status_set("[51]", 1);
+				user_io_status_set("[51]", 0);
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 6 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 5;   // Settings row
