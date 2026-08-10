@@ -8,9 +8,10 @@ CXXFLAGS  = -std=gnu++14 -Wall -Wextra -O1 -g
 BUILDDIR  = build
 
 SRC = ../support/minimig/minimig_savestate.cpp \
-      ../support/minimig/minimig_a2065_crc32.cpp
+      ../support/minimig/minimig_a2065_crc32.cpp \
+      ../support/minimig/minimig_profile.cpp
 
-TESTS = test_savestate_format
+TESTS = test_savestate_format test_amigacd_profile
 
 .PHONY: all clean
 all: $(addprefix $(BUILDDIR)/,$(TESTS))

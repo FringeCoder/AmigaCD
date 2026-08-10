@@ -15,6 +15,7 @@
 #include "../../ide.h"
 #include "minimig_boot.h"
 #include "minimig_fdd.h"
+#include "minimig_profile.h"
 #include "minimig_config.h"
 #include "minimig_share.h"
 #include "akiko_cd32.h"
@@ -905,6 +906,29 @@ int minimig_cfg_load(int num)
 		{
 			amigacd_apply_system(0); // 0 = CD32
 			BootPrintEx(">>> AmigaCD: defaulting to CD32. <<<");
+		}
+	}
+	else if (is_amigacd())
+	{
+		// A loaded config carries whatever chip RAM was last persisted, and
+		// until now nothing ever corrected it: amigacd_apply_system() runs only
+		// in the no-config branch above, and mounting a CD image
+		// (MENU_AMIGACD_CDFILE_SELECTED) only sets the filename and calls
+		// ide_open. So a config holding the generic Minimig default (0x11) or a
+		// CDTV profile (0x01) -- both 1 MB chip -- left CD32 discs running on
+		// half the chip RAM a CD32 has. Many titles need more than 1 MB and
+		// failed with an out-of-memory message; the less demanding ones ran,
+		// which is what made it look intermittent.
+		//
+		// Chip RAM is a property of the machine, not a preference: the AmigaCD
+		// OSD offers no row for it. Re-assert it from the system the config
+		// itself names, leaving FastRAM, SlowRAM and HRTmon untouched.
+		uint8_t fixed = amigacd_profile_memory(minimig_config.memory, amigacd_is_cdtv());
+		if (fixed != minimig_config.memory)
+		{
+			printf("AmigaCD: correcting chip RAM for %s: memory 0x%02X -> 0x%02X\n",
+			       amigacd_is_cdtv() ? "CDTV" : "CD32", minimig_config.memory, fixed);
+			minimig_config.memory = fixed;
 		}
 	}
 
