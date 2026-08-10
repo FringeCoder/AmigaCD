@@ -28,6 +28,9 @@ reg  clk = 0;
 reg  rst_n = 0;
 
 reg  save_req = 0;
+reg  load_req = 0;
+wire load_busy, load_ok, load_fail;
+wire [3:0] load_fail_code;
 reg  [STATE_W-1:0] state_in = 64'h0123456789ABCDEF;
 wire [STATE_W-1:0] state_out;
 wire state_we;
@@ -61,12 +64,19 @@ integer i;
 // Mock DDR3: a flat memory of 64-bit words, addressed by ddr_address.
 reg [63:0] ddr_mem [0:63];
 
+// A byte-for-byte copy of the window the save leaves behind, so every refusal
+// case below starts from a known-good file and corrupts exactly one field.
+reg [63:0] win_golden [0:63];
+
 ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS)) dut
 (
 	.clk(clk), .rst_n(rst_n),
 	.slot_base(29'd0),
 	.save_req(save_req), .save_busy(save_busy),
 	.save_ok(save_ok), .save_fail(save_fail),
+	.load_req(load_req), .load_busy(load_busy),
+	.load_ok(load_ok), .load_fail(load_fail),
+	.load_fail_code(load_fail_code),
 	.state_in(state_in), .state_out(state_out), .state_we(state_we),
 	.blit_busy(blit_busy), .disk_busy(1'b0), .audio_busy(1'b0),
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),
@@ -123,6 +133,43 @@ always @(posedge clk) begin
 	end
 end
 
+// DDR3 arbiter backpressure. waitrequest is high one cycle in four, so
+// neither direction can assume its first cycle is taken: a write has to hold
+// ddr_write, and a read has to hold ddr_read until the cycle it is actually
+// accepted on. A controller that issued a read and moved on regardless would
+// either lose the request or take the following cycle's acceptance as a
+// second one.
+reg [1:0] stall_ctr = 0;
+
+always @(posedge clk) begin
+	stall_ctr       <= stall_ctr + 2'd1;
+	ddr_waitrequest <= (stall_ctr == 2'd0);
+end
+
+// Mock DDR3 read service, out of the same array the writes above land in.
+// Avalon-style: a read is accepted on the cycle `ddr_read` is high with
+// `ddr_waitrequest` low, and the data comes back later on its own
+// `ddr_readdatavalid` beat -- one cycle here. A controller that captured
+// `ddr_readdata` on the accept rather than on the valid beat would read the
+// previous word every time.
+always @(posedge clk) begin
+	ddr_readdatavalid <= 1'b0;
+	if (ddr_read && !ddr_waitrequest) begin
+		ddr_readdata      <= ddr_mem[ddr_address[5:0]];
+		ddr_readdatavalid <= 1'b1;
+	end
+end
+
+// Refusing a state file must never stop the Amiga. saw_freeze is sticky from
+// the moment the restore tests begin: any gate that quiesced before deciding
+// would trip it, and a validator that stops the machine to reject a file it
+// was never going to load is worse than the corrupt file it was guarding
+// against.
+reg saw_freeze   = 0;
+reg watch_freeze = 0;
+
+always @(posedge clk) if (watch_freeze && freeze) saw_freeze <= 1'b1;
+
 // Read a 32-bit word out of the mock DDR3 by word index.
 function [15:0] bswap16;
 	input [15:0] v;
@@ -143,6 +190,36 @@ begin
 		errors = errors + 1;
 	end
 	else $display("PASS %0s", name);
+end
+endtask
+
+// Overwrite one 32-bit word of the window, addressed the same way ddr_word()
+// reads it: bit 0 of the index selects the half of the 64-bit DDR3 word.
+task poke_word(input integer idx, input [31:0] v);
+begin
+	if (idx[0]) ddr_mem[idx/2][63:32] = v;
+	else        ddr_mem[idx/2][31:0]  = v;
+end
+endtask
+
+task restore_window;
+	integer k;
+begin
+	for (k = 0; k < 64; k = k + 1) ddr_mem[k] = win_golden[k];
+end
+endtask
+
+// Drive one restore attempt to completion. load_req is edge-triggered, so it
+// is dropped once the controller has taken it; waiting on load_busy rather
+// than on load_ok/load_fail keeps this robust against those two being levels
+// that persist from the previous attempt.
+task run_load;
+begin
+	@(negedge clk); load_req = 1;
+	wait (load_busy);
+	@(negedge clk); load_req = 0;
+	wait (!load_busy);
+	@(negedge clk);
 end
 endtask
 
@@ -175,6 +252,14 @@ end
 endtask
 
 reg [31:0] expect_crc;
+
+// A restore that never completes would otherwise park run_load() on its
+// wait() forever with no output at all.
+initial begin
+	#500000;
+	$display("FAIL watchdog: simulation did not finish");
+	$fatal(1);
+end
 
 initial begin
 	for (i = 0; i < 64; i = i + 1) ddr_mem[i] = 64'd0;
@@ -241,6 +326,86 @@ initial begin
 		errors = errors + 1;
 	end
 	else $display("PASS freeze released");
+
+	// ------------------------------------------------------------- restore
+	//
+	// The window sitting in the mock DDR3 is a real state file this very
+	// module just wrote, so validating it is a genuine round trip at the
+	// format level -- header, length arithmetic, payload CRC and all. A
+	// hand-built window would only ever agree with whatever the validator
+	// happened to check; this one agrees with what the save path actually
+	// produces, which is the thing that has to be loadable.
+	wait (!save_busy);
+	@(negedge clk);
+	for (i = 0; i < 64; i = i + 1) win_golden[i] = ddr_mem[i];
+
+	saw_freeze   = 0;
+	watch_freeze = 1;
+
+	run_load();
+	check("round trip validates",  {31'd0, load_ok},   32'd1);
+	check("round trip no failure", {31'd0, load_fail}, 32'd0);
+	check("valid load no freeze",  {31'd0, saw_freeze}, 32'd0);
+
+	// Each gate refuses with its own code, and none of them may stop the
+	// machine to do it.
+	restore_window(); poke_word(2, 32'hDEADBEEF);
+	run_load();
+	check("bad magic refused",     {28'd0, load_fail_code}, 32'd1);
+	check("bad magic not ok",      {31'd0, load_ok},        32'd0);
+	check("bad magic no freeze",   {31'd0, saw_freeze},     32'd0);
+
+	restore_window(); poke_word(3, 32'h00020000);
+	run_load();
+	check("bad version refused",   {28'd0, load_fail_code}, 32'd2);
+	check("bad version not ok",    {31'd0, load_ok},        32'd0);
+	check("bad version no freeze", {31'd0, saw_freeze},     32'd0);
+
+	restore_window(); poke_word(1, 32'hFFFFFFFF);
+	run_load();
+	check("long length refused",   {28'd0, load_fail_code}, 32'd3);
+	check("long length not ok",    {31'd0, load_ok},        32'd0);
+	check("long length no freeze", {31'd0, saw_freeze},     32'd0);
+
+	// The lower bound matters as much as the upper: a length that cannot even
+	// cover this core's payload describes a file that is not ours.
+	restore_window(); poke_word(1, 32'd5);
+	run_load();
+	check("short length refused",   {28'd0, load_fail_code}, 32'd3);
+	check("short length no freeze", {31'd0, saw_freeze},     32'd0);
+
+	// A payload of a different size is a different core's state file, even
+	// when every other header word looks right.
+	restore_window(); poke_word(4, CORE_WORDS + 32'd1);
+	run_load();
+	check("bad core_words refused", {28'd0, load_fail_code}, 32'd3);
+	check("core_words no freeze",   {31'd0, saw_freeze},     32'd0);
+
+	// One flipped bit anywhere in the payload, caught by the CRC and nothing
+	// else -- every header word here is still perfectly well formed.
+	restore_window(); poke_word(9, ddr_word(9) ^ 32'd1);
+	run_load();
+	check("bad payload refused",    {28'd0, load_fail_code}, 32'd4);
+	check("bad payload not ok",     {31'd0, load_ok},        32'd0);
+	check("bad payload no freeze",  {31'd0, saw_freeze},     32'd0);
+
+	// A flipped bit in the last payload word is the case a CRC sampled one
+	// cycle early would miss: the feeder is still folding that word's final
+	// byte when the comparison is made.
+	restore_window(); poke_word(8 + CORE_WORDS - 1, ddr_word(8 + CORE_WORDS - 1) ^ 32'h80000000);
+	run_load();
+	check("last word refused",      {28'd0, load_fail_code}, 32'd4);
+	check("last word no freeze",    {31'd0, saw_freeze},     32'd0);
+
+	// And the good file still validates after all of that -- the CRC is
+	// re-armed per attempt, not left carrying the previous scan's residue.
+	restore_window();
+	run_load();
+	check("revalidates after fails", {31'd0, load_ok},   32'd1);
+	check("revalidated no failure",  {31'd0, load_fail}, 32'd0);
+	check("no freeze at any point",  {31'd0, saw_freeze}, 32'd0);
+
+	watch_freeze = 0;
 
 	// A machine that never quiesces must fail rather than save.
 	blit_busy = 1;

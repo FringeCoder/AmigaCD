@@ -52,11 +52,32 @@
 //    This also means chip RAM reads are self-paced the same way the state
 //    vector is: the next pair is not requested until the current one has
 //    cleared the CRC feeder and the DDR3 write.
+//
+// The restore direction currently reaches as far as validation. `load_req`
+// reads the window back out of DDR3 and checks it -- magic, version, length
+// and the payload CRC, cheapest gate first -- and reports the verdict on
+// `load_ok` / `load_fail` / `load_fail_code`. The sequence that puts the
+// payload back into the machine is not built yet, so a window that passes
+// every gate reports `load_ok` and stops there.
+//
+// Validation runs with the machine still running, and nothing on that path
+// asserts `save_busy`, which is ss_quiesce's only `req`, so no refusal can
+// freeze the Amiga. That is not incidental. A rejected restore has to be a
+// no-op: a validator that stopped the machine in order to say no would be
+// worse than the corrupt file it was guarding against, since the user is left
+// with a dead Amiga and a file that was never loaded anyway. When the restore
+// sequence lands it must request the freeze only after the last gate has
+// passed. ss_ctrl_tb.v holds a sticky flag on `freeze` across every refusal
+// case to keep it that way.
 
 module ss_ctrl
 #(
 	parameter STATE_W    = 64,
-	parameter CHIP_WORDS = 24'h100000   // 16-bit words; 0x100000 = 2 MB
+	parameter CHIP_WORDS = 24'h100000,  // 16-bit words; 0x100000 = 2 MB
+	// 32-bit words in one DDR3 slot: 0x400000 bytes / 4. Only the restore
+	// path uses it, as the upper bound on a header length field that arrives
+	// from a file and is therefore untrusted.
+	parameter SLOT_WORDS = 32'h100000
 )
 (
 	input                     clk,
@@ -69,6 +90,17 @@ module ss_ctrl
 	output reg                save_busy,
 	output reg                save_ok,
 	output reg                save_fail,
+
+	// Restore. load_req is edge triggered: a level held high by an OSD row
+	// that has not been let go of must not start a second validation pass the
+	// instant the first one finishes. load_ok / load_fail / load_fail_code
+	// are levels, held until the next attempt starts -- a fail code that
+	// vanished a cycle after the refusal could not reach a toast or a log.
+	input                     load_req,
+	output reg                load_busy,
+	output reg                load_ok,
+	output reg                load_fail,
+	output reg [3:0]          load_fail_code,
 
 	input      [STATE_W-1:0]  state_in,
 	output     [STATE_W-1:0]  state_out,
@@ -96,7 +128,7 @@ module ss_ctrl
 	output reg [63:0]         ddr_writedata,
 	output reg [7:0]          ddr_byteenable,
 	output reg                ddr_write,
-	output                    ddr_read,
+	output reg                ddr_read,
 	input      [63:0]         ddr_readdata,
 	input                     ddr_readdatavalid,
 	input                     ddr_waitrequest
@@ -109,19 +141,50 @@ localparam CORE_WORDS  = STATE_WORDS + CHIP_PAIRS;
 localparam SS_MAGIC   = 32'h53534341;
 localparam SS_VERSION = 32'h00010000;
 
-localparam [3:0] S_IDLE        = 4'd0;
-localparam [3:0] S_WAIT        = 4'd1;
-localparam [3:0] S_STATE_CAP   = 4'd2;
-localparam [3:0] S_STATE_DRAIN = 4'd3;
-localparam [3:0] S_CHIP_ISSUE  = 4'd4;
-localparam [3:0] S_CHIP_WAIT   = 4'd5;
-localparam [3:0] S_CHIP_DRAIN  = 4'd6;
-localparam [3:0] S_HEADER      = 4'd7;
-localparam [3:0] S_COUNT       = 4'd8;
-localparam [3:0] S_DONE        = 4'd9;
-localparam [3:0] S_FAIL        = 4'd10;
+// Sized copies of CORE_WORDS for the comparisons on the restore path, so a
+// 24-bit counter and a 32-bit header word are each compared against something
+// of their own width rather than against an unsized integer.
+localparam [23:0] CORE_WORDS_24 = CORE_WORDS;
+localparam [31:0] CORE_WORDS_32 = CORE_WORDS;
 
-assign ddr_read       = 1'b0;
+// `length` counts the words after word 1: the six-word header tail (words
+// 2..7) plus the payload. A file this core can restore must carry at least
+// its own core payload, and cannot claim more words than fit in the slot.
+// The host parser applies the same two bounds (minimig_savestate.cpp).
+localparam [31:0] MIN_LENGTH = 32'd6 + CORE_WORDS_32;
+localparam [31:0] MAX_LENGTH = SLOT_WORDS - 32'd2;
+
+localparam [4:0] S_IDLE        = 5'd0;
+localparam [4:0] S_WAIT        = 5'd1;
+localparam [4:0] S_STATE_CAP   = 5'd2;
+localparam [4:0] S_STATE_DRAIN = 5'd3;
+localparam [4:0] S_CHIP_ISSUE  = 5'd4;
+localparam [4:0] S_CHIP_WAIT   = 5'd5;
+localparam [4:0] S_CHIP_DRAIN  = 5'd6;
+localparam [4:0] S_HEADER      = 5'd7;
+localparam [4:0] S_COUNT       = 5'd8;
+localparam [4:0] S_DONE        = 5'd9;
+localparam [4:0] S_FAIL        = 5'd10;
+
+// Restore. S_L_RD_* is a shared single-word read step: callers set rd_idx and
+// rd_ret and jump to S_L_RD_ISSUE, and land back in rd_ret with rd_data
+// holding the 64-bit DDR3 word that contains it.
+localparam [4:0] S_L_RD_ISSUE  = 5'd11;
+localparam [4:0] S_L_RD_WAIT   = 5'd12;
+localparam [4:0] S_L_RD_DATA   = 5'd13;
+localparam [4:0] S_L_MAGIC     = 5'd14;
+localparam [4:0] S_L_LEN_CAP   = 5'd15;
+localparam [4:0] S_L_LEN_CHK   = 5'd16;
+localparam [4:0] S_L_CRC_CAP   = 5'd17;
+localparam [4:0] S_L_PAY_FETCH = 5'd18;
+localparam [4:0] S_L_PAY_FEED  = 5'd19;
+
+// Refusal reasons, as seen by the OSD. 5 is reserved for the Kickstart
+// fingerprint, which is not captured yet.
+localparam [3:0] FAIL_MAGIC   = 4'd1;
+localparam [3:0] FAIL_VERSION = 4'd2;
+localparam [3:0] FAIL_LENGTH  = 4'd3;
+localparam [3:0] FAIL_CRC     = 4'd4;
 
 // ---------------------------------------------------------------- quiesce
 
@@ -177,6 +240,10 @@ ss_dma dma
 	.sd_uds_n(sd_uds_n), .sd_lds_n(sd_lds_n),
 	.sd_cache_inhibit(sd_cache_inhibit),
 	.sd_rd(sd_rd), .sd_ready(sd_ready),
+	// Read direction only for now: the restore path stops at validation, so
+	// nothing here writes chip RAM back yet. Tied off explicitly rather than
+	// left dangling so the build stays warning-free.
+	.write_mode(1'b0), .word_in(16'd0), .word_req(),
 	.word_valid(dma_word_valid), .word_out(dma_word_out), .done(dma_done)
 );
 
@@ -229,15 +296,35 @@ reg [2:0]  crc_bytes_left;
 // empirically: dropping crc_wr from this expression reproduced exactly
 // that -- every payload word landed correctly in DDR3 but core_crc32 came
 // back wrong -- against ss_ctrl_tb.v's independently computed reference.
-wire word_busy = (crc_bytes_left != 3'd0) || crc_wr || pending_valid || ddr_write;
+//
+// The restore path feeds the CRC without any DDR3 write attached, so it waits
+// on crc_busy alone; the same one-cycle argument applies to it, and for the
+// same reason. Sampling crc_value while crc_wr is still up compares a CRC
+// that is missing the payload's last byte against the file's, which would
+// reject a perfectly good state file (or, for a file whose corruption happens
+// to live in that last byte, accept a bad one).
+wire crc_busy  = (crc_bytes_left != 3'd0) || crc_wr;
+wire word_busy = crc_busy || pending_valid || ddr_write;
 
 // ---------------------------------------------------------------- writer
 
-reg [3:0]  state;
+reg [4:0]  state;
 reg [23:0] word_idx;      // 32-bit word index within the window
 reg [31:0] pending_word;
 reg        pending_valid;
 reg [31:0] saved_crc;
+
+// ---------------------------------------------------------------- reader
+
+reg        load_req_d;
+reg [23:0] rd_idx;        // 32-bit word index being read
+reg [63:0] rd_data;       // the 64-bit DDR3 word that contains it
+reg [4:0]  rd_ret;        // state to resume in once rd_data is valid
+reg [31:0] hdr_length;
+reg [31:0] want_crc;
+reg [23:0] pay_idx;       // payload word index, 0 .. CORE_WORDS
+
+wire load_req_rise = load_req && !load_req_d;
 
 // Queue a 32-bit payload word: CRC it and write it into DDR3. Callers must
 // only invoke this when word_busy is false.
@@ -251,12 +338,43 @@ begin
 end
 endtask
 
+// CRC a 32-bit word without writing anything: the restore path is checking
+// the payload, not producing it. Callers must only invoke this when crc_busy
+// is false.
+task crc_word;
+	input [31:0] w;
+begin
+	crc_shift      <= w;
+	crc_bytes_left <= 3'd4;
+end
+endtask
+
+// Refuse the file and go back to idle with the machine untouched. There is no
+// partial-restore path to unwind because nothing has been restored: every
+// gate runs before the freeze is ever requested.
+task load_reject;
+	input [3:0] code;
+begin
+	load_fail_code <= code;
+	load_fail      <= 1'b1;
+	load_busy      <= 1'b0;
+	ddr_read       <= 1'b0;
+	state          <= S_IDLE;
+end
+endtask
+
 always @(posedge clk) begin
 	if (!rst_n) begin
 		state            <= S_IDLE;
 		save_busy        <= 1'b0;
 		save_ok          <= 1'b0;
 		save_fail        <= 1'b0;
+		load_busy        <= 1'b0;
+		load_ok          <= 1'b0;
+		load_fail        <= 1'b0;
+		load_fail_code   <= 4'd0;
+		load_req_d       <= 1'b0;
+		ddr_read         <= 1'b0;
 		ddr_write        <= 1'b0;
 		ddr_byteenable   <= 8'h00;
 		pending_valid    <= 1'b0;
@@ -274,6 +392,7 @@ always @(posedge clk) begin
 		ser_save_start <= 1'b0;
 		dma_start      <= 1'b0;
 		crc_init       <= 1'b0;
+		load_req_d     <= load_req;
 
 		// CRC byte feeder. It lives in this block, rather than one of its
 		// own, because queue_word() below also drives crc_shift and
@@ -326,6 +445,19 @@ always @(posedge clk) begin
 			if (save_req) begin
 				save_busy <= 1'b1;
 				state     <= S_WAIT;
+			end
+			else if (load_req_rise) begin
+				// Cheapest gate first, so a file that is not ours costs one
+				// DDR3 read rather than a scan of the whole payload. Word 1
+				// of the window holds magic in its low half and version in
+				// its high half, which is both of them for that one read.
+				load_busy      <= 1'b1;
+				load_ok        <= 1'b0;
+				load_fail      <= 1'b0;
+				load_fail_code <= 4'd0;
+				rd_idx         <= 24'd2;
+				rd_ret         <= S_L_MAGIC;
+				state          <= S_L_RD_ISSUE;
 			end
 		end
 
@@ -473,6 +605,116 @@ always @(posedge clk) begin
 			save_fail <= 1'b1;
 			save_busy <= 1'b0;
 			state     <= S_IDLE;
+		end
+
+		// ------------------------------------------------------- restore
+		//
+		// One 64-bit DDR3 read, addressed exactly as the save path addresses
+		// its writes: the 64-bit address is the 32-bit word index shifted
+		// down one, and bit 0 of the index picks the half. Two schemes here
+		// would mean a file this module cannot read back.
+		S_L_RD_ISSUE: begin
+			ddr_address <= slot_base + {6'd0, rd_idx[23:1]};
+			ddr_read    <= 1'b1;
+			state       <= S_L_RD_WAIT;
+		end
+
+		// Avalon: the request is accepted on the first cycle waitrequest is
+		// low, and the data arrives later on its own readdatavalid beat.
+		// Dropping ddr_read on acceptance is what keeps that to one beat.
+		S_L_RD_WAIT: begin
+			if (!ddr_waitrequest) begin
+				ddr_read <= 1'b0;
+				state    <= S_L_RD_DATA;
+			end
+		end
+
+		S_L_RD_DATA: begin
+			if (ddr_readdatavalid) begin
+				rd_data <= ddr_readdata;
+				state   <= rd_ret;
+			end
+		end
+
+		S_L_MAGIC: begin
+			if (rd_data[31:0] != SS_MAGIC) load_reject(FAIL_MAGIC);
+			else if (rd_data[63:32] != SS_VERSION) load_reject(FAIL_VERSION);
+			else begin
+				// Word 0 holds the counter, word 1 the length.
+				rd_idx <= 24'd0;
+				rd_ret <= S_L_LEN_CAP;
+				state  <= S_L_RD_ISSUE;
+			end
+		end
+
+		S_L_LEN_CAP: begin
+			hdr_length <= rd_data[63:32];
+			// Word 4 holds core_words, word 5 host_words.
+			rd_idx     <= 24'd4;
+			rd_ret     <= S_L_LEN_CHK;
+			state      <= S_L_RD_ISSUE;
+		end
+
+		// core_words is checked here rather than left to the CRC. A file
+		// whose payload is a different length is another build's state file,
+		// and saying so is a better diagnosis than the CRC mismatch it would
+		// otherwise produce -- the user can act on "wrong core", not on
+		// "corrupt".
+		S_L_LEN_CHK: begin
+			if ((hdr_length < MIN_LENGTH) || (hdr_length > MAX_LENGTH) ||
+			    (rd_data[31:0] != CORE_WORDS_32))
+				load_reject(FAIL_LENGTH);
+			else begin
+				// Word 6 holds core_crc32, word 7 host_crc32.
+				rd_idx <= 24'd6;
+				rd_ret <= S_L_CRC_CAP;
+				state  <= S_L_RD_ISSUE;
+			end
+		end
+
+		S_L_CRC_CAP: begin
+			want_crc <= rd_data[31:0];
+			crc_init <= 1'b1;
+			pay_idx  <= 24'd0;
+			state    <= S_L_PAY_FETCH;
+		end
+
+		// The payload starts at word 8, which is even, so each 64-bit read
+		// carries two consecutive payload words: fetch on the even index,
+		// reuse the held rd_data on the odd one.
+		S_L_PAY_FETCH: begin
+			if (pay_idx == CORE_WORDS_24) begin
+				// Wait for the feeder to drain before reading crc_value.
+				// The last word's final byte is still being presented to
+				// ss_crc32 while crc_wr is up, and is only folded into
+				// crc_out on the edge that clears it -- see word_busy above
+				// for the save-side bug this exact off-by-one cycle caused.
+				if (!crc_busy) begin
+					if (crc_value == want_crc) begin
+						// Validation only. The sequence that puts the
+						// payload back into the machine is Task 5; until
+						// then a good file is recognised and nothing else.
+						load_ok   <= 1'b1;
+						load_busy <= 1'b0;
+						state     <= S_IDLE;
+					end
+					else load_reject(FAIL_CRC);
+				end
+			end
+			else if (pay_idx[0]) state <= S_L_PAY_FEED;
+			else begin
+				rd_idx <= 24'd8 + pay_idx;
+				rd_ret <= S_L_PAY_FEED;
+				state  <= S_L_RD_ISSUE;
+			end
+		end
+
+		S_L_PAY_FEED: begin
+			if (!crc_busy) begin
+				crc_word(pay_idx[0] ? rd_data[63:32] : rd_data[31:0]);
+				pay_idx <= pay_idx + 24'd1;
+				state   <= S_L_PAY_FETCH;
+			end
 		end
 
 		default: state <= S_IDLE;
