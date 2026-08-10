@@ -92,6 +92,15 @@ typedef struct
 	char            info[64];
 	mm_userportMode userport;
 	unsigned char   snac[2];   // mm_snacPortMode per SNAC port
+	// Save state slot, 0..3 (shown as 1..4). Appended at the end so the
+	// on-disk layout stays loadable. It lands at offset 5226, inside the two
+	// bytes of tail padding snac[2] already left before the struct's 4-byte
+	// alignment, so sizeof(mm_configTYPE) is UNCHANGED at 5228 and
+	// minimig_cfg_load's exact-size dispatch still routes existing files to
+	// the current branch. Those files carry whatever was in that padding --
+	// zero in practice, since minimig_config is a zero-initialised global --
+	// so every reader masks with & 3 rather than trusting it.
+	unsigned char   ss_slot;
 } mm_configTYPE;
 
 extern mm_configTYPE minimig_config;

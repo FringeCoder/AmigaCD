@@ -277,6 +277,31 @@ const char *config_afilter_msg[] = { "Internal","Custom" };
 const char *config_smask_msg[] = { "None", "1x", "2x", "1x Rotated", "2x Rotated" };
 const char *config_scale[] = { "Normal", "V-Integer", "HV-Integer-", "HV-Integer+", "HV-Integer", "???", "???", "???" };
 
+// Save state slots. Four, matching the four DDR3 windows process_ss() maps at
+// the core's advertised base (Minimig.sv CONF_STR "SS3E000000:400000"), and
+// matching the four .ss1-.ss4 files FileGenerateSavestatePath() names. Labelled
+// 1-4 for the user; the wire value in status[53:52] is 0-3.
+static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
+
+// Save states are refused in two configurations. The OSD greys the rows out so
+// the user is told, rather than pressing SELECT and having nothing happen:
+//
+//  - Z3 fast RAM. The savestate windows start at DDR3 0x3E000000, which is
+//    inside the region ddram_ctrl.v hands to Z3 fast RAM, so the two cannot
+//    coexist. Fast RAM index >= 4 means a Z3 board (cpu_wrapper.v ac_memcard[2]
+//    selects the 128/256 MB Z3 autoconfig entries). The index is decoded here
+//    exactly as the FastRAM row itself decodes it.
+//  - 68000. cpu_wrapper exports TG68K state only -- fx68k has no equivalent --
+//    so Minimig.sv gates the request on `ss_supported = |cpucfg`, and userio.v
+//    takes cpucfg from the low two bits of the CPU config byte, i.e.
+//    minimig_config.cpu & 3. Without this the request would be silently
+//    swallowed in RTL.
+static int minimig_ss_blocked()
+{
+	int fastram = ((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5);
+	return (fastram >= 4) || !(minimig_config.cpu & 0x03);
+}
+
 #define DPAD_NAMES 4
 #define DPAD_BUTTON_NAMES 12  //DPAD_NAMES + 6 buttons + start/select
 
@@ -6225,12 +6250,23 @@ void HandleUI(void)
 
 	case MENU_MINIMIG_CHIPSET1:
 		helptext_idx = HELPTEXT_CHIPSET;
-		// 13 selectable rows: 0..10 from this fork, 11 = upstream's A2065
-		// Ethernet row (menusub 9 upstream, renumbered on merge), 12 = Back.
-		menumask = 0x1FFF;
+		// 15 selectable rows: 0..10 from this fork, 11..12 save states,
+		// 13 = upstream's A2065 Ethernet row (menusub 9 upstream, renumbered
+		// twice on merge), 14 = Back.
+		menumask = 0x7FFF;
 		OsdSetTitle("System");
 		parentstate = menustate;
 
+		// *** THIS PAGE IS EXACTLY FULL ***
+		// The core's OSD is 16 lines (sys/osd.v OSD_HEIGHT 64 at highres, and
+		// OsdUpdate() only transmits OsdGetSize() == 16 of them), Back occupies
+		// the last one, so there are 15 lines for 14 rows. The blank separators
+		// this page used to carry between groups are gone: with them, m ran to
+		// 17 even BEFORE the save state rows, which put the Ethernet row on
+		// line 16 where OsdUpdate never sent it and let Back overwrite the
+		// blank on line 15. That row has been invisible since this fork added
+		// D-Cache and CPU Speed. Anything added here from now on has to
+		// displace something.
 		m = 0;
 		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " CPU       : ");
@@ -6242,7 +6278,6 @@ void HandleUI(void)
 		strcpy(s, " CPU Speed : ");
 		strcat(s, (minimig_config.cpu & 0x20) ? "14 MHz" : "Full");
 		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " Chipset   : ");
 		strcat(s, config_chipset_msg[(minimig_config.chipset >> 2) & 7]);
 		OsdWrite(m++, s, menusub == 3, 0);
@@ -6256,12 +6291,10 @@ void HandleUI(void)
 		strcat(s, config_memory_slow_msg[(minimig_config.memory >> 2) & 0x03]);
 		OsdWrite(m++, s, menusub == 6, 0);
 
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " Joystick  : ");
 		strcat(s, config_joystick_mode[(minimig_config.autofire & 6) >> 1]);
 		OsdWrite(m++, s, menusub == 7, 0);
 
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " ROM    : ");
 		{
 			char *path = HomeDir();
@@ -6289,15 +6322,32 @@ void HandleUI(void)
 		strcat(s, (minimig_config.memory & 0x40) ? "enabled " : "disabled");
 		OsdWrite(m++, s, menusub == 10, 0);
 
-		OsdWrite(m++, "", 0, 0);
+		// Save states. The core is the active party in the protocol: these rows
+		// only pick a slot and raise a request bit, the capture itself is
+		// entirely in RTL and the host's process_ss() poller notices the
+		// finished window within a second and writes it to disk.
+		//
+		// Both rows grey out together -- see minimig_ss_blocked() for the two
+		// reasons. A greyed row is still reachable with the cursor (same as the
+		// D-Cache row above), so the handlers re-test the condition.
+		{
+			int ss_blocked = minimig_ss_blocked();
+
+			strcpy(s, " Save slot : ");
+			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
+			OsdWrite(m++, s, menusub == 11, ss_blocked);
+
+			OsdWrite(m++, " Save state", menusub == 12, ss_blocked);
+		}
+
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		// Upstream renders this at menusub 9; this fork has two extra rows
-		// ahead of it, so it lands at 11 and Back moves to 12.
-		OsdWrite(m++, s, menusub == 11, 0);
+		// Upstream renders this at menusub 9; this fork has four extra rows
+		// ahead of it, so it lands at 13 and Back moves to 14.
+		OsdWrite(m++, s, menusub == 13, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 12, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 14, 0);
 
 		menustate = MENU_MINIMIG_CHIPSET2;
 		break;
@@ -6448,7 +6498,34 @@ void HandleUI(void)
 				minimig_config.memory ^= 0x40;
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
-			else if (menusub == 11)
+			else if (menusub == 11 && !minimig_ss_blocked())
+			{
+				// Save slot 1..4, stored 0..3. Kept in minimig_config so it
+				// survives "Save settings"; it is NOT pushed to status[53:52]
+				// here. The core samples slot_base continuously for the whole
+				// ~0.2 s dump, so writing the slot only immediately before the
+				// request (menusub 12 below) makes it impossible for a slot
+				// change to redirect a save that is already in flight.
+				int slot = minimig_config.ss_slot & 3;
+				slot = minus ? (slot + 3) & 3 : (slot + 1) & 3;
+				minimig_config.ss_slot = (unsigned char)slot;
+				menustate = MENU_MINIMIG_CHIPSET1;
+			}
+			else if (menusub == 12 && select && !minimig_ss_blocked())
+			{
+				// Raise the save request. status[51] is edge-triggered in the
+				// core: Minimig.sv latches the 0->1 transition into a pending
+				// bit and clears that bit as soon as ss_ctrl accepts it, so one
+				// press means exactly one save no matter how long the bit
+				// stays set. Clearing it again here is housekeeping -- it keeps
+				// the persisted status word clean so a later core load does not
+				// present a fresh edge -- not a safety property.
+				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+				user_io_status_set("[51]", 1);
+				user_io_status_set("[51]", 0);
+				menustate = MENU_MINIMIG_CHIPSET1;
+			}
+			else if (menusub == 13)
 			{
 				// A2065 ethernet: OFF -> eth0 -> eth1 -> macvlan -> tap0,
 				// skipping anything this box cannot support (no second NIC,
@@ -6465,8 +6542,8 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
 			// Back. Upstream puts the A2065 row at menusub 9 and Back at 10;
-			// this fork has two extra rows ahead of them, so both shift up.
-			else if (menusub == 12)
+			// this fork has four extra rows ahead of them, so both shift up.
+			else if (menusub == 14)
 			{
 				menustate = MENU_MINIMIG_MAIN1;
 				menusub = 6;
