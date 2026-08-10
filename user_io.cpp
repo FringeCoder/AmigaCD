@@ -2002,11 +2002,9 @@ int process_ss(const char *rom_name, int enable)
 
 		for (int i = 0; i < 4; i++)
 		{
-			SSTRACE("  slot %d: mapping 0x%X len 0x%X
-", i, map_addr, len);
+			SSTRACE("  slot %d: mapping 0x%X len 0x%X\n", i, map_addr, len);
 			if (!base[i]) base[i] = shmem_map(map_addr, len);
-			SSTRACE("  slot %d: base=%p
-", i, base[i]);
+			SSTRACE("  slot %d: base=%p\n", i, base[i]);
 			if (!base[i])
 			{
 				printf("Unable to mmap (0x%X, %d)!\n", map_addr, len);
@@ -2014,11 +2012,9 @@ int process_ss(const char *rom_name, int enable)
 			else
 			{
 				ss_cnt[i] = 0xFFFFFFFF;
-				SSTRACE("  slot %d: memset start
-", i);
+				SSTRACE("  slot %d: memset start\n", i);
 				memset(base[i], 0, len);
-				SSTRACE("  slot %d: memset done
-", i);
+				SSTRACE("  slot %d: memset done\n", i);
 
 				if (!i)
 				{
@@ -2050,14 +2046,11 @@ int process_ss(const char *rom_name, int enable)
 			map_addr += len;
 		}
 
-		SSTRACE("  gen path
-");
+		SSTRACE("  gen path\n");
 		FileGenerateSavestatePath(rom_name, ss_name, 1);
-		SSTRACE("  path='%s'
-", ss_name);
+		SSTRACE("  path='%s'\n", ss_name);
 		ss_sufx = ss_name + strlen(ss_name) - 4;
-		SSTRACE("  armed ok
-");
+		SSTRACE("  armed ok\n");
 		return 1;
 	}
 
