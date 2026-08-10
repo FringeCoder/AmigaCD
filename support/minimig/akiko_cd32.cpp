@@ -2256,28 +2256,6 @@ static void akiko_handle_sec_req(void)
 // overwriting a real save with the synthesized FlashFile init from a
 // different CD when the player just browsed past one image without
 // running it.
-// Save state window arming, deferred out of the mount path.
-//
-// process_ss() only ever armed itself from user_io_file_tx(..., opensave)
-// (user_io.cpp:2877) or the arcade MRA path (:1613). Minimig uploads its
-// Kickstart by a different route and reaches neither, so the poller's
-// `enabled` flag stayed 0, the once-a-second call at user_io.cpp:3870 returned
-// immediately, and a state the core had written into its DDR3 window was never
-// persisted -- the core saved correctly and userspace never looked.
-//
-// Arming from akiko_cd32_set_cd_path() directly SEGFAULTS: ide.cpp:1161 calls
-// cdrom_parse from ide_open, which ApplyConfiguration reaches via hdd_open(0)
-// during core init, so the arming ran deep inside early init -- mapping four
-// DDR3 windows and touching the filesystem before the system was ready for
-// either. Measured on hardware 2026-08-10: the build died with SIGSEGV before
-// printing a line, while the same build with this call deferred runs.
-//
-// The poll loop is safe by construction: it only runs once the core is up.
-// The mounted disc is the right name -- it makes states per-game and mirrors
-// what per-game NVRAM already does from this same call site.
-static char akiko_ss_arm_path[1024] = {0};
-static bool akiko_ss_arm_pending = false;
-
 void akiko_cd32_set_cd_path(const char *path)
 {
 	char new_path[256] = {0};
@@ -2327,19 +2305,6 @@ void akiko_cd32_set_cd_path(const char *path)
 		akiko_diag("[akiko] set_cd_path: flushing old save %s before swap",
 		           cd_save_path_active);
 		akiko_nvram_save_to_path(cd_save_path_active);
-	}
-
-	// Remember the disc so the poll loop can arm the save state windows. See
-	// akiko_ss_arm_pending's declaration for why this cannot be done here.
-	if (path && *path)
-	{
-		strncpy(akiko_ss_arm_path, path, sizeof(akiko_ss_arm_path) - 1);
-		akiko_ss_arm_path[sizeof(akiko_ss_arm_path) - 1] = 0;
-		akiko_ss_arm_pending = true;
-	}
-	else
-	{
-		akiko_ss_arm_pending = false;
 	}
 
 	// Swap to the new slot.
@@ -2459,16 +2424,6 @@ void akiko_cd32_poll(void)
 	// mode cdtv_cd_poll() owns the CD instead. Previously this ran every poll
 	// regardless.
 	if (!cd32_active()) return;
-
-	// Arm the save state windows for the mounted disc, once. Deferred here out
-	// of the mount path -- see akiko_ss_arm_path's declaration for why doing it
-	// there segfaults.
-	if (akiko_ss_arm_pending)
-	{
-		akiko_ss_arm_pending = false;
-		akiko_diag("[akiko] arming save state windows for %s", akiko_ss_arm_path);
-		process_ss(akiko_ss_arm_path, 1);
-	}
 
 	// Phase 32.6 P3 (rolled back): tried replacing the floor with a SEC_REQ-
 	// drop barrier inside akiko_handle_sec_req, but CF then re-armed PLAY at
