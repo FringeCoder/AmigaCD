@@ -7069,6 +7069,29 @@ void HandleUI(void)
 			}
 			else if (menusub == 5 && select && !minimig_ss_blocked()) // Save state
 			{
+				// Arm the host poller, here and nowhere earlier.
+				//
+				// process_ss() only ever armed itself from
+				// user_io_file_tx(..., opensave) (user_io.cpp:2877) or the
+				// arcade MRA path (:1613). Minimig uploads its Kickstart by a
+				// different route and reaches neither, so the poller's enabled
+				// flag stayed 0, the once-a-second call at :3870 returned
+				// immediately, and a state the core wrote into its DDR3 window
+				// was never persisted.
+				//
+				// Arming it from the CD mount path instead was tried and the
+				// core would not boot: that path runs during core init
+				// (ide.cpp:1161 -> cdrom_parse, reached from
+				// ApplyConfiguration via hdd_open). Doing it on the user's
+				// explicit save press is the latest possible moment, when
+				// everything is up -- and if it ever does misbehave it can only
+				// affect a save, never stop the core booting.
+				//
+				// Idempotent: repeat presses re-map the same four windows.
+				// Named after the mounted disc so states are per-game.
+				if (minimig_config.hardfile[0].filename[0])
+					process_ss(minimig_config.hardfile[0].filename, 1);
+
 				// The core edge-detects this in RTL (Minimig.sv ss_save_edge),
 				// so a set/clear pair here is one save, and a bit left high
 				// cannot re-arm. Everything after this is RTL: quiesce, freeze,
