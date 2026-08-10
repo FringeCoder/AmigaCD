@@ -5,6 +5,10 @@
 #include <stdbool.h>
 #include <fcntl.h>
 #include <unistd.h>
+
+// TEMPORARY save state trace. Raw write(2) to its own file: Main produces no
+// output at all on a manual run, so printf is not a usable probe. To revert.
+#define SSTRACE(...) do { 	char _b[512]; int _n = snprintf(_b, sizeof(_b), __VA_ARGS__); 	int _f = open("/tmp/ss_trace.log", O_WRONLY|O_CREAT|O_APPEND, 0644); 	if (_f >= 0) { if (write(_f, _b, _n) < 0) {} close(_f); } } while (0)
 #include <time.h>
 #include <limits.h>
 #include <ctype.h>
@@ -767,6 +771,7 @@ static void parse_config()
 					}
 
 					printf("Got save state parameters: base=0x%X, size=0x%X\n", ss_base, ss_size);
+					SSTRACE("PARSE ss_base=0x%X ss_size=0x%X\n", ss_base, ss_size);
 
 					if (!ss_size || ss_size > (128 * 1024 * 1024))
 					{
@@ -1975,15 +1980,6 @@ int process_ss(const char *rom_name, int enable)
 	static void *base[4] = {};
 	static int enabled = 0;
 
-	// TEMPORARY save state arming trace. Written with raw write(2) to its own
-	// file because Main produces no output at all on a manual run -- the
-	// segfault log came back empty, so printf is not a usable probe here.
-	// Remove once the crash site is identified.
-	#define SSTRACE(...) do { \
-		char _b[512]; int _n = snprintf(_b, sizeof(_b), __VA_ARGS__); \
-		int _f = open("/tmp/ss_trace.log", O_WRONLY|O_CREAT|O_APPEND, 0644); \
-		if (_f >= 0) { if (write(_f, _b, _n) < 0) {} close(_f); } \
-	} while (0)
 
 	SSTRACE("enter rom_name=%p enable=%d ss_base=0x%X ss_size=0x%X\n",
 	        (const void*)rom_name, enable, ss_base, ss_size);
