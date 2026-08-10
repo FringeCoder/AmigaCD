@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include <time.h>
 #include <limits.h>
 #include <ctype.h>
@@ -1974,10 +1975,24 @@ int process_ss(const char *rom_name, int enable)
 	static void *base[4] = {};
 	static int enabled = 0;
 
+	// TEMPORARY save state arming trace. Written with raw write(2) to its own
+	// file because Main produces no output at all on a manual run -- the
+	// segfault log came back empty, so printf is not a usable probe here.
+	// Remove once the crash site is identified.
+	#define SSTRACE(...) do { \
+		char _b[512]; int _n = snprintf(_b, sizeof(_b), __VA_ARGS__); \
+		int _f = open("/tmp/ss_trace.log", O_WRONLY|O_CREAT|O_APPEND, 0644); \
+		if (_f >= 0) { if (write(_f, _b, _n) < 0) {} close(_f); } \
+	} while (0)
+
+	SSTRACE("enter rom_name=%p enable=%d ss_base=0x%X ss_size=0x%X\n",
+	        (const void*)rom_name, enable, ss_base, ss_size);
+
 	if (!ss_base) return 0;
 
 	if (rom_name)
 	{
+		SSTRACE("arming for '%s'\n", rom_name);
 		enabled = enable;
 		if (!enabled) return 0;
 
@@ -1987,7 +2002,11 @@ int process_ss(const char *rom_name, int enable)
 
 		for (int i = 0; i < 4; i++)
 		{
+			SSTRACE("  slot %d: mapping 0x%X len 0x%X
+", i, map_addr, len);
 			if (!base[i]) base[i] = shmem_map(map_addr, len);
+			SSTRACE("  slot %d: base=%p
+", i, base[i]);
 			if (!base[i])
 			{
 				printf("Unable to mmap (0x%X, %d)!\n", map_addr, len);
@@ -1995,7 +2014,11 @@ int process_ss(const char *rom_name, int enable)
 			else
 			{
 				ss_cnt[i] = 0xFFFFFFFF;
+				SSTRACE("  slot %d: memset start
+", i);
 				memset(base[i], 0, len);
+				SSTRACE("  slot %d: memset done
+", i);
 
 				if (!i)
 				{
@@ -2027,8 +2050,14 @@ int process_ss(const char *rom_name, int enable)
 			map_addr += len;
 		}
 
+		SSTRACE("  gen path
+");
 		FileGenerateSavestatePath(rom_name, ss_name, 1);
+		SSTRACE("  path='%s'
+", ss_name);
 		ss_sufx = ss_name + strlen(ss_name) - 4;
+		SSTRACE("  armed ok
+");
 		return 1;
 	}
 

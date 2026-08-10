@@ -2256,6 +2256,9 @@ static void akiko_handle_sec_req(void)
 // overwriting a real save with the synthesized FlashFile init from a
 // different CD when the player just browsed past one image without
 // running it.
+static char akiko_ss_arm_path[1024] = {0};
+static bool akiko_ss_arm_pending = false;
+
 void akiko_cd32_set_cd_path(const char *path)
 {
 	char new_path[256] = {0};
@@ -2305,6 +2308,13 @@ void akiko_cd32_set_cd_path(const char *path)
 		akiko_diag("[akiko] set_cd_path: flushing old save %s before swap",
 		           cd_save_path_active);
 		akiko_nvram_save_to_path(cd_save_path_active);
+	}
+
+	if (path && *path)
+	{
+		strncpy(akiko_ss_arm_path, path, sizeof(akiko_ss_arm_path) - 1);
+		akiko_ss_arm_path[sizeof(akiko_ss_arm_path) - 1] = 0;
+		akiko_ss_arm_pending = true;
 	}
 
 	// Swap to the new slot.
@@ -2424,6 +2434,13 @@ void akiko_cd32_poll(void)
 	// mode cdtv_cd_poll() owns the CD instead. Previously this ran every poll
 	// regardless.
 	if (!cd32_active()) return;
+
+	// TEMPORARY: deferred save state arming, under test.
+	if (akiko_ss_arm_pending)
+	{
+		akiko_ss_arm_pending = false;
+		process_ss(akiko_ss_arm_path, 1);
+	}
 
 	// Phase 32.6 P3 (rolled back): tried replacing the floor with a SEC_REQ-
 	// drop barrier inside akiko_handle_sec_req, but CF then re-armed PLAY at
