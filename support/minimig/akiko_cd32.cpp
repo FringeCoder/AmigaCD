@@ -2307,6 +2307,21 @@ void akiko_cd32_set_cd_path(const char *path)
 		akiko_nvram_save_to_path(cd_save_path_active);
 	}
 
+	// Arm the save state poller for this disc.
+	//
+	// process_ss() only ever armed itself from user_io_file_tx(..., opensave)
+	// (user_io.cpp:2877) or the arcade MRA path (:1613). Minimig uploads its
+	// Kickstart by a different route and never reaches either, so `enabled`
+	// stayed 0, the once-a-second poller at user_io.cpp:3870 returned
+	// immediately, and a state the core had written into its DDR3 window was
+	// never persisted -- the core saved correctly and userspace never looked.
+	//
+	// The mounted disc is the right name: it makes states per-game and mirrors
+	// what per-game NVRAM already does with this same call site. Arming is
+	// idempotent and re-maps the four windows, so doing it on every disc change
+	// is what keeps the slots pointing at the right title.
+	if (path && *path) process_ss(path, 1);
+
 	// Swap to the new slot.
 	strncpy(cd_save_path_active, new_path, sizeof(cd_save_path_active) - 1);
 	cd_save_path_active[sizeof(cd_save_path_active) - 1] = 0;
