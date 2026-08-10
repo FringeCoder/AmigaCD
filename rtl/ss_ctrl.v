@@ -53,22 +53,39 @@
 //    vector is: the next pair is not requested until the current one has
 //    cleared the CRC feeder and the DDR3 write.
 //
-// The restore direction currently reaches as far as validation. `load_req`
-// reads the window back out of DDR3 and checks it -- magic, version, length
-// and the payload CRC, cheapest gate first -- and reports the verdict on
-// `load_ok` / `load_fail` / `load_fail_code`. The sequence that puts the
-// payload back into the machine is not built yet, so a window that passes
-// every gate reports `load_ok` and stops there.
+// The restore direction is the mirror image. `load_req` reads the window back
+// out of DDR3 and checks it -- magic, version, length and the payload CRC,
+// cheapest gate first. Only once the last gate has passed does it freeze the
+// machine, stream the state vector into ss_serdes's load side, and write chip
+// RAM back through ss_dma in write_mode. `load_ok` means the machine was
+// restored, not merely that the file looked plausible.
 //
-// Validation runs with the machine still running, and nothing on that path
-// asserts `save_busy`, which is ss_quiesce's only `req`, so no refusal can
-// freeze the Amiga. That is not incidental. A rejected restore has to be a
-// no-op: a validator that stopped the machine in order to say no would be
-// worse than the corrupt file it was guarding against, since the user is left
-// with a dead Amiga and a file that was never loaded anyway. When the restore
-// sequence lands it must request the freeze only after the last gate has
-// passed. ss_ctrl_tb.v holds a sticky flag on `freeze` across every refusal
-// case to keep it that way.
+// Two orderings in that sequence are load-bearing, and both are asserted in
+// ss_ctrl_tb.v by snapshotting counters at the falling edge of `freeze` rather
+// than by checking that each event merely happened:
+//
+//  - Chip RAM and the state vector are both fully in place BEFORE the freeze
+//    is released. A CPU let go against half-restored memory does not crash
+//    where the bug is; it runs on and misbehaves later, which reads like a
+//    game bug rather than a save state bug.
+//  - The freeze falls exactly ONCE. A sequence that dropped and re-raised it
+//    would run the Amiga for a few instructions mid-restore, with the same
+//    consequence.
+//
+// The counter at window word 0 is never touched on restore. It is the host
+// poller's save handshake (user_io.cpp:1969); writing it would make the host
+// believe a new save had appeared and persist the window straight back over
+// the file that was just loaded. Nothing on the restore path calls
+// queue_word(), so the path issues no DDR3 write at all -- which the bench
+// checks directly, because that is the property the counter rule follows from.
+//
+// Validation runs with the machine still running. Nothing before the last gate
+// asserts either of ss_quiesce's two `req` sources, so no refusal can freeze
+// the Amiga. That is not incidental. A rejected restore has to be a no-op: a
+// validator that stopped the machine in order to say no would be worse than
+// the corrupt file it was guarding against, since the user is left with a dead
+// Amiga and a file that was never loaded anyway. ss_ctrl_tb.v holds a sticky
+// flag on `freeze` across every refusal case to keep it that way.
 
 module ss_ctrl
 #(
@@ -92,10 +109,11 @@ module ss_ctrl
 	output reg                save_fail,
 
 	// Restore. load_req is edge triggered: a level held high by an OSD row
-	// that has not been let go of must not start a second validation pass the
-	// instant the first one finishes. load_ok / load_fail / load_fail_code
-	// are levels, held until the next attempt starts -- a fail code that
-	// vanished a cycle after the refusal could not reach a toast or a log.
+	// that has not been let go of must not start a second restore the instant
+	// the first one finishes. load_ok / load_fail / load_fail_code are levels,
+	// held until the next attempt starts -- a fail code that vanished a cycle
+	// after the refusal could not reach a toast or a log. load_ok means the
+	// machine now holds the saved state, not that the file parsed.
 	input                     load_req,
 	output reg                load_busy,
 	output reg                load_ok,
@@ -121,6 +139,7 @@ module ss_ctrl
 	output                    sd_uds_n,
 	output                    sd_lds_n,
 	output                    sd_cache_inhibit,
+	output     [15:0]         sd_wr,
 	input      [15:0]         sd_rd,
 	input                     sd_ready,
 
@@ -144,8 +163,9 @@ localparam SS_VERSION = 32'h00010000;
 // Sized copies of CORE_WORDS for the comparisons on the restore path, so a
 // 24-bit counter and a 32-bit header word are each compared against something
 // of their own width rather than against an unsized integer.
-localparam [23:0] CORE_WORDS_24 = CORE_WORDS;
-localparam [31:0] CORE_WORDS_32 = CORE_WORDS;
+localparam [23:0] CORE_WORDS_24  = CORE_WORDS;
+localparam [31:0] CORE_WORDS_32  = CORE_WORDS;
+localparam [23:0] STATE_WORDS_24 = STATE_WORDS;
 
 // `length` counts the words after word 1: the six-word header tail (words
 // 2..7) plus the payload. A file this core can restore must carry at least
@@ -179,22 +199,44 @@ localparam [4:0] S_L_CRC_CAP   = 5'd17;
 localparam [4:0] S_L_PAY_FETCH = 5'd18;
 localparam [4:0] S_L_PAY_FEED  = 5'd19;
 
+// Restore proper, entered only once every gate above has passed.
+localparam [4:0] S_L_FREEZE    = 5'd20;
+localparam [4:0] S_L_ST_FETCH  = 5'd21;
+localparam [4:0] S_L_ST_FEED   = 5'd22;
+localparam [4:0] S_L_ST_WAIT   = 5'd23;
+localparam [4:0] S_L_CH_FETCH  = 5'd24;
+localparam [4:0] S_L_CH_ISSUE  = 5'd25;
+localparam [4:0] S_L_CH_WAIT   = 5'd26;
+localparam [4:0] S_L_RELEASE   = 5'd27;
+
 // Refusal reasons, as seen by the OSD. 5 is reserved for the Kickstart
 // fingerprint, which is not captured yet.
 localparam [3:0] FAIL_MAGIC   = 4'd1;
 localparam [3:0] FAIL_VERSION = 4'd2;
 localparam [3:0] FAIL_LENGTH  = 4'd3;
 localparam [3:0] FAIL_CRC     = 4'd4;
+// The file was good but the machine would not stand still long enough to have
+// it put back. Distinct from the four above, which are verdicts on the file:
+// this one says try again, not throw the file away. Nothing has been written
+// at the point it can fire, so it is as much a no-op as the other four.
+localparam [3:0] FAIL_QUIESCE = 4'd6;
 
 // ---------------------------------------------------------------- quiesce
 
 wire quiesced;
 wire timeout;
 
+// restore_busy is the restore path's own freeze request, and it is raised in
+// exactly one place: S_L_PAY_FETCH, after the payload CRC has matched. Every
+// refusal happens strictly before that, so no rejected file can stop the
+// Amiga -- see the module header, and the sticky freeze watch in
+// ss_ctrl_tb.v that holds this design to it.
+reg restore_busy;
+
 ss_quiesce quiesce
 (
 	.clk(clk), .rst_n(rst_n),
-	.req(save_busy),
+	.req(save_busy || restore_busy),
 	.blit_busy(blit_busy), .disk_busy(disk_busy), .audio_busy(audio_busy),
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),
 	.freeze(freeze), .quiesced(quiesced), .timeout(timeout)
@@ -207,14 +249,20 @@ wire              ser_word_valid;
 wire [31:0]       ser_word_out;
 wire              ser_save_done;
 
+reg               ser_load_start;
+reg               ser_word_in_valid;
+reg  [31:0]       ser_word_in;
+wire              ser_load_done;
+
 ss_serdes #(.WIDTH(STATE_W)) serdes
 (
 	.clk(clk), .rst_n(rst_n),
 	.save_start(ser_save_start), .state_in(state_in),
 	.word_valid(ser_word_valid), .word_out(ser_word_out),
 	.save_done(ser_save_done),
-	.load_start(1'b0), .word_in_valid(1'b0), .word_in(32'd0),
-	.load_done(), .state_out(state_out), .state_we(state_we)
+	.load_start(ser_load_start), .word_in_valid(ser_word_in_valid),
+	.word_in(ser_word_in),
+	.load_done(ser_load_done), .state_out(state_out), .state_we(state_we)
 );
 
 // State vector words captured at serdes's own one-per-clock rate, drained
@@ -228,6 +276,9 @@ reg [15:0] drain_idx;
 
 reg         dma_start;
 reg  [24:1] dma_base;
+reg         dma_write_mode;
+reg  [15:0] dma_word_in;
+wire        dma_word_req;
 wire        dma_word_valid;
 wire [15:0] dma_word_out;
 wire        dma_done;
@@ -240,10 +291,12 @@ ss_dma dma
 	.sd_uds_n(sd_uds_n), .sd_lds_n(sd_lds_n),
 	.sd_cache_inhibit(sd_cache_inhibit),
 	.sd_rd(sd_rd), .sd_ready(sd_ready),
-	// Read direction only for now: the restore path stops at validation, so
-	// nothing here writes chip RAM back yet. Tied off explicitly rather than
-	// left dangling so the build stays warning-free.
-	.write_mode(1'b0), .word_in(16'd0), .word_req(),
+	// Both directions. write_mode is low for the whole save and high for the
+	// whole chip RAM half of a restore; it is never changed with a transfer in
+	// flight, because it also selects the bus encoding (sd_state 2 vs 3) that
+	// the address currently on the wire was issued under.
+	.write_mode(dma_write_mode), .word_in(dma_word_in),
+	.word_req(dma_word_req), .sd_wr(sd_wr),
 	.word_valid(dma_word_valid), .word_out(dma_word_out), .done(dma_done)
 );
 
@@ -251,6 +304,11 @@ reg [24:1] chip_addr;
 reg [23:0] pair_count;
 reg [15:0] chip_low;
 reg        pending_low_held;
+
+// Restore side of the pair: the second (odd address) half is held here while
+// ss_dma is still writing the first, and handed over on its word_req.
+reg [15:0] chip_high;
+reg        chip_wr_half;
 
 // ---------------------------------------------------------------- crc
 
@@ -326,6 +384,13 @@ reg [23:0] pay_idx;       // payload word index, 0 .. CORE_WORDS
 
 wire load_req_rise = load_req && !load_req_d;
 
+// The payload starts at window word 8, which is even, so each 64-bit read
+// carries two consecutive payload words and bit 0 of the payload index picks
+// the half. One expression for all three consumers (the CRC scan, the state
+// vector feed and the chip RAM writeback), because a second one that disagreed
+// would read half the payload out of a file it had just checked.
+wire [31:0] pay_word = pay_idx[0] ? rd_data[63:32] : rd_data[31:0];
+
 // Queue a 32-bit payload word: CRC it and write it into DDR3. Callers must
 // only invoke this when word_busy is false.
 task queue_word;
@@ -379,7 +444,12 @@ always @(posedge clk) begin
 		ddr_byteenable   <= 8'h00;
 		pending_valid    <= 1'b0;
 		ser_save_start   <= 1'b0;
+		ser_load_start   <= 1'b0;
+		ser_word_in_valid<= 1'b0;
 		dma_start        <= 1'b0;
+		dma_write_mode   <= 1'b0;
+		restore_busy     <= 1'b0;
+		chip_wr_half     <= 1'b0;
 		crc_init         <= 1'b0;
 		cap_idx          <= 16'd0;
 		drain_idx        <= 16'd0;
@@ -389,10 +459,12 @@ always @(posedge clk) begin
 		crc_bytes_left   <= 3'd0;
 	end
 	else begin
-		ser_save_start <= 1'b0;
-		dma_start      <= 1'b0;
-		crc_init       <= 1'b0;
-		load_req_d     <= load_req;
+		ser_save_start    <= 1'b0;
+		ser_load_start    <= 1'b0;
+		ser_word_in_valid <= 1'b0;
+		dma_start         <= 1'b0;
+		crc_init          <= 1'b0;
+		load_req_d        <= load_req;
 
 		// CRC byte feeder. It lives in this block, rather than one of its
 		// own, because queue_word() below also drives crc_shift and
@@ -691,12 +763,12 @@ always @(posedge clk) begin
 				// for the save-side bug this exact off-by-one cycle caused.
 				if (!crc_busy) begin
 					if (crc_value == want_crc) begin
-						// Validation only. The sequence that puts the
-						// payload back into the machine is Task 5; until
-						// then a good file is recognised and nothing else.
-						load_ok   <= 1'b1;
-						load_busy <= 1'b0;
-						state     <= S_IDLE;
+						// Last gate passed. Only now may the machine be
+						// stopped: everything above this line is a verdict
+						// on the file, delivered with the Amiga still
+						// running.
+						restore_busy <= 1'b1;
+						state        <= S_L_FREEZE;
 					end
 					else load_reject(FAIL_CRC);
 				end
@@ -711,10 +783,135 @@ always @(posedge clk) begin
 
 		S_L_PAY_FEED: begin
 			if (!crc_busy) begin
-				crc_word(pay_idx[0] ? rd_data[63:32] : rd_data[31:0]);
+				crc_word(pay_word);
 				pay_idx <= pay_idx + 24'd1;
 				state   <= S_L_PAY_FETCH;
 			end
+		end
+
+		// The freeze the whole restore runs under. It is raised once, here,
+		// and dropped once, in S_L_RELEASE -- never in between. A restore that
+		// let the freeze fall and rise again would run the Amiga for a handful
+		// of instructions against a machine that is half old and half new,
+		// which resurfaces later as a game bug rather than as a save state
+		// bug. ss_ctrl_tb.v counts the falling edges for exactly that reason.
+		S_L_FREEZE: begin
+			if (timeout) begin
+				// The file was fine; the machine would not hold still. Nothing
+				// has been written yet, so dropping the request here leaves
+				// the Amiga exactly as it was found.
+				restore_busy <= 1'b0;
+				load_reject(FAIL_QUIESCE);
+			end
+			else if (quiesced) begin
+				ser_load_start <= 1'b1;
+				pay_idx        <= 24'd0;
+				state          <= S_L_ST_FETCH;
+			end
+		end
+
+		// State vector first, chip RAM second. Either order would satisfy
+		// "both before the release", but this one keeps the machine's own
+		// registers correct for the whole of the much longer memory pass.
+		S_L_ST_FETCH: begin
+			if (pay_idx == STATE_WORDS_24) state <= S_L_ST_WAIT;
+			else if (pay_idx[0]) state <= S_L_ST_FEED;
+			else begin
+				rd_idx <= 24'd8 + pay_idx;
+				rd_ret <= S_L_ST_FEED;
+				state  <= S_L_RD_ISSUE;
+			end
+		end
+
+		// ss_serdes takes one word per word_in_valid pulse with no rate
+		// requirement of its own, so unlike the save direction there is
+		// nothing to buffer here: the DDR3 read step sets the pace and the
+		// pulse is simply issued when a word is in hand.
+		S_L_ST_FEED: begin
+			ser_word_in       <= pay_word;
+			ser_word_in_valid <= 1'b1;
+			pay_idx           <= pay_idx + 24'd1;
+			state             <= S_L_ST_FETCH;
+		end
+
+		// ser_load_done is one cycle behind state_we (see ss_serdes.v), so
+		// waiting on it rather than on state_we guarantees the fan-out has
+		// already happened before anything downstream of here runs.
+		S_L_ST_WAIT: begin
+			if (ser_load_done) begin
+				if (CHIP_PAIRS == 0) state <= S_L_RELEASE;
+				else begin
+					chip_addr <= chip_base;
+					state     <= S_L_CH_FETCH;
+				end
+			end
+		end
+
+		// Chip RAM. pay_idx carries straight on from the state words, so the
+		// payload is walked exactly once, in order, in both directions.
+		S_L_CH_FETCH: begin
+			if (pay_idx == CORE_WORDS_24) state <= S_L_RELEASE;
+			else if (pay_idx[0]) state <= S_L_CH_ISSUE;
+			else begin
+				rd_idx <= 24'd8 + pay_idx;
+				rd_ret <= S_L_CH_ISSUE;
+				state  <= S_L_RD_ISSUE;
+			end
+		end
+
+		// Undo the capture-side byte swap, symmetrically. The file holds chip
+		// RAM in 68k order -- the Amiga word at the lower address contributes
+		// its high byte at the lower file offset -- so the 32-bit payload word
+		// 0xHHLL_hhll carries bytes ll,hh,LL,HH and the two Amiga words are
+		// {ll,hh} at the even address and {LL,HH} at the odd one.
+		//
+		// ss_dma wants the first word presented before `start`, which is why
+		// the low half goes straight into dma_word_in here and the high half
+		// is parked in chip_high until its word_req.
+		S_L_CH_ISSUE: begin
+			dma_word_in    <= {pay_word[7:0],   pay_word[15:8]};
+			chip_high      <= {pay_word[23:16], pay_word[31:24]};
+			dma_write_mode <= 1'b1;
+			dma_base       <= chip_addr;
+			dma_start      <= 1'b1;
+			chip_wr_half   <= 1'b0;
+			pay_idx        <= pay_idx + 24'd1;
+			state          <= S_L_CH_WAIT;
+		end
+
+		// Count our own two word_req pulses rather than watching `done`, for
+		// the same reason the save direction counts word_valid: ss_dma commits
+		// `done` on the same edge as the final word's handshake, from the same
+		// always block, so an if/else-if that tried to see both would lose one
+		// of them (see module header).
+		//
+		// The second pulse means the second word's sd_ready has already been
+		// taken, i.e. both writes have landed -- which is what makes it safe
+		// for the release below to follow immediately.
+		S_L_CH_WAIT: begin
+			if (dma_word_req) begin
+				if (!chip_wr_half) begin
+					dma_word_in  <= chip_high;
+					chip_wr_half <= 1'b1;
+				end
+				else begin
+					chip_addr <= chip_addr + 24'd2;
+					state     <= S_L_CH_FETCH;
+				end
+			end
+		end
+
+		// Both halves of the machine are back in place, so it may run again.
+		// Word 0 of the window -- the counter -- has not been touched: it is
+		// the host poller's save handshake, and bumping it here would make the
+		// host believe a new save had appeared and write the window back over
+		// the file it was just restored from.
+		S_L_RELEASE: begin
+			restore_busy   <= 1'b0;
+			dma_write_mode <= 1'b0;
+			load_ok        <= 1'b1;
+			load_busy      <= 1'b0;
+			state          <= S_IDLE;
 		end
 
 		default: state <= S_IDLE;

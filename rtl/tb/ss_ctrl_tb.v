@@ -54,12 +54,20 @@ wire [24:1] sd_addr;
 wire        sd_cs;
 wire [1:0]  sd_state;
 wire        sd_uds_n, sd_lds_n, sd_cache_inhibit;
+wire [15:0] sd_wr;
 reg  [15:0] sd_rd = 0;
 reg         sd_ready = 0;
 
 integer errors = 0;
 integer latency = 0;
 integer i;
+
+// Chip RAM as the restore leaves it. The read model below is a pure function
+// of the address and is deliberately NOT fed from this array: it is a
+// write-capture buffer only, pre-poisoned so that a restore which never wrote
+// chip RAM back leaves the poison visible rather than the value it was
+// supposed to write.
+reg [15:0] chip_mem [0:CHIP_WORDS-1];
 
 // Mock DDR3: a flat memory of 64-bit words, addressed by ddr_address.
 reg [63:0] ddr_mem [0:63];
@@ -85,7 +93,7 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS)) dut
 	.sd_addr(sd_addr), .sd_cs(sd_cs), .sd_state(sd_state),
 	.sd_uds_n(sd_uds_n), .sd_lds_n(sd_lds_n),
 	.sd_cache_inhibit(sd_cache_inhibit),
-	.sd_rd(sd_rd), .sd_ready(sd_ready),
+	.sd_wr(sd_wr), .sd_rd(sd_rd), .sd_ready(sd_ready),
 	.ddr_address(ddr_address), .ddr_writedata(ddr_writedata),
 	.ddr_byteenable(ddr_byteenable), .ddr_write(ddr_write),
 	.ddr_read(ddr_read), .ddr_readdata(ddr_readdata),
@@ -101,6 +109,14 @@ always #5 clk = ~clk;
 // exercised any harder here -- this bench is about correctness of the
 // sequencing, not about hunting the tightest possible timing corner
 // (ss_dma_tb.v already covers ss_dma's own protocol exhaustively).
+//
+// Writes are captured too: sd_state 3 is "write data" (sdram_ctrl.v:120), so
+// the same accept instant that would return a word on a read commits sd_wr to
+// chip_mem instead. Keying the capture on sd_state, not merely on sd_cs, means
+// a restore that drove the read encoding would write nothing at all and be
+// caught rather than silently accepted.
+integer chip_wr_count = 0;
+
 always @(posedge clk) begin
 	sd_ready <= 1'b0;
 	if (sd_cs && !sd_ready) begin
@@ -109,6 +125,10 @@ always @(posedge clk) begin
 			sd_rd    <= 16'hD000 + {8'd0, sd_addr[8:1]};
 			sd_ready <= 1'b1;
 			latency  = 0;
+			if (sd_state == 2'd3) begin
+				chip_mem[sd_addr[3:1]] = sd_wr;
+				chip_wr_count = chip_wr_count + 1;
+			end
 		end
 	end
 end
@@ -170,6 +190,50 @@ reg watch_freeze = 0;
 
 always @(posedge clk) if (watch_freeze && freeze) saw_freeze <= 1'b1;
 
+// ------------------------------------------------------- ordering observers
+//
+// A restore that puts the machine back together in the wrong order resumes and
+// then misbehaves, which reads like a game bug rather than a save state bug.
+// Checking that each event merely happened is not enough: the events are all
+// present in a broken ordering too. So the counts are SNAPSHOT at the instant
+// the freeze falls. "Chip RAM written before release" then means "all
+// CHIP_WORDS writes had already been counted when the machine was let go",
+// which is false for any design that writes even one word afterwards, and
+// likewise for the state vector's state_we pulse.
+integer state_we_count      = 0;
+integer ddr_write_count     = 0;
+integer freeze_fall_count   = 0;
+integer freeze_rise_count   = 0;
+integer chip_wr_at_release  = 0;
+integer state_we_at_release = 0;
+reg     freeze_d            = 0;
+
+always @(posedge clk) if (state_we) state_we_count = state_we_count + 1;
+
+always @(posedge clk) if (ddr_write && !ddr_waitrequest) ddr_write_count = ddr_write_count + 1;
+
+always @(posedge clk) begin
+	freeze_d <= freeze;
+	if (freeze && !freeze_d) freeze_rise_count = freeze_rise_count + 1;
+	if (!freeze && freeze_d) begin
+		freeze_fall_count   = freeze_fall_count + 1;
+		chip_wr_at_release  = chip_wr_count;
+		state_we_at_release = state_we_count;
+	end
+end
+
+task reset_observers;
+begin
+	chip_wr_count       = 0;
+	state_we_count      = 0;
+	ddr_write_count     = 0;
+	freeze_fall_count   = 0;
+	freeze_rise_count   = 0;
+	chip_wr_at_release  = 0;
+	state_we_at_release = 0;
+end
+endtask
+
 // Read a 32-bit word out of the mock DDR3 by word index.
 function [15:0] bswap16;
 	input [15:0] v;
@@ -214,12 +278,27 @@ endtask
 // than on load_ok/load_fail keeps this robust against those two being levels
 // that persist from the previous attempt.
 task run_load;
+	integer s;
 begin
 	@(negedge clk); load_req = 1;
 	wait (load_busy);
 	@(negedge clk); load_req = 0;
 	wait (!load_busy);
+	// A restore attempt is not over when the controller goes idle: ss_quiesce
+	// drops `freeze` one cycle behind the request, so returning any earlier
+	// would leave the machine still stopped and the falling edge uncounted.
+	// (For a refusal `freeze` was never raised and this returns immediately.)
 	@(negedge clk);
+	wait (!freeze);
+	// Then settle. Two cycles are needed because the edge observers below
+	// sample `freeze` on posedge and so see a transition driven by another
+	// posedge block one cycle after it happens; the rest is so that "the
+	// restore wrote nothing to DDR3" is a real observation rather than a race
+	// with a write that simply had not been accepted yet -- ddr_waitrequest is
+	// high one cycle in four, so a queued write can take several cycles to
+	// land. Without this a controller that bumped the counter on restore went
+	// undetected (mutation M14).
+	for (s = 0; s < 10; s = s + 1) @(negedge clk);
 end
 endtask
 
@@ -263,6 +342,7 @@ end
 
 initial begin
 	for (i = 0; i < 64; i = i + 1) ddr_mem[i] = 64'd0;
+	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
 	@(negedge clk); rst_n = 1;
 
 	// Blitter busy at first, so the save has to wait for a quiet instant.
@@ -302,6 +382,16 @@ initial begin
 	check("chip word 2", ddr_word(12), {bswap16(16'hD005), bswap16(16'hD004)});
 	check("chip word 3", ddr_word(13), {bswap16(16'hD007), bswap16(16'hD006)});
 
+	// The same two words again, as literals, against the EXTERNAL contract
+	// rather than against bswap16(). The file's byte at offset 4*10+0 must be
+	// the high byte of the Amiga word at chip address 0, and so on; a 32-bit
+	// word is stored little-endian, so the four bytes D0,00,D0,01 read back as
+	// 32'h01D000D0. Written out this way, capture and restore cannot agree with
+	// each other on a swap that is wrong in both directions -- a matched pair
+	// of errors round-trips perfectly but fails here.
+	check("chip word 0 in 68k byte order", ddr_word(10), 32'h01D000D0);
+	check("chip word 3 in 68k byte order", ddr_word(13), 32'h07D006D0);
+
 	// core_crc32 against an independently computed reference over the exact
 	// bytes above, least-significant byte of each word first. A design that
 	// dropped, duplicated, reordered a word, or re-armed the CRC mid-stream
@@ -339,13 +429,58 @@ initial begin
 	@(negedge clk);
 	for (i = 0; i < 64; i = i + 1) win_golden[i] = ddr_mem[i];
 
-	saw_freeze   = 0;
-	watch_freeze = 1;
+	// From here on state_in is a different value than the one that was saved,
+	// so a state_out that comes back holding the ORIGINAL vector can only have
+	// come out of the file. Without this a restore that simply latched its own
+	// live input would pass.
+	state_in = 64'hFEDCBA9876543210;
 
+	// The counter belongs to the host's save handshake, not to us. Poking a
+	// value the save path would never write makes "restore left word 0 alone"
+	// checkable: if the restore touched it at all it would land back on 1.
+	poke_word(0, 32'hA5A5A5A5);
+	for (i = 0; i < 64; i = i + 1) win_golden[i] = ddr_mem[i];
+
+	reset_observers();
 	run_load();
+
 	check("round trip validates",  {31'd0, load_ok},   32'd1);
 	check("round trip no failure", {31'd0, load_fail}, 32'd0);
-	check("valid load no freeze",  {31'd0, saw_freeze}, 32'd0);
+
+	// The vector that comes back out is the one that went in, not the live
+	// state_in above.
+	check("restored state low",  state_out[31:0],  32'h89ABCDEF);
+	check("restored state high", state_out[63:32], 32'h01234567);
+
+	// Chip RAM back in SDRAM, in SDRAM's own word order -- the inverse of the
+	// 68k-order file contract asserted above, pinned to literals for the same
+	// reason. chip_mem was poisoned with 0xBAD0+n, so an unwritten word is
+	// unmistakable rather than accidentally right.
+	check("chip RAM restored word 0", {16'd0, chip_mem[0]}, 32'h0000D000);
+	check("chip RAM restored word 1", {16'd0, chip_mem[1]}, 32'h0000D001);
+	check("chip RAM restored word 6", {16'd0, chip_mem[6]}, 32'h0000D006);
+	check("chip RAM restored word 7", {16'd0, chip_mem[7]}, 32'h0000D007);
+
+	// Chip RAM must be written before the CPU is released, and the state
+	// vector must be applied before the freeze drops -- otherwise the CPU
+	// executes against a half-restored machine. Both counts are snapshots
+	// taken at the falling edge of freeze, so they establish the order, not
+	// merely that the events occurred.
+	check("chip RAM written before release", chip_wr_at_release,  CHIP_WORDS);
+	check("regs loaded before unfreeze",     state_we_at_release, 32'd1);
+	check("freeze dropped exactly once",     freeze_fall_count,   32'd1);
+	check("freeze raised exactly once",      freeze_rise_count,   32'd1);
+
+	// A restore is a read of the window, never a write. Anything else would
+	// eventually reach the counter.
+	check("restore writes no DDR3",  ddr_write_count, 32'd0);
+	check("counter untouched",       ddr_word(0),     32'hA5A5A5A5);
+
+	// Every refusal below must leave the machine running. saw_freeze is sticky
+	// across all of them; the successful restores above and below are outside
+	// the watched window, because those are supposed to freeze.
+	saw_freeze   = 0;
+	watch_freeze = 1;
 
 	// Each gate refuses with its own code, and none of them may stop the
 	// machine to do it.
@@ -397,15 +532,44 @@ initial begin
 	check("last word refused",      {28'd0, load_fail_code}, 32'd4);
 	check("last word no freeze",    {31'd0, saw_freeze},     32'd0);
 
-	// And the good file still validates after all of that -- the CRC is
-	// re-armed per attempt, not left carrying the previous scan's residue.
+	check("no freeze at any point",  {31'd0, saw_freeze}, 32'd0);
+	watch_freeze = 0;
+
+	// A perfectly good file against a machine that will not stand still. The
+	// freeze is requested, never granted, and given up on. Nothing has been
+	// written by then, so this is as much a no-op as the gate refusals above:
+	// the Amiga is left exactly as it was found, and the user can try again.
 	restore_window();
+	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
+	reset_observers();
+	blit_busy = 1;
+	@(negedge clk); load_req = 1;
+	wait (load_busy);
+	@(negedge clk); load_req = 0;
+	while (load_busy) begin
+		@(negedge clk); frame_tick = 1;
+		@(negedge clk); frame_tick = 0;
+	end
+	blit_busy = 0;
+	@(negedge clk); @(negedge clk); @(negedge clk);
+	check("wedged machine refused",    {28'd0, load_fail_code}, 32'd6);
+	check("wedged machine not ok",     {31'd0, load_ok},        32'd0);
+	check("wedged chip RAM untouched", {16'd0, chip_mem[0]},    32'h0000BAD0);
+	check("wedged machine never froze", freeze_rise_count,      32'd0);
+
+	// And the good file still restores after all of that -- the CRC is
+	// re-armed per attempt, not left carrying the previous scan's residue, and
+	// the whole sequence repeats cleanly rather than working exactly once.
+	restore_window();
+	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
+	reset_observers();
 	run_load();
 	check("revalidates after fails", {31'd0, load_ok},   32'd1);
 	check("revalidated no failure",  {31'd0, load_fail}, 32'd0);
-	check("no freeze at any point",  {31'd0, saw_freeze}, 32'd0);
-
-	watch_freeze = 0;
+	check("second restore chip RAM", {16'd0, chip_mem[5]}, 32'h0000D005);
+	check("second restore ordering", chip_wr_at_release, CHIP_WORDS);
+	check("second restore one fall", freeze_fall_count,  32'd1);
+	check("second restore counter",  ddr_word(0),        32'hA5A5A5A5);
 
 	// A machine that never quiesces must fail rather than save.
 	blit_busy = 1;
