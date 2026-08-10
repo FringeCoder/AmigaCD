@@ -333,7 +333,36 @@ static bool cdtv_push_sector(const uint8_t *buf, int len)
 	if (len <= 0) return true;
 
 	int waited_ms = 0;
-	while (cdtv_sec_space_bytes() < len) {
+	int space = cdtv_sec_space_bytes();
+
+	// Version-skew guard. The credit is produced by core RTL, and the core and
+	// this binary live in separate repositories that are deployed
+	// independently. Against a core built before the credit existed, hps_ext.v
+	// never drives io_dout for this sub-channel and the read returns whatever
+	// the previous transaction left behind -- zero when idle. Gating on that
+	// would make every sector wait the full timeout and every CDTV data READ
+	// fail, turning a working CDTV unusable with a symptom pointing nowhere
+	// near this code.
+	//
+	// A zero credit on the very first read cannot be genuine: the caller only
+	// pushes after a command has been accepted, and the FIFO is empty then. So
+	// treat "never seen a nonzero credit" as "this core has no credit channel"
+	// and stream unthrottled, exactly as before the credit existed. One sector
+	// of an 8 KB FIFO is 2352 bytes, so a real FIFO always reports room here.
+	static bool credit_channel_seen = false;
+	static bool credit_absent_logged = false;
+	bool gate = true;
+	if (space > 0) credit_channel_seen = true;
+	else if (!credit_channel_seen) {
+		if (!credit_absent_logged) {
+			cdtv_dbg("no sector-FIFO credit from the core -- assuming a core "
+			         "without the channel and streaming unthrottled");
+			credit_absent_logged = true;
+		}
+		gate = false;
+	}
+
+	while (gate && space < len) {
 		if (waited_ms >= CDTV_SEC_WAIT_MS) {
 			cdtv_dbg("sector FIFO has no room for %d bytes after %d ms — failing READ",
 			         len, waited_ms);
@@ -341,6 +370,7 @@ static bool cdtv_push_sector(const uint8_t *buf, int len)
 		}
 		usleep(1000);
 		waited_ms++;
+		space = cdtv_sec_space_bytes();
 	}
 	if (waited_ms) cdtv_dbg("sector FIFO throttle: waited %d ms for %d bytes", waited_ms, len);
 
