@@ -50,7 +50,7 @@ Read these before starting; they define the work.
 |---|---|
 | `rtl/ss_dma.v` | Add a write direction (SDRAM writeback) |
 | `rtl/tb/ss_dma_tb.v` | Cover the write direction against the same level-ack mock |
-| `rtl/ss_ctrl.v` | DDR3 read path, header validation, restore FSM |
+| `rtl/ss_ctrl.v` | Chip RAM byte order (Task 0); DDR3 read path, header validation, restore FSM |
 | `rtl/tb/ss_ctrl_tb.v` | Restore sequence, and refusal for each gate |
 | `rtl/ss_state.vh` | Note that the list is now an lvalue as well as an rvalue |
 | `upstream/…/rtl/tg68k/TG68KdotC_Kernel.vhd` | External register-file write port |
@@ -59,6 +59,89 @@ Read these before starting; they define the work.
 | `upstream/…/Minimig.sv` | Restore request, state fan-out, Kickstart CRC |
 | `menu.cpp` | Restore row, edge-triggered like the save row |
 | `docs/savestates-bringup.md` | Bring-up results |
+
+---
+
+### Task 0: Fix the chip RAM byte order at capture — do this first
+
+Found on hardware, 2026-08-10, by analysing the first real save state
+(`Flink (1994)_1.ss`). `ss_ctrl` packs two SDRAM 16-bit words into one
+little-endian 32-bit DDR3 word, so **each Amiga word's two bytes land reversed**
+relative to 68k big-endian order. Nothing in the payload is readable as Amiga
+memory until you swap them back.
+
+This has to be fixed before the restore path exists, not after:
+
+- Restore must write chip RAM back in the order the machine expects. If capture
+  and restore are both wrong in the same way they cancel out — until anything
+  else touches the file, at which point the bug is baked into the format.
+- A state file that matches Amiga byte order is directly inspectable, which is
+  the only reason the analysis that found this was possible at all.
+- Exactly one v1.0 file exists in the world. Fixing it now costs nothing;
+  fixing it later means a format version bump and migration.
+
+**Files:** modify `rtl/ss_ctrl.v` and `rtl/tb/ss_ctrl_tb.v`; copy to
+`upstream/core-cd32-cdtv/rtl/`.
+
+- [ ] **Step 1: Write the failing test**
+
+In `rtl/tb/ss_ctrl_tb.v`, the mock SDRAM returns `16'hD000 + addr`. Assert the
+packed DDR3 word carries those two 16-bit values **in Amiga byte order** — the
+first word's high byte at the lowest file offset:
+
+```verilog
+	// Chip RAM must land in the file in 68k byte order, so a state file can be
+	// read as Amiga memory. Word N's high byte belongs at the lower address.
+	check("chip pair byte order", ddr_word(10),
+	      {byteswap16(16'hD001), byteswap16(16'hD000)});
+```
+
+Add `byteswap16` as a testbench function so the expectation states the intent
+rather than a pre-swapped magic number.
+
+- [ ] **Step 2: Run to verify it fails**
+
+```bash
+export PATH="$PATH:/c/iverilog/bin" && iverilog -g2005 -Wall -o build/ss_ctrl_tb rtl/ss_ctrl.v rtl/ss_crc32.v rtl/ss_quiesce.v rtl/ss_serdes.v rtl/ss_dma.v rtl/tb/ss_ctrl_tb.v && vvp build/ss_ctrl_tb
+```
+Expected: FAIL on `chip pair byte order`, with the current packing.
+
+- [ ] **Step 3: Swap the bytes as the pair is queued**
+
+In `ss_ctrl`'s `S_CHIP` state, byte-swap each 16-bit word as it goes into the
+32-bit pair. Do it here rather than in `ss_dma`, which should stay a plain
+memory reader with no opinion about endianness.
+
+- [ ] **Step 4: Verify, and re-check the CRC still agrees**
+
+Re-run the bench. Then confirm the payload CRC still matches a host-side
+`zlib.crc32` over the same bytes — the CRC is computed over the payload as
+written, so changing the byte order changes it, and the host/RTL agreement
+proven on hardware must still hold.
+
+- [ ] **Step 5: Commit and refresh the core copy**
+
+- [ ] **Step 6: Add the verification this exposed**
+
+The same analysis raised something unresolved, and it belongs in this plan's
+acceptance criteria rather than being forgotten:
+
+**Address 4 of the captured chip RAM was zero.** On a booted AmigaOS that holds
+`ExecBase`, and the string `"chip memory"` — the name Exec gives its chip
+MemHeader — appeared nowhere in 2 MB. Against that, exception vectors at
+addresses 8 and 12 held `0x00F80B1A`, a valid Kickstart ROM address, and game
+data was present once byte order was corrected.
+
+So the chip RAM path is **not independently verified** even though the header,
+CRC and CPU registers are. Add to Task 8's hardware acceptance: dump a state
+from a booted machine and confirm
+
+- address 4 holds a plausible `ExecBase` pointer into chip RAM, and
+- Exec's chip `MemHeader` is locatable, with `mh_Free` a sane figure.
+
+If those still fail after the byte-order fix, the chip RAM capture is reading
+the wrong thing and that must be resolved before any restore is trusted —
+restoring a wrong memory image is worse than not restoring at all.
 
 ---
 
