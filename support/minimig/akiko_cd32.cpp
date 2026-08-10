@@ -2310,12 +2310,8 @@ void akiko_cd32_set_cd_path(const char *path)
 		akiko_nvram_save_to_path(cd_save_path_active);
 	}
 
-	if (path && *path)
-	{
-		strncpy(akiko_ss_arm_path, path, sizeof(akiko_ss_arm_path) - 1);
-		akiko_ss_arm_path[sizeof(akiko_ss_arm_path) - 1] = 0;
-		akiko_ss_arm_pending = true;
-	}
+	// TEMPORARY: arm here (not deferred) so a manual run reproduces the crash.
+	if (path && *path) process_ss(path, 1);
 
 	// Swap to the new slot.
 	strncpy(cd_save_path_active, new_path, sizeof(cd_save_path_active) - 1);
