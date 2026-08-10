@@ -59,12 +59,23 @@ module ss_dma
 	input      [15:0] sd_rd,
 	input             sd_ready,
 
+	// Write direction, for restore. write_mode low reproduces the read
+	// behaviour byte for byte. The caller presents the first word before
+	// `start` and advances on each word_req pulse, so the data for an address
+	// is stable for the whole time chip select is asserted for it.
+	input             write_mode,
+	input      [15:0] word_in,
+	output reg        word_req,
+	output     [15:0] sd_wr,
+
 	output reg        word_valid,
 	output reg [15:0] word_out,
 	output reg        done
 );
 
-assign sd_state         = 2'd2;
+// State 3 is "write data", state 2 "read data" (sdram_ctrl.v:120,122).
+assign sd_state         = write_mode ? 2'd3 : 2'd2;
+assign sd_wr            = word_in;
 assign sd_uds_n         = 1'b0;
 assign sd_lds_n         = 1'b0;
 assign sd_cache_inhibit = busy;
@@ -90,6 +101,7 @@ always @(posedge clk) begin
 		sd_cs      <= 1'b0;
 		sd_addr    <= 24'd0;
 		word_valid <= 1'b0;
+		word_req   <= 1'b0;
 		done       <= 1'b0;
 		busy       <= 1'b0;
 		remaining  <= 24'd0;
@@ -97,6 +109,7 @@ always @(posedge clk) begin
 	else begin
 		word_valid <= 1'b0;
 		done       <= 1'b0;
+		word_req   <= 1'b0;
 
 		if (start) begin
 			sd_addr    <= base_addr;
@@ -110,8 +123,11 @@ always @(posedge clk) begin
 			case (xfer_state)
 				XFER_REQ: begin
 					if (sd_ready) begin
+						// A write has no data to return; ask the caller for
+						// the next word instead of publishing one.
 						word_out   <= sd_rd;
-						word_valid <= 1'b1;
+						word_valid <= ~write_mode;
+						word_req   <= write_mode;
 						sd_cs      <= 1'b0;
 						remaining  <= remaining - 24'd1;
 						if (remaining == 24'd1) begin

@@ -45,6 +45,17 @@ wire [15:0] word_out;
 wire        done;
 
 integer errors = 0;
+reg         write_mode = 0;
+reg  [15:0] word_in = 0;
+wire        word_req;
+wire [15:0] sd_wr;
+integer     wr_seq = 0;
+integer     wr_count = 0;
+reg         wr_logged = 0;
+reg         saw_state2 = 0;
+reg         saw_state3 = 0;
+reg  [24:1] wr_addr [0:15];
+reg  [15:0] wr_data [0:15];
 integer got_count;
 integer i;
 
@@ -88,10 +99,45 @@ ss_dma dut
 	.sd_uds_n(sd_uds_n), .sd_lds_n(sd_lds_n),
 	.sd_cache_inhibit(sd_cache_inhibit),
 	.sd_rd(sd_rd), .sd_ready(sd_ready),
+	.write_mode(write_mode), .word_in(word_in), .word_req(word_req),
+	.sd_wr(sd_wr),
 	.word_valid(word_valid), .word_out(word_out), .done(done)
 );
 
 always #5 clk = ~clk;
+
+// ---- write-direction plumbing -------------------------------------------
+// The producer advances on word_req, which the DUT pulses once each accepted
+// write. The first word must be present before start, mirroring the contract
+// ss_ctrl will use.
+always @(posedge clk) begin
+	if (!rst_n) begin
+		wr_seq <= 0;
+	end
+	else if (start) begin
+		wr_seq  <= 0;
+		word_in <= 16'hAA00;
+	end
+	else if (word_req) begin
+		wr_seq  <= wr_seq + 1;
+		word_in <= 16'hAA00 + wr_seq + 1;
+	end
+end
+
+// Record what the DUT writes, so the test proves the right data reached the
+// right address rather than merely that the cycle count was plausible.
+always @(posedge clk) begin
+	if (sd_cs && sd_ready && sd_state == 2'd3 && !wr_logged) begin
+		wr_addr[wr_count] <= sd_addr;
+		wr_data[wr_count] <= sd_wr;
+		wr_count          <= wr_count + 1;
+		wr_logged         <= 1'b1;
+	end
+	if (sd_cs && write_mode && sd_state == 2'd3) saw_state3 <= 1'b1;
+	if (sd_cs && write_mode && sd_state == 2'd2) saw_state2 <= 1'b1;
+	if (!sd_cs) wr_logged <= 1'b0;
+	if (start)  begin wr_count <= 0; wr_logged <= 1'b0; end
+end
 
 // Mock memory: contents are 0xC000 + address. sd_ready is a level: it goes
 // up once the current access's latency target is met and stays up until
@@ -304,6 +350,39 @@ initial begin
 	check("sd_cs is actually low during the sampled gap", sd_cs, 1'b0);
 	wait_done;
 	@(negedge clk);
+
+	// ---- write direction ------------------------------------------------
+	// Restore has to put chip RAM back. Same per-word chip-select discipline:
+	// the cache behind the CPU port holds its ack as a level and only clears
+	// it when chip select drops, so a held CS would rewrite one address.
+	write_mode = 1;
+	base_addr  = 24'h000040;
+	word_count = 24'd4;
+	@(negedge clk); start = 1;
+	@(negedge clk); start = 0;
+	wait (done);
+	@(negedge clk);
+
+	check("write: word count",     wr_count,    4);
+	check("write: first address",  wr_addr[0],  24'h000040);
+	check("write: last address",   wr_addr[3],  24'h000043);
+	check("write: data 0",         wr_data[0],  16'hAA00);
+	check("write: data 3",         wr_data[3],  16'hAA03);
+	check("write: cs released",    sd_cs,       1'b0);
+	check("write: state is 3",     saw_state3,  1'b1);
+	check("write: never state 2",  saw_state2,  1'b0);
+
+	// Reads must still work afterwards, and must go back to state 2.
+	write_mode = 0;
+	got_count  = 0;
+	base_addr  = 24'h000010;
+	word_count = 24'd2;
+	@(negedge clk); start = 1;
+	@(negedge clk); start = 0;
+	wait (done);
+	@(negedge clk); @(negedge clk);
+	check("read after write: count", got_count, 2);
+	check("read after write: data",  got[0],    16'hC000 + 16'h0010);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
