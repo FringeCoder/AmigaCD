@@ -86,11 +86,46 @@
 // the corrupt file it was guarding against, since the user is left with a dead
 // Amiga and a file that was never loaded anyway. ss_ctrl_tb.v holds a sticky
 // flag on `freeze` across every refusal case to keep it that way.
+//
+// ------------------------------------------------------ kickstart fingerprint
+//
+// Kickstart is not constant. gary.v:110 declares `rom_readonly = 0 //when zero
+// allows to write to $fc-$ff`; A1000 WCS mode writes the ROM and HRTmon patches
+// it. More to the point, a state made under KS 3.1 restored into a KS 1.3
+// machine produces a guru and nothing anywhere says why -- every header word
+// checks out, the payload CRC matches, and the machine simply misbehaves.
+//
+// So every save carries a CRC32 over the ROM region as payload word 0, and
+// every restore recomputes it over the machine's live ROM and refuses with
+// FAIL_KICK if it differs. Recomputed, not remembered from ROM upload time,
+// because the point is to catch a ROM that has since been patched as well as
+// one that was never the same ROM. See the CORE_WORDS comment below for why
+// payload word 0 and not a ninth header word.
+//
+// WIRING, NOT YET DONE. Minimig.sv muxes the SDRAM CPU port on ss_freeze alone
+// (`.cpuCS(ss_freeze ? ss_sd_cs : ...)` and friends). The save-side scan runs
+// frozen and is covered by that. The restore-side scan is NOT: it runs with the
+// machine still going, by design, and so needs the port while ss_freeze is low.
+// This module raises `rom_scan` for exactly that window. Minimig.sv must mux on
+// `ss_freeze | ss_rom_scan` and hold the 68k off its own port for the duration
+// (a bus stall of ~20 ms for a 512 KB ROM -- the chipset keeps running, only the
+// CPU waits). Until that is done a restore reaches S_KICK_WAIT and stalls there
+// waiting for an sd_ready that the mux is not routing. `kick_base` is a port
+// rather than a parameter so that copying this file over without doing the
+// wiring is at least a visible unconnected-input diagnostic.
 
 module ss_ctrl
 #(
 	parameter STATE_W    = 64,
 	parameter CHIP_WORDS = 24'h100000,  // 16-bit words; 0x100000 = 2 MB
+	// Kickstart region, in 16-bit words. 0x40000 = 512 KB, which is the
+	// $F80000-$FFFFFF ROM. A 1 MB CD32 image also occupies $E00000-$E7FFFF,
+	// which is a separate, non-contiguous SDRAM region: this pass covers the
+	// upper half only. That is enough to tell one ROM from another -- the point
+	// is identification, not integrity -- and scanning a second region would
+	// need a second base and a second loop for no diagnostic gain. Must be
+	// even and non-zero: the pass reads two 16-bit words per ss_dma request.
+	parameter KICK_WORDS = 24'h40000,
 	// 32-bit words in one DDR3 slot: 0x400000 bytes / 4. Only the restore
 	// path uses it, as the upper bound on a header length field that arrives
 	// from a file and is therefore untrusted.
@@ -132,6 +167,8 @@ module ss_ctrl
 	output                    freeze,
 
 	input      [24:1]         chip_base,
+	input      [24:1]         kick_base,
+	output reg                rom_scan,
 
 	output     [24:1]         sd_addr,
 	output                    sd_cs,
@@ -155,7 +192,26 @@ module ss_ctrl
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
 localparam CHIP_PAIRS  = CHIP_WORDS / 2;         // 32-bit words of packed chip RAM
-localparam CORE_WORDS  = STATE_WORDS + CHIP_PAIRS;
+localparam KICK_PAIRS  = KICK_WORDS / 2;         // 32-bit words scanned per fingerprint
+
+// Payload word 0 is the Kickstart fingerprint, then the state vector, then
+// packed chip RAM.
+//
+// It goes at the START OF THE CORE PAYLOAD, not in the eight-word header, and
+// not in SS_STATE_LIST. Not the header, because words 0..7 are the host-visible
+// contract that support/minimig/minimig_savestate.h parses field by field:
+// widening it is a format change that has to land in the core, the host struct,
+// its parser and the format test simultaneously, and every one of those has to
+// agree or a file written by one is unreadable by the other. Not SS_STATE_LIST,
+// because that vector is machine state that gets written BACK into the machine
+// on restore, and a ROM fingerprint is metadata about the machine -- restoring
+// it would mean writing a CRC into a register. Payload word 0 costs nothing
+// anywhere: the host reads core_words out of the file rather than assuming it,
+// so it sees one more word and no change of shape. It also puts the fingerprint
+// under core_crc32, so a fingerprint corrupted in transit is reported as a
+// corrupt file rather than misdiagnosed as the wrong ROM.
+localparam KICK_META   = 1;
+localparam CORE_WORDS  = KICK_META + STATE_WORDS + CHIP_PAIRS;
 
 localparam SS_MAGIC   = 32'h53534341;
 localparam SS_VERSION = 32'h00010000;
@@ -165,7 +221,12 @@ localparam SS_VERSION = 32'h00010000;
 // of their own width rather than against an unsized integer.
 localparam [23:0] CORE_WORDS_24  = CORE_WORDS;
 localparam [31:0] CORE_WORDS_32  = CORE_WORDS;
-localparam [23:0] STATE_WORDS_24 = STATE_WORDS;
+
+// Payload index bounds for the restore-side walk. The state vector no longer
+// starts at payload word 0 -- the fingerprint does -- so both ends are named
+// rather than left as "0" and "STATE_WORDS" at the use site.
+localparam [23:0] ST_FIRST_24 = KICK_META;
+localparam [23:0] ST_END_24   = KICK_META + STATE_WORDS;
 
 // `length` counts the words after word 1: the six-word header tail (words
 // 2..7) plus the payload. A file this core can restore must carry at least
@@ -174,51 +235,67 @@ localparam [23:0] STATE_WORDS_24 = STATE_WORDS;
 localparam [31:0] MIN_LENGTH = 32'd6 + CORE_WORDS_32;
 localparam [31:0] MAX_LENGTH = SLOT_WORDS - 32'd2;
 
-localparam [4:0] S_IDLE        = 5'd0;
-localparam [4:0] S_WAIT        = 5'd1;
-localparam [4:0] S_STATE_CAP   = 5'd2;
-localparam [4:0] S_STATE_DRAIN = 5'd3;
-localparam [4:0] S_CHIP_ISSUE  = 5'd4;
-localparam [4:0] S_CHIP_WAIT   = 5'd5;
-localparam [4:0] S_CHIP_DRAIN  = 5'd6;
-localparam [4:0] S_HEADER      = 5'd7;
-localparam [4:0] S_COUNT       = 5'd8;
-localparam [4:0] S_DONE        = 5'd9;
-localparam [4:0] S_FAIL        = 5'd10;
+localparam [5:0] S_IDLE        = 6'd0;
+localparam [5:0] S_WAIT        = 6'd1;
+localparam [5:0] S_STATE_CAP   = 6'd2;
+localparam [5:0] S_STATE_DRAIN = 6'd3;
+localparam [5:0] S_CHIP_ISSUE  = 6'd4;
+localparam [5:0] S_CHIP_WAIT   = 6'd5;
+localparam [5:0] S_CHIP_DRAIN  = 6'd6;
+localparam [5:0] S_HEADER      = 6'd7;
+localparam [5:0] S_COUNT       = 6'd8;
+localparam [5:0] S_DONE        = 6'd9;
+localparam [5:0] S_FAIL        = 6'd10;
 
 // Restore. S_L_RD_* is a shared single-word read step: callers set rd_idx and
 // rd_ret and jump to S_L_RD_ISSUE, and land back in rd_ret with rd_data
 // holding the 64-bit DDR3 word that contains it.
-localparam [4:0] S_L_RD_ISSUE  = 5'd11;
-localparam [4:0] S_L_RD_WAIT   = 5'd12;
-localparam [4:0] S_L_RD_DATA   = 5'd13;
-localparam [4:0] S_L_MAGIC     = 5'd14;
-localparam [4:0] S_L_LEN_CAP   = 5'd15;
-localparam [4:0] S_L_LEN_CHK   = 5'd16;
-localparam [4:0] S_L_CRC_CAP   = 5'd17;
-localparam [4:0] S_L_PAY_FETCH = 5'd18;
-localparam [4:0] S_L_PAY_FEED  = 5'd19;
+localparam [5:0] S_L_RD_ISSUE  = 6'd11;
+localparam [5:0] S_L_RD_WAIT   = 6'd12;
+localparam [5:0] S_L_RD_DATA   = 6'd13;
+localparam [5:0] S_L_MAGIC     = 6'd14;
+localparam [5:0] S_L_LEN_CAP   = 6'd15;
+localparam [5:0] S_L_LEN_CHK   = 6'd16;
+localparam [5:0] S_L_CRC_CAP   = 6'd17;
+localparam [5:0] S_L_PAY_FETCH = 6'd18;
+localparam [5:0] S_L_PAY_FEED  = 6'd19;
 
 // Restore proper, entered only once every gate above has passed.
-localparam [4:0] S_L_FREEZE    = 5'd20;
-localparam [4:0] S_L_ST_FETCH  = 5'd21;
-localparam [4:0] S_L_ST_FEED   = 5'd22;
-localparam [4:0] S_L_ST_WAIT   = 5'd23;
-localparam [4:0] S_L_CH_FETCH  = 5'd24;
-localparam [4:0] S_L_CH_ISSUE  = 5'd25;
-localparam [4:0] S_L_CH_WAIT   = 5'd26;
-localparam [4:0] S_L_RELEASE   = 5'd27;
+localparam [5:0] S_L_FREEZE    = 6'd20;
+localparam [5:0] S_L_ST_FETCH  = 6'd21;
+localparam [5:0] S_L_ST_FEED   = 6'd22;
+localparam [5:0] S_L_ST_WAIT   = 6'd23;
+localparam [5:0] S_L_CH_FETCH  = 6'd24;
+localparam [5:0] S_L_CH_ISSUE  = 6'd25;
+localparam [5:0] S_L_CH_WAIT   = 6'd26;
+localparam [5:0] S_L_RELEASE   = 6'd27;
 
-// Refusal reasons, as seen by the OSD. 5 is reserved for the Kickstart
-// fingerprint, which is not captured yet.
+// Kickstart fingerprint. One pass, shared by both directions: kick_ret says
+// where to land when the fingerprint in kick_crc is complete. Sharing it is not
+// merely economy -- a save-side scanner and a restore-side scanner that
+// disagreed about region, length or byte order would reject every state file
+// this core ever wrote, and would do so only on real hardware.
+localparam [5:0] S_KICK_ISSUE  = 6'd28;
+localparam [5:0] S_KICK_WAIT   = 6'd29;
+localparam [5:0] S_KICK_DRAIN  = 6'd30;
+localparam [5:0] S_PAY_KICK    = 6'd31;   // save: write it as payload word 0
+localparam [5:0] S_L_KICK_CHK  = 6'd32;   // restore: compare it against the file
+
+// Refusal reasons, as seen by the OSD.
 localparam [3:0] FAIL_MAGIC   = 4'd1;
 localparam [3:0] FAIL_VERSION = 4'd2;
 localparam [3:0] FAIL_LENGTH  = 4'd3;
 localparam [3:0] FAIL_CRC     = 4'd4;
+// The file is well formed and intact, but it was made under a different
+// Kickstart than the one now in the machine. Nothing else in the format can see
+// this: the payload is exactly as it was written. Restoring anyway produces a
+// guru with no explanation, so this is a refusal, not a warning.
+localparam [3:0] FAIL_KICK    = 4'd5;
 // The file was good but the machine would not stand still long enough to have
-// it put back. Distinct from the four above, which are verdicts on the file:
+// it put back. Distinct from the five above, which are verdicts on the file
+// (or, for FAIL_KICK, on the file against this machine):
 // this one says try again, not throw the file away. Nothing has been written
-// at the point it can fire, so it is as much a no-op as the other four.
+// at the point it can fire, so it is as much a no-op as the other five.
 localparam [3:0] FAIL_QUIESCE = 4'd6;
 
 // ---------------------------------------------------------------- quiesce
@@ -310,6 +387,28 @@ reg        pending_low_held;
 reg [15:0] chip_high;
 reg        chip_wr_half;
 
+// -------------------------------------------------- kickstart fingerprint
+//
+// The same ss_dma and the same ss_crc32 the payload uses, pointed at the ROM
+// instead. On the save side this runs while the machine is already frozen and
+// memory is already being read, so it costs a few extra milliseconds on a save
+// the user asked for. On the restore side it runs with the machine STILL
+// RUNNING, because a gate that stopped the Amiga in order to refuse a file
+// would be worse than the file it was guarding against -- see the module
+// header, and the sticky freeze watch in ss_ctrl_tb.v.
+//
+// That is what rom_scan is for: it is high whenever this module needs the
+// SDRAM CPU port, which on the restore path is a time when `freeze` is low.
+// Minimig.sv currently muxes that port on ss_freeze alone; see the wiring note
+// in the module header.
+reg [24:1] kick_addr;
+reg [23:0] kick_pairs;
+reg [15:0] kick_low;
+reg        kick_low_held;
+reg [5:0]  kick_ret;
+reg [31:0] kick_crc;        // fingerprint of the ROM currently in the machine
+reg [31:0] file_kick_crc;   // fingerprint the state file was made under
+
 // ---------------------------------------------------------------- crc
 
 reg        crc_init;
@@ -366,7 +465,7 @@ wire word_busy = crc_busy || pending_valid || ddr_write;
 
 // ---------------------------------------------------------------- writer
 
-reg [4:0]  state;
+reg [5:0]  state;
 reg [23:0] word_idx;      // 32-bit word index within the window
 reg [31:0] pending_word;
 reg        pending_valid;
@@ -377,7 +476,7 @@ reg [31:0] saved_crc;
 reg        load_req_d;
 reg [23:0] rd_idx;        // 32-bit word index being read
 reg [63:0] rd_data;       // the 64-bit DDR3 word that contains it
-reg [4:0]  rd_ret;        // state to resume in once rd_data is valid
+reg [5:0]  rd_ret;        // state to resume in once rd_data is valid
 reg [31:0] hdr_length;
 reg [31:0] want_crc;
 reg [23:0] pay_idx;       // payload word index, 0 .. CORE_WORDS
@@ -389,7 +488,24 @@ wire load_req_rise = load_req && !load_req_d;
 // the half. One expression for all three consumers (the CRC scan, the state
 // vector feed and the chip RAM writeback), because a second one that disagreed
 // would read half the payload out of a file it had just checked.
+wire [23:0] pay_win  = 24'd8 + pay_idx;
 wire [31:0] pay_word = pay_idx[0] ? rd_data[63:32] : rd_data[31:0];
+
+// Whether rd_data already holds the 64-bit word that contains pay_word, so the
+// odd half of a pair can be consumed without a second read.
+//
+// This is a comparison against the index actually read, not a test of
+// pay_idx[0], and that is load bearing now. The old form assumed every payload
+// walk STARTS on an even index, which was true when the state vector began at
+// payload word 0. The Kickstart fingerprint occupies payload word 0, so the
+// state vector now starts at 1 and chip RAM starts at 1 + STATE_WORDS -- both
+// of which can be odd. A parity test would have taken the "already in hand"
+// branch on the first iteration of those loops and fed whatever the last header
+// read had left in rd_data: the restore would have written a stale header word
+// into the machine's registers. Comparing indices is right whatever the parity,
+// and a match means the data genuinely is in hand rather than merely probably.
+reg  [23:0] rd_pair;
+wire        pay_held = (rd_pair == {1'b0, pay_win[23:1]});
 
 // Queue a 32-bit payload word: CRC it and write it into DDR3. Callers must
 // only invoke this when word_busy is false.
@@ -449,6 +565,13 @@ always @(posedge clk) begin
 		dma_start        <= 1'b0;
 		dma_write_mode   <= 1'b0;
 		restore_busy     <= 1'b0;
+		rom_scan         <= 1'b0;
+		kick_low_held    <= 1'b0;
+		kick_pairs       <= 24'd0;
+		// Nothing matches until a read has actually happened. Every restore
+		// issues its header reads long before the first pay_held test, so this
+		// only has to be a value the first comparison cannot accidentally hit.
+		rd_pair          <= 24'hFFFFFF;
 		chip_wr_half     <= 1'b0;
 		crc_init         <= 1'b0;
 		cap_idx          <= 16'd0;
@@ -533,10 +656,82 @@ always @(posedge clk) begin
 			end
 		end
 
+		// Fingerprint the ROM first, while the machine is frozen and before a
+		// single payload word has been produced. It has to come first because it
+		// shares the one ss_crc32 with the payload CRC: the fingerprint is a
+		// complete CRC in its own right, and the payload CRC then starts from a
+		// fresh init with the fingerprint as its first word.
 		S_WAIT: begin
 			if (timeout) state <= S_FAIL;
 			else if (quiesced) begin
-				crc_init       <= 1'b1;
+				crc_init   <= 1'b1;
+				rom_scan   <= 1'b1;
+				kick_addr  <= kick_base;
+				kick_pairs <= 24'd0;
+				kick_ret   <= S_PAY_KICK;
+				state      <= S_KICK_ISSUE;
+			end
+		end
+
+		// ------------------------------------------- kickstart fingerprint
+		//
+		// Two 16-bit words per ss_dma request, packed and byte-swapped exactly
+		// as the chip RAM capture packs its pairs, so the fingerprint is a CRC
+		// over the ROM image in 68k byte order -- the same order a host-side
+		// tool would get by CRC-ing the .rom file. Completion is counted from
+		// the two word_valid pulses this module asked for, never from ss_dma's
+		// `done`, which commits on the same edge as the second pulse (see the
+		// module header).
+		S_KICK_ISSUE: begin
+			dma_start     <= 1'b1;
+			dma_base      <= kick_addr;
+			kick_low_held <= 1'b0;
+			state         <= S_KICK_WAIT;
+		end
+
+		S_KICK_WAIT: begin
+			if (dma_word_valid) begin
+				if (!kick_low_held) begin
+					kick_low      <= dma_word_out;
+					kick_low_held <= 1'b1;
+				end
+				else begin
+					crc_word({dma_word_out[7:0], dma_word_out[15:8],
+					          kick_low[7:0],     kick_low[15:8]});
+					kick_low_held <= 1'b0;
+					state         <= S_KICK_DRAIN;
+				end
+			end
+		end
+
+		S_KICK_DRAIN: begin
+			if (!crc_busy) begin
+				if (kick_pairs == KICK_PAIRS - 24'd1) begin
+					// crc_value is complete here for the same reason the payload
+					// CRC is complete at its own !crc_busy: the last byte is only
+					// folded into crc_out on the edge that clears crc_wr, and
+					// crc_busy includes crc_wr.
+					kick_crc <= crc_value;
+					crc_init <= 1'b1;      // re-arm for whatever the caller does next
+					rom_scan <= 1'b0;
+					state    <= kick_ret;
+				end
+				else begin
+					kick_pairs <= kick_pairs + 24'd1;
+					kick_addr  <= kick_addr + 24'd2;
+					state      <= S_KICK_ISSUE;
+				end
+			end
+		end
+
+		// Save: the fingerprint is payload word 0, and it is the first word fed
+		// to the payload CRC. crc_init was asserted on the previous cycle, so
+		// ss_crc32 reloads 0xFFFFFFFF on this edge while queue_word is only
+		// arming the feeder -- the first byte is not presented until the cycle
+		// after that, which is after the reload.
+		S_PAY_KICK: begin
+			if (!word_busy) begin
+				queue_word(kick_crc);
 				word_idx       <= 24'd8;      // payload starts at word 8
 				cap_idx        <= 16'd0;
 				ser_save_start <= 1'b1;
@@ -704,6 +899,7 @@ always @(posedge clk) begin
 		S_L_RD_DATA: begin
 			if (ddr_readdatavalid) begin
 				rd_data <= ddr_readdata;
+				rd_pair <= {1'b0, rd_idx[23:1]};
 				state   <= rd_ret;
 			end
 		end
@@ -763,19 +959,31 @@ always @(posedge clk) begin
 				// for the save-side bug this exact off-by-one cycle caused.
 				if (!crc_busy) begin
 					if (crc_value == want_crc) begin
-						// Last gate passed. Only now may the machine be
-						// stopped: everything above this line is a verdict
-						// on the file, delivered with the Amiga still
-						// running.
-						restore_busy <= 1'b1;
-						state        <= S_L_FREEZE;
+						// The file is intact. One gate left: is it this
+						// machine's Kickstart? That one is deliberately LAST
+						// even though it is the cheaper of the two scans.
+						// The payload CRC costs the machine nothing -- it is
+						// DDR3 reads only -- while the fingerprint borrows
+						// the SDRAM CPU port out from under a running Amiga,
+						// so it is not worth spending on a file that has not
+						// yet proved itself. It also keeps the diagnosis
+						// honest: the stored fingerprint is only meaningful
+						// once the payload carrying it has been checked, and
+						// a corrupt file must read as corrupt, not as "wrong
+						// ROM". Still no freeze: rom_scan, not restore_busy.
+						crc_init   <= 1'b1;
+						rom_scan   <= 1'b1;
+						kick_addr  <= kick_base;
+						kick_pairs <= 24'd0;
+						kick_ret   <= S_L_KICK_CHK;
+						state      <= S_KICK_ISSUE;
 					end
 					else load_reject(FAIL_CRC);
 				end
 			end
-			else if (pay_idx[0]) state <= S_L_PAY_FEED;
+			else if (pay_held) state <= S_L_PAY_FEED;
 			else begin
-				rd_idx <= 24'd8 + pay_idx;
+				rd_idx <= pay_win;
 				rd_ret <= S_L_PAY_FEED;
 				state  <= S_L_RD_ISSUE;
 			end
@@ -783,10 +991,29 @@ always @(posedge clk) begin
 
 		S_L_PAY_FEED: begin
 			if (!crc_busy) begin
+				// Payload word 0 is the fingerprint the file was made under.
+				// Grabbing it here rather than with a read of its own means the
+				// scan that has to walk the whole payload anyway pays for it.
+				if (pay_idx == 24'd0) file_kick_crc <= pay_word;
 				crc_word(pay_word);
 				pay_idx <= pay_idx + 24'd1;
 				state   <= S_L_PAY_FETCH;
 			end
+		end
+
+		// The machine's ROM is not the one this state was made under. Refuse.
+		// Nothing has been written and nothing has been frozen: the ROM scan
+		// reads SDRAM and does not touch the Amiga's own state, so this is as
+		// much a no-op as the four gates above it.
+		S_L_KICK_CHK: begin
+			if (kick_crc == file_kick_crc) begin
+				// Last gate passed. Only now may the machine be stopped:
+				// everything above this line is a verdict on the file,
+				// delivered with the Amiga still running.
+				restore_busy <= 1'b1;
+				state        <= S_L_FREEZE;
+			end
+			else load_reject(FAIL_KICK);
 		end
 
 		// The freeze the whole restore runs under. It is raised once, here,
@@ -805,7 +1032,9 @@ always @(posedge clk) begin
 			end
 			else if (quiesced) begin
 				ser_load_start <= 1'b1;
-				pay_idx        <= 24'd0;
+				// Skip payload word 0: the fingerprint is metadata about the
+				// machine, already checked, and is not part of the state vector.
+				pay_idx        <= ST_FIRST_24;
 				state          <= S_L_ST_FETCH;
 			end
 		end
@@ -814,10 +1043,10 @@ always @(posedge clk) begin
 		// "both before the release", but this one keeps the machine's own
 		// registers correct for the whole of the much longer memory pass.
 		S_L_ST_FETCH: begin
-			if (pay_idx == STATE_WORDS_24) state <= S_L_ST_WAIT;
-			else if (pay_idx[0]) state <= S_L_ST_FEED;
+			if (pay_idx == ST_END_24) state <= S_L_ST_WAIT;
+			else if (pay_held) state <= S_L_ST_FEED;
 			else begin
-				rd_idx <= 24'd8 + pay_idx;
+				rd_idx <= pay_win;
 				rd_ret <= S_L_ST_FEED;
 				state  <= S_L_RD_ISSUE;
 			end
@@ -851,9 +1080,9 @@ always @(posedge clk) begin
 		// payload is walked exactly once, in order, in both directions.
 		S_L_CH_FETCH: begin
 			if (pay_idx == CORE_WORDS_24) state <= S_L_RELEASE;
-			else if (pay_idx[0]) state <= S_L_CH_ISSUE;
+			else if (pay_held) state <= S_L_CH_ISSUE;
 			else begin
-				rd_idx <= 24'd8 + pay_idx;
+				rd_idx <= pay_win;
 				rd_ret <= S_L_CH_ISSUE;
 				state  <= S_L_RD_ISSUE;
 			end

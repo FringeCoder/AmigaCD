@@ -21,8 +21,17 @@ module ss_ctrl_tb;
 
 localparam STATE_W    = 64;
 localparam CHIP_WORDS = 8;
+
+// Kickstart fingerprint. A region distinct from chip RAM (which lives at word
+// addresses 0..7 here), so a scan that walked the wrong base would fingerprint
+// chip RAM and be caught rather than accidentally agreeing with itself.
+localparam KICK_WORDS = 8;
+localparam [23:0] KICK_BASE = 24'h000080;
+
 localparam STATE_WORDS = (STATE_W + 31) / 32;
-localparam CORE_WORDS  = STATE_WORDS + CHIP_WORDS / 2;
+
+// Payload word 0 is the Kickstart CRC, then the state vector, then chip RAM.
+localparam CORE_WORDS  = 1 + STATE_WORDS + CHIP_WORDS / 2;
 
 reg  clk = 0;
 reg  rst_n = 0;
@@ -76,7 +85,9 @@ reg [63:0] ddr_mem [0:63];
 // case below starts from a known-good file and corrupts exactly one field.
 reg [63:0] win_golden [0:63];
 
-ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS)) dut
+wire rom_scan;
+
+ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS)) dut
 (
 	.clk(clk), .rst_n(rst_n),
 	.slot_base(29'd0),
@@ -90,6 +101,7 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS)) dut
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),
 	.freeze(freeze),
 	.chip_base(24'h000000),
+	.kick_base(KICK_BASE), .rom_scan(rom_scan),
 	.sd_addr(sd_addr), .sd_cs(sd_cs), .sd_state(sd_state),
 	.sd_uds_n(sd_uds_n), .sd_lds_n(sd_lds_n),
 	.sd_cache_inhibit(sd_cache_inhibit),
@@ -115,14 +127,28 @@ always #5 clk = ~clk;
 // chip_mem instead. Keying the capture on sd_state, not merely on sd_cs, means
 // a restore that drove the read encoding would write nothing at all and be
 // caught rather than silently accepted.
+//
+// The Kickstart region is served out of the same mock, from a different value
+// series, so a fingerprint pass that walked chip RAM by mistake would produce a
+// different CRC than the reference below rather than quietly agreeing with
+// itself. rom_alt swaps the ROM for a different one without touching the state
+// file: that is exactly "a state made under a different Kickstart", which is
+// the case the fingerprint exists to catch.
 integer chip_wr_count = 0;
+
+reg rom_alt = 0;
+
+wire [23:0] sd_word  = sd_addr;
+wire        in_kick  = (sd_word >= KICK_BASE) && (sd_word < KICK_BASE + KICK_WORDS);
+wire [15:0] kick_off = sd_word[15:0] - KICK_BASE[15:0];
 
 always @(posedge clk) begin
 	sd_ready <= 1'b0;
 	if (sd_cs && !sd_ready) begin
 		latency = latency + 1;
 		if (latency >= 2) begin
-			sd_rd    <= 16'hD000 + {8'd0, sd_addr[8:1]};
+			sd_rd    <= in_kick ? ((rom_alt ? 16'hE100 : 16'hE000) + kick_off)
+			                    : (16'hD000 + {8'd0, sd_addr[8:1]});
 			sd_ready <= 1'b1;
 			latency  = 0;
 			if (sd_state == 2'd3) begin
@@ -190,6 +216,16 @@ reg watch_freeze = 0;
 
 always @(posedge clk) if (watch_freeze && freeze) saw_freeze <= 1'b1;
 
+// The SDRAM CPU port is not ours to take. Minimig.sv routes it to ss_ctrl while
+// the machine is frozen; the restore-side fingerprint scan needs it while the
+// machine is still running, which is what rom_scan exists to announce. Any cycle
+// of chip select outside those two windows is a cycle contending with the live
+// 68k, and would corrupt the running machine rather than merely fail. Sticky for
+// the whole simulation: one such cycle anywhere is a failure.
+reg bus_stolen = 0;
+
+always @(posedge clk) if (sd_cs && !freeze && !rom_scan) bus_stolen <= 1'b1;
+
 // ------------------------------------------------------- ordering observers
 //
 // A restore that puts the machine back together in the wrong order resumes and
@@ -238,6 +274,13 @@ endtask
 function [15:0] bswap16;
 	input [15:0] v;
 	bswap16 = {v[7:0], v[15:8]};
+endfunction
+
+// The mock's Kickstart contents, as a pure function of the word offset, so the
+// reference CRC below is computed from the same definition the mock serves.
+function [15:0] rom_word;
+	input integer k;
+	rom_word = (rom_alt ? 16'hE100 : 16'hE000) + k[15:0];
 endfunction
 
 function [31:0] ddr_word;
@@ -331,6 +374,22 @@ end
 endtask
 
 reg [31:0] expect_crc;
+reg [31:0] expect_kick_crc;
+
+// Reference fingerprint over the mock ROM, in the same 68k byte order the chip
+// RAM payload uses: each Amiga word's high byte first. Computed here from the
+// mock's own contents rather than read back out of the file, so a capture that
+// scanned the wrong region, the wrong length, or in the wrong byte order fails
+// rather than agreeing with itself.
+task compute_kick_crc;
+	integer k;
+begin
+	crc_acc = 32'hFFFFFFFF;
+	for (k = 0; k < KICK_WORDS; k = k + 2)
+		crc_word_step({bswap16(rom_word(k + 1)), bswap16(rom_word(k))});
+	expect_kick_crc = ~crc_acc;
+end
+endtask
 
 // A restore that never completes would otherwise park run_load() on its
 // wait() forever with no output at all.
@@ -366,9 +425,17 @@ initial begin
 	check("host_crc32", ddr_word(7), 32'd0);
 	check("length",     ddr_word(1), 6 + CORE_WORDS);
 
+	// Payload word 0 is the Kickstart fingerprint. It sits at the start of the
+	// core payload rather than in the eight-word header, so the header contract
+	// the host parser knows (minimig_savestate.h) is unchanged: the host sees
+	// only a core_words that is one larger, which it already reads from the file
+	// rather than assuming.
+	compute_kick_crc();
+	check("kickstart crc", ddr_word(8), expect_kick_crc);
+
 	// State vector words, least significant first.
-	check("state word 0", ddr_word(8), 32'h89ABCDEF);
-	check("state word 1", ddr_word(9), 32'h01234567);
+	check("state word 0", ddr_word(9),  32'h89ABCDEF);
+	check("state word 1", ddr_word(10), 32'h01234567);
 
 	// Chip RAM packed two 16-bit words per 32-bit word, low word first, in
 	// ascending address order.
@@ -377,10 +444,10 @@ initial begin
 	// lower file offset; without the swap every Amiga word reads reversed and
 	// nothing in the payload is interpretable (measured on hardware,
 	// 2026-08-10, on the first real save state).
-	check("chip word 0", ddr_word(10), {bswap16(16'hD001), bswap16(16'hD000)});
-	check("chip word 1", ddr_word(11), {bswap16(16'hD003), bswap16(16'hD002)});
-	check("chip word 2", ddr_word(12), {bswap16(16'hD005), bswap16(16'hD004)});
-	check("chip word 3", ddr_word(13), {bswap16(16'hD007), bswap16(16'hD006)});
+	check("chip word 0", ddr_word(11), {bswap16(16'hD001), bswap16(16'hD000)});
+	check("chip word 1", ddr_word(12), {bswap16(16'hD003), bswap16(16'hD002)});
+	check("chip word 2", ddr_word(13), {bswap16(16'hD005), bswap16(16'hD004)});
+	check("chip word 3", ddr_word(14), {bswap16(16'hD007), bswap16(16'hD006)});
 
 	// The same two words again, as literals, against the EXTERNAL contract
 	// rather than against bswap16(). The file's byte at offset 4*10+0 must be
@@ -389,8 +456,8 @@ initial begin
 	// 32'h01D000D0. Written out this way, capture and restore cannot agree with
 	// each other on a swap that is wrong in both directions -- a matched pair
 	// of errors round-trips perfectly but fails here.
-	check("chip word 0 in 68k byte order", ddr_word(10), 32'h01D000D0);
-	check("chip word 3 in 68k byte order", ddr_word(13), 32'h07D006D0);
+	check("chip word 0 in 68k byte order", ddr_word(11), 32'h01D000D0);
+	check("chip word 3 in 68k byte order", ddr_word(14), 32'h07D006D0);
 
 	// core_crc32 against an independently computed reference over the exact
 	// bytes above, least-significant byte of each word first. A design that
@@ -398,6 +465,7 @@ initial begin
 	// would produce a different value here even if every word above landed
 	// in the right DDR3 slot.
 	crc_acc = 32'hFFFFFFFF;
+	crc_word_step(expect_kick_crc);
 	crc_word_step(32'h89ABCDEF);
 	crc_word_step(32'h01234567);
 	crc_word_step({bswap16(16'hD001), bswap16(16'hD000)});
@@ -532,6 +600,39 @@ initial begin
 	check("last word refused",      {28'd0, load_fail_code}, 32'd4);
 	check("last word no freeze",    {31'd0, saw_freeze},     32'd0);
 
+	// A state file made under a different Kickstart. Every header word is right
+	// and the payload CRC still matches -- the FILE is untouched. What changed is
+	// the machine: its ROM now reads back different words, so the fingerprint the
+	// controller recomputes over the live ROM no longer matches the one stored in
+	// the payload. Nothing else in the format can catch this, which is the whole
+	// reason the fingerprint exists: without it the restore succeeds and the
+	// Amiga gurus with no explanation.
+	restore_window();
+	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
+	reset_observers();
+	rom_alt = 1;
+	run_load();
+	check("wrong kickstart refused",   {28'd0, load_fail_code}, 32'd5);
+	check("wrong kickstart not ok",    {31'd0, load_ok},        32'd0);
+	check("wrong kickstart no freeze", {31'd0, saw_freeze},     32'd0);
+	// The refusal is a no-op: the ROM scan reads SDRAM but writes nothing, and
+	// nothing of the state vector or chip RAM was applied on the way to saying no.
+	check("wrong kickstart chip untouched", {16'd0, chip_mem[0]}, 32'h0000BAD0);
+	check("wrong kickstart writes no DDR3",     ddr_write_count,      32'd0);
+	check("wrong kickstart never froze",        freeze_rise_count,    32'd0);
+
+	// Gate order: the payload CRC is a verdict on the file and costs the machine
+	// nothing, while the fingerprint costs a full ROM scan over the running
+	// machine's bus. A file that is BOTH corrupt and from another Kickstart must
+	// therefore report 4, not 5 -- both because "corrupt" is the more actionable
+	// diagnosis, and because a payload that has not been CRC-checked cannot be
+	// trusted to carry a meaningful fingerprint in the first place.
+	restore_window(); poke_word(9, ddr_word(9) ^ 32'd1);
+	run_load();
+	check("payload CRC precedes fingerprint", {28'd0, load_fail_code}, 32'd4);
+	check("both-bad no freeze",               {31'd0, saw_freeze},     32'd0);
+	rom_alt = 0;
+
 	check("no freeze at any point",  {31'd0, saw_freeze}, 32'd0);
 	watch_freeze = 0;
 
@@ -581,6 +682,8 @@ initial begin
 	end
 	wait (save_fail);
 	$display("PASS timeout reports failure");
+
+	check("never steals the CPU port", {31'd0, bus_stolen}, 32'd0);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
