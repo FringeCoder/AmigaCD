@@ -657,9 +657,21 @@ always @(posedge clk) begin
 
 		case (state)
 		S_IDLE: begin
-			save_ok   <= 1'b0;
-			save_fail <= 1'b0;
+			// save_ok / save_fail are cleared when the NEXT save starts, not on
+			// arrival here, so they are levels held until then -- the same
+			// contract load_ok / load_fail already keep below.
+			//
+			// They used to be cleared unconditionally at this point, which made
+			// each one a single clk cycle wide. This module runs at 113.5 MHz
+			// and Minimig.sv edge-detects these on clk_sys at 28.6 MHz: an 8.8 ns
+			// pulse against a 35 ns sample period is missed nearly every time,
+			// so the core's OSD toast never fired for a save. Measured on
+			// hardware -- the only toast a save produced was the host's own
+			// "Saving the state" from process_ss. No testbench could see it;
+			// they run one clock.
 			if (save_req) begin
+				save_ok   <= 1'b0;
+				save_fail <= 1'b0;
 				save_busy <= 1'b1;
 				state     <= S_WAIT;
 			end
