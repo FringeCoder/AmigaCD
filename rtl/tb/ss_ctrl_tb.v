@@ -87,7 +87,12 @@ reg [63:0] win_golden [0:63];
 
 wire rom_scan;
 
-ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS)) dut
+// Short enough to simulate, long enough that it cannot fire on the mock's own
+// two-cycle latency. The synthesised default is 65536.
+localparam [23:0] SCAN_TIMEOUT = 24'd64;
+
+ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
+          .SCAN_TIMEOUT(SCAN_TIMEOUT)) dut
 (
 	.clk(clk), .rst_n(rst_n),
 	.slot_base(29'd0),
@@ -134,9 +139,15 @@ always #5 clk = ~clk;
 // itself. rom_alt swaps the ROM for a different one without touching the state
 // file: that is exactly "a state made under a different Kickstart", which is
 // the case the fingerprint exists to catch.
+//
+// sd_stall models the one failure this mock can produce that the real hardware
+// can too: the CPU port is not routed here, so sd_ready never comes. Chip
+// select is still accepted, so a controller with no bound on the wait sits in
+// S_KICK_WAIT forever.
 integer chip_wr_count = 0;
 
 reg rom_alt = 0;
+reg sd_stall = 0;
 
 wire [23:0] sd_word  = sd_addr;
 wire        in_kick  = (sd_word >= KICK_BASE) && (sd_word < KICK_BASE + KICK_WORDS);
@@ -144,7 +155,7 @@ wire [15:0] kick_off = sd_word[15:0] - KICK_BASE[15:0];
 
 always @(posedge clk) begin
 	sd_ready <= 1'b0;
-	if (sd_cs && !sd_ready) begin
+	if (sd_cs && !sd_ready && !sd_stall) begin
 		latency = latency + 1;
 		if (latency >= 2) begin
 			sd_rd    <= in_kick ? ((rom_alt ? 16'hE100 : 16'hE000) + kick_off)
@@ -222,9 +233,17 @@ always @(posedge clk) if (watch_freeze && freeze) saw_freeze <= 1'b1;
 // of chip select outside those two windows is a cycle contending with the live
 // 68k, and would corrupt the running machine rather than merely fail. Sticky for
 // the whole simulation: one such cycle anywhere is a failure.
+// One documented exception, and only one: when the ROM scan is abandoned on
+// SCAN_TIMEOUT, ss_dma is still mid-transfer and holds its chip select up.
+// ss_ctrl drops rom_scan anyway, because the whole point of the timeout is that
+// the port was never being routed to it in the first place -- Minimig.sv muxes
+// on (ss_freeze | ss_rom_scan), so nothing of that stuck select reaches the
+// machine. watch_bus is lowered for exactly the cleanup window of that one
+// test and raised again as soon as ss_dma has been let finish.
 reg bus_stolen = 0;
+reg watch_bus  = 1;
 
-always @(posedge clk) if (sd_cs && !freeze && !rom_scan) bus_stolen <= 1'b1;
+always @(posedge clk) if (watch_bus && sd_cs && !freeze && !rom_scan) bus_stolen <= 1'b1;
 
 // ------------------------------------------------------- ordering observers
 //
@@ -632,6 +651,34 @@ initial begin
 	check("payload CRC precedes fingerprint", {28'd0, load_fail_code}, 32'd4);
 	check("both-bad no freeze",               {31'd0, saw_freeze},     32'd0);
 	rom_alt = 0;
+
+	// The SDRAM CPU port is not routed to ss_ctrl at all: chip select is taken
+	// but sd_ready never comes. This is what a missing or wrong port mux in
+	// Minimig.sv looks like from in here, and before SCAN_TIMEOUT existed it
+	// parked the controller in S_KICK_WAIT forever -- on the restore path with
+	// the CPU held off its own bus by ss_arm, i.e. a machine that looks alive
+	// and never runs another instruction, with nothing anywhere saying why.
+	// Bounding the wait is safe precisely here and nowhere else: the last gate
+	// has not passed, so not one byte of the Amiga has been touched.
+	restore_window();
+	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
+	reset_observers();
+	watch_bus = 0;
+	sd_stall  = 1;
+	run_load();
+	check("dead port refused",        {28'd0, load_fail_code}, 32'd6);
+	check("dead port not ok",         {31'd0, load_ok},        32'd0);
+	check("dead port no freeze",      {31'd0, saw_freeze},     32'd0);
+	check("dead port chip untouched", {16'd0, chip_mem[0]},    32'h0000BAD0);
+	check("dead port writes no DDR3", ddr_write_count,         32'd0);
+	check("dead port never froze",    freeze_rise_count,       32'd0);
+	check("dead port dropped rom_scan", {31'd0, rom_scan},     32'd0);
+	// Let the abandoned ss_dma transfer finish so the port is clean again, then
+	// put the watch back for the rest of the run.
+	sd_stall = 0;
+	for (i = 0; i < 20; i = i + 1) @(negedge clk);
+	check("dead port released on retry", {31'd0, sd_cs}, 32'd0);
+	watch_bus = 1;
 
 	check("no freeze at any point",  {31'd0, saw_freeze}, 32'd0);
 	watch_freeze = 0;

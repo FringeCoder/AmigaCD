@@ -6937,8 +6937,9 @@ void HandleUI(void)
 	{
 		OsdSetTitle("Settings", 0);
 		helptext_idx = 0;
-		// FastRAM, D-Cache, Main ROM, Ext ROM, Save slot, Save state, Back.
-		menumask = 0x7F;
+		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
+		// Save state(5), Restore state(6), Back(7) -- eight rows, so 0xFF.
+		menumask = 0xFF;
 		parentstate = menustate;
 
 		m = 0;
@@ -6985,6 +6986,10 @@ void HandleUI(void)
 		// which the AmigaCD console variant never reaches -- menu.cpp:5859 sends
 		// it straight to MENU_AMIGACD_MAIN1 and its own menu tree. The rows
 		// existed but were unreachable on the only variant that wanted them.
+		//
+		// All three grey out together on minimig_ss_blocked(): a restore is
+		// refused in exactly the configurations a save is (see that function),
+		// and the core enforces the same lockout in RTL regardless.
 		OsdWrite(m++, "", 0, 0);
 		{
 			int ss_blocked = minimig_ss_blocked();
@@ -6994,10 +6999,11 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == 4, ss_blocked);
 
 			OsdWrite(m++, " Save state", menusub == 5, ss_blocked);
+			OsdWrite(m++, " Restore state", menusub == 6, ss_blocked);
 		}
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 6, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 7, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -7101,7 +7107,42 @@ void HandleUI(void)
 				user_io_status_set("[51]", 0);
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 6 && select) // Back
+			else if (menusub == 6 && select && !minimig_ss_blocked()) // Restore state
+			{
+				// This is not housekeeping, it is the load. process_ss() maps
+				// the four DDR3 windows AND reads the four .ss files off disk
+				// into them (user_io.cpp:1988-2028). Nothing else on this core
+				// ever calls it -- the save row above is the only other caller
+				// -- so without this the window the core is about to validate
+				// holds whatever was there, and a restore after a power cycle,
+				// which is the whole point of the feature, could never work.
+				//
+				// It re-reads all four slots every press, ~16 MB. That is the
+				// cost of always validating the freshest file on disk rather
+				// than a stale window, on a keypress the user made deliberately.
+				// It also resets the poller's counters, so it cannot itself
+				// trigger a spurious write back to disk.
+				if (minimig_config.hardfile[0].filename[0])
+					process_ss(minimig_config.hardfile[0].filename, 1);
+
+				// status[54], edge-detected in RTL (Minimig.sv ss_load_edge)
+				// exactly as status[51] is. A level here would restore over and
+				// over -- ss_ctrl re-arms out of idle on any cycle load_req is
+				// high -- and the bit being cleared by userspace must not be
+				// what stands between the user and a machine that never runs
+				// again. The set/clear pair below is housekeeping on the
+				// persisted status word, not the safety property.
+				//
+				// Everything after this is the core's: it validates the window
+				// with the Amiga still running, refuses without freezing if any
+				// gate fails, and reports the outcome as an OSD toast either
+				// way (Minimig.sv's ss_info_* block).
+				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+				user_io_status_set("[54]", 1);
+				user_io_status_set("[54]", 0);
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 7 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 5;   // Settings row

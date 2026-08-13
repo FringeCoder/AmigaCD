@@ -102,17 +102,27 @@
 // one that was never the same ROM. See the CORE_WORDS comment below for why
 // payload word 0 and not a ninth header word.
 //
-// WIRING, NOT YET DONE. Minimig.sv muxes the SDRAM CPU port on ss_freeze alone
-// (`.cpuCS(ss_freeze ? ss_sd_cs : ...)` and friends). The save-side scan runs
-// frozen and is covered by that. The restore-side scan is NOT: it runs with the
-// machine still going, by design, and so needs the port while ss_freeze is low.
-// This module raises `rom_scan` for exactly that window. Minimig.sv must mux on
-// `ss_freeze | ss_rom_scan` and hold the 68k off its own port for the duration
-// (a bus stall of ~20 ms for a 512 KB ROM -- the chipset keeps running, only the
-// CPU waits). Until that is done a restore reaches S_KICK_WAIT and stalls there
-// waiting for an sd_ready that the mux is not routing. `kick_base` is a port
-// rather than a parameter so that copying this file over without doing the
-// wiring is at least a visible unconnected-input diagnostic.
+// WIRING. Minimig.sv muxes the SDRAM CPU port on `ss_freeze | ss_rom_scan`.
+// The save-side scan runs frozen and would have been covered by ss_freeze
+// alone; the restore-side scan is not, because it runs with the machine still
+// going, by design, and so needs the port while ss_freeze is low. This module
+// raises `rom_scan` for exactly that window. The 68k is off its own port for
+// the duration by a different mechanism: cpu_wrapper's ss_arm (Minimig.sv ties
+// it to save_busy | load_busy | fan-out busy) parks the CPU at its next
+// no-memaccess boundary, and both of those are high milliseconds before
+// rom_scan can rise. `kick_base` is a port rather than a parameter so that
+// copying this file over without doing the wiring is at least a visible
+// unconnected-input diagnostic.
+//
+// SCAN_TIMEOUT is the backstop for that wiring, and the reason it exists is
+// worth stating: if the port mux does not route ss_dma's chip select, the scan
+// waits on an sd_ready that can never arrive. On the restore path that stall
+// happens with the CPU parked and the chipset running -- a machine that looks
+// alive and does nothing, with no diagnosis anywhere. Nothing has been written
+// to the Amiga at that point in either direction (a save only reads; a restore
+// has not passed its last gate), so giving up is a genuine no-op rollback,
+// which is what makes bounding this wait safe. Contrast the DDR3 reads under
+// the restore's freeze, which deliberately have no timeout: see S_L_RD_DATA.
 
 module ss_ctrl
 #(
@@ -129,7 +139,14 @@ module ss_ctrl
 	// 32-bit words in one DDR3 slot: 0x400000 bytes / 4. Only the restore
 	// path uses it, as the upper bound on a header length field that arrives
 	// from a file and is therefore untrusted.
-	parameter SLOT_WORDS = 32'h100000
+	parameter SLOT_WORDS = 32'h100000,
+	// Clocks to wait for one SDRAM word during the ROM scan before concluding
+	// the CPU port is not being routed here at all. A cache hit answers in a
+	// handful of cycles and a miss that goes to SDRAM in a few tens, so 65536
+	// clk_114 cycles (~0.6 ms) is three orders of magnitude of headroom -- it
+	// cannot fire on a slow bus, only on a bus that is not connected. The
+	// testbench overrides it downwards so the case can be simulated.
+	parameter SCAN_TIMEOUT = 24'd65536
 )
 (
 	input                     clk,
@@ -291,11 +308,13 @@ localparam [3:0] FAIL_CRC     = 4'd4;
 // this: the payload is exactly as it was written. Restoring anyway produces a
 // guru with no explanation, so this is a refusal, not a warning.
 localparam [3:0] FAIL_KICK    = 4'd5;
-// The file was good but the machine would not stand still long enough to have
-// it put back. Distinct from the five above, which are verdicts on the file
-// (or, for FAIL_KICK, on the file against this machine):
-// this one says try again, not throw the file away. Nothing has been written
-// at the point it can fire, so it is as much a no-op as the other five.
+// The file was good but the machine would not cooperate -- either it never
+// reached a quiet instant to be frozen at (S_L_FREEZE) or its SDRAM port did
+// not answer the ROM scan (S_KICK_WAIT). Distinct from the five above, which
+// are verdicts on the file (or, for FAIL_KICK, on the file against this
+// machine): this one says try again, not throw the file away. Nothing has been
+// written at either point it can fire, so it is as much a no-op as the other
+// five.
 localparam [3:0] FAIL_QUIESCE = 4'd6;
 
 // ---------------------------------------------------------------- quiesce
@@ -408,6 +427,8 @@ reg        kick_low_held;
 reg [5:0]  kick_ret;
 reg [31:0] kick_crc;        // fingerprint of the ROM currently in the machine
 reg [31:0] file_kick_crc;   // fingerprint the state file was made under
+// Watchdog on one SDRAM word of the scan. See SCAN_TIMEOUT.
+reg [23:0] scan_wd;
 
 // ---------------------------------------------------------------- crc
 
@@ -568,6 +589,7 @@ always @(posedge clk) begin
 		rom_scan         <= 1'b0;
 		kick_low_held    <= 1'b0;
 		kick_pairs       <= 24'd0;
+		scan_wd          <= 24'd0;
 		// Nothing matches until a read has actually happened. Every restore
 		// issues its header reads long before the first pay_held test, so this
 		// only has to be a value the first comparison cannot accidentally hit.
@@ -686,11 +708,25 @@ always @(posedge clk) begin
 			dma_start     <= 1'b1;
 			dma_base      <= kick_addr;
 			kick_low_held <= 1'b0;
+			scan_wd       <= 24'd0;
 			state         <= S_KICK_WAIT;
 		end
 
+		// The one wait in this module with a bound on it. Everything else that
+		// waits on the SDRAM either runs under the freeze with state already
+		// half written back (where giving up would be worse than stopping --
+		// see S_L_RD_DATA) or is the save-side chip dump, which predates this
+		// and is reached only through the same port this scan proves. Here
+		// nothing has been written in either direction, so the timeout is a
+		// clean rollback rather than a best-effort abandonment.
+		//
+		// ss_dma is left mid-transfer with its chip select up. That is safe on
+		// both counts: the port mux stops routing it the moment rom_scan drops,
+		// and ss_dma's `start` re-arms it from any state (ss_dma.v:114, ahead of
+		// its case), so the next save or restore is unaffected.
 		S_KICK_WAIT: begin
 			if (dma_word_valid) begin
+				scan_wd <= 24'd0;
 				if (!kick_low_held) begin
 					kick_low      <= dma_word_out;
 					kick_low_held <= 1'b1;
@@ -702,6 +738,14 @@ always @(posedge clk) begin
 					state         <= S_KICK_DRAIN;
 				end
 			end
+			else if (scan_wd == SCAN_TIMEOUT) begin
+				rom_scan <= 1'b0;
+				// Restore: refuse, machine untouched and still running.
+				// Save: fail, which drops save_busy and with it the freeze.
+				if (kick_ret == S_L_KICK_CHK) load_reject(FAIL_QUIESCE);
+				else                          state <= S_FAIL;
+			end
+			else scan_wd <= scan_wd + 24'd1;
 		end
 
 		S_KICK_DRAIN: begin
@@ -896,6 +940,38 @@ always @(posedge clk) begin
 			end
 		end
 
+		// DELIBERATELY UNBOUNDED, and this is the one place in the module where
+		// that is a decision rather than an omission.
+		//
+		// This step is shared by the validation reads (machine running, a stall
+		// would be recoverable) and by the state-vector and chip RAM reads that
+		// run UNDER THE FREEZE, after the CPU registers have already been
+		// rewritten and with chip RAM part old and part new. A watchdog here
+		// could only do one of two things with that machine: leave it frozen,
+		// or let it go. Letting it go publishes an Amiga whose registers point
+		// into memory that is half from another moment in time -- it does not
+		// crash, it runs, and it can write that confusion out to a hardfile or
+		// to NVRAM before anyone notices. The plan's own rule ("a partially
+		// restored Amiga is a hung Amiga with no diagnosis; there is no
+		// best-effort path") is exactly about this instant.
+		//
+		// Both outcomes cost the user the same core reload. Only one of them
+		// can corrupt media on the way out, and only the frozen one leaves the
+		// failure where it happened, which is what makes it debuggable. So the
+		// stall is left to stand.
+		//
+		// This is NOT Task 4's argument, which was that a stall would be
+		// visible in simulation because validation ran with the machine live.
+		// That argument does not survive contact with hardware and does not
+		// cover this state. The argument above is about which of two already-lost
+		// machines is less harmful, and it does.
+		//
+		// What can actually stall here is a wiring or arbitration bug, not
+		// contention: ddram_ctrl grants master 0 to the savestate port for the
+		// whole restore, and the CPU -- the only other DDR3 requester -- is
+		// parked. A timeout would convert a deterministic, reproducible hang
+		// into an intermittent half-restore, which is a strictly worse thing to
+		// have to diagnose.
 		S_L_RD_DATA: begin
 			if (ddr_readdatavalid) begin
 				rd_data <= ddr_readdata;
