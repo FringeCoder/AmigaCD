@@ -997,8 +997,15 @@ void FileGenerateSavestatePath(const char *name, char* out_name, int sufx)
 		strcat(fname, name);
 	}
 
+	// A name with no extension leaves e NULL, and the two lines below used to
+	// dereference it regardless -- the `if (e)` guard directly above shows the
+	// NULL case was known about. It is reachable: the AmigaCD physical-disc
+	// path passes PHYSICAL_DISC_SENTINEL ("*PHYSICAL_DISC*"), which has no dot,
+	// so pressing Save state with a real CD in the drive segfaulted MiSTer
+	// while the core carried on playing. Append at the end of the name instead.
 	char *e = strrchr(fname, '.');
-	if (e) e[0] = 0;
+	if (!e) e = fname + strlen(fname);
+	e[0] = 0;
 
 	if(sufx) sprintf(e, "_%d.ss", sufx);
 	else strcat(e, ".ss");

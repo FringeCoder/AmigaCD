@@ -296,6 +296,32 @@ static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
 //    takes cpucfg from the low two bits of the CPU config byte, i.e.
 //    minimig_config.cpu & 3. Without this the request would be silently
 //    swallowed in RTL.
+// Name the save state after the mounted disc.
+//
+// hardfile[0].filename cannot be used directly: for a physical disc it holds
+// PHYSICAL_DISC_SENTINEL, "*PHYSICAL_DISC*". That has no '.', which used to
+// segfault FileGenerateSavestatePath outright, and even with that fixed the
+// '*' is not a legal exfat filename character, so the state could never be
+// written. Use the same identity per-game NVRAM already uses -- the ISO9660
+// volume label, or a TOC-geometry UUID for discs without one.
+static const char *amigacd_ss_name()
+{
+	static char name[256];
+	const char *f = minimig_config.hardfile[0].filename;
+
+	if (strcmp(f, PHYSICAL_DISC_SENTINEL)) return f;   // an image path: use it
+
+	if (physical_disc_save_name(PHYSICAL_DISC_DISC_NONE, name, sizeof(name)) &&
+	    name[0])
+	{
+		return name;
+	}
+
+	// No label and no geometry to hash: still needs a name a file can carry.
+	strcpy(name, "PhysicalDisc");
+	return name;
+}
+
 static int minimig_ss_blocked()
 {
 	int fastram = ((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5);
@@ -7096,7 +7122,7 @@ void HandleUI(void)
 				// Idempotent: repeat presses re-map the same four windows.
 				// Named after the mounted disc so states are per-game.
 				if (minimig_config.hardfile[0].filename[0])
-					process_ss(minimig_config.hardfile[0].filename, 1);
+					process_ss(amigacd_ss_name(), 1);
 
 				// The core edge-detects this in RTL (Minimig.sv ss_save_edge),
 				// so a set/clear pair here is one save, and a bit left high
@@ -7123,7 +7149,7 @@ void HandleUI(void)
 				// It also resets the poller's counters, so it cannot itself
 				// trigger a spurious write back to disk.
 				if (minimig_config.hardfile[0].filename[0])
-					process_ss(minimig_config.hardfile[0].filename, 1);
+					process_ss(amigacd_ss_name(), 1);
 
 				// status[54], edge-detected in RTL (Minimig.sv ss_load_edge)
 				// exactly as status[51] is. A level here would restore over and
