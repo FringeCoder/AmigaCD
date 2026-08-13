@@ -96,6 +96,12 @@ jobs:
   # RTL simulation. Icarus rather than ModelSim: ModelSim is not installed on the
   # dev machine (C:\intelFPGA_lite\17.0 carries quartus only), and the testbench is
   # plain Verilog with no vendor primitives.
+  #
+  # No GHDL here on purpose. The one VHDL testbench in this project drives
+  # TG68KdotC_Kernel, and the TG68K sources live in the core repo
+  # (Minimig-AGA-cd32-cdtv), not this one -- there is nothing here for GHDL to
+  # compile. That bench runs from the core repo's .github/workflows/rtl-sim.yml,
+  # which installs ghdl alongside iverilog. See rtl/sim/tg68k/ over there.
   rtl-sim:
     runs-on: ubuntu-latest
 
