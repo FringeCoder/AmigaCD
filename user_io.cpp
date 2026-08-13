@@ -37,6 +37,7 @@
 #include "support/minimig/akiko_cd32.h"
 #include "support/physical_disc/physical_disc_autoboot.h"
 #include "support/minimig/cdtv_cd.h"
+#include "support/minimig/minimig_ssdiag.h"
 #include "support/snac/snac_psx.h"
 #ifdef PROFILING
 #include "profiling.h"
@@ -2672,6 +2673,7 @@ static void check_status_change()
 static void show_core_info(int info_n)
 {
 	int i = 2;
+	int found = 0;
 	user_io_read_confstr();
 
 	while (1)
@@ -2683,10 +2685,22 @@ static void show_core_info(int info_n)
 		{
 			static char str[256];
 			substrcpy(str, p, info_n);
+			found = 1;
+			// Diagnostic. A save state toast that never appears has four
+			// possible explanations and only this line separates the last two
+			// from the first two: the core never raised info_req, hps_io never
+			// latched it, the host never read it back, or the host read it back
+			// and resolved it to a string that was empty or wrong. See
+			// support/minimig/minimig_ssdiag.cpp; a no-op off Minimig.
+			minimig_ss_diag_log("host show_core_info n=%d -> \"%s\"", info_n, str);
 			if (strlen(str)) Info(str);
 			break;
 		}
 	}
+
+	// No 'I' line at all means the info request had nowhere to land. Silent
+	// otherwise, which is indistinguishable from the core never asking.
+	if (!found) minimig_ss_diag_log("host show_core_info n=%d -> no I line in CONF_STR", info_n);
 }
 
 int user_io_file_tx_a(const char* name, uint16_t index)
@@ -3229,6 +3243,12 @@ void user_io_poll()
 		// mid-iteration.
 		physical_disc_autoboot_poll();
 
+		// Save state diagnostics. Rate limited and change-gated inside; a
+		// no-op against a core without the 0xF600 window. Ordered after the
+		// bridges only so its log lines interleave with theirs in the order
+		// the poll actually visits them.
+		minimig_ss_diag_poll();
+
 		kbd_fifo_poll();
 
 		if (!rtc_timer || CheckTimer(rtc_timer))
@@ -3745,9 +3765,30 @@ void user_io_poll()
 		}
 	}
 
+	// Diagnostic, once per run. UIO_INFO_GET is polled in exactly one place --
+	// the block below -- and only when !is_menu(). A core that reads as a menu
+	// core would never be asked for an info code at all, and its OSD toasts
+	// would silently never appear with nothing anywhere saying why. This records
+	// which side of that gate we are on before the gate is applied.
+	static int ss_info_gate_logged = 0;
+	if (!ss_info_gate_logged && is_minimig())
+	{
+		ss_info_gate_logged = 1;
+		minimig_ss_diag_log("host info poll gate: is_menu=%d (UIO_INFO_GET is polled only when this is 0)",
+		                    (int)is_menu());
+	}
+
 	if (CheckTimer(led_timer) && !is_menu())
 	{
 		led_timer = GetTimer(LED_FREQ);
+		// And once more from inside, so "the gate is open" and "the poll is
+		// actually running" are separate observations rather than one inference.
+		static int ss_info_poll_logged = 0;
+		if (!ss_info_poll_logged)
+		{
+			ss_info_poll_logged = 1;
+			minimig_ss_diag_log("host UIO_INFO_GET poll is running");
+		}
 		if (!use_ps2ctl)
 		{
 			uint16_t s = user_io_kbdled_get_status();
@@ -3769,7 +3810,15 @@ void user_io_poll()
 		keyboard_leds = leds;
 
 		uint8_t info_n = spi_uio_cmd(UIO_INFO_GET);
-		if (info_n) show_core_info(info_n);
+		if (info_n)
+		{
+			// The core asked for a toast and the host heard it. This is the
+			// line that separates "the core never raised info_req" from "it did
+			// and nothing appeared"; the core-side half of the same question is
+			// the info_reqs / info_last fields of the 0xF600 window.
+			minimig_ss_diag_log("host UIO_INFO_GET returned %u", (unsigned)info_n);
+			show_core_info(info_n);
+		}
 	}
 
 	if (!res_timer)

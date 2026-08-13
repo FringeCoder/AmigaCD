@@ -204,7 +204,27 @@ module ss_ctrl
 	output reg                ddr_read,
 	input      [63:0]         ddr_readdata,
 	input                     ddr_readdatavalid,
-	input                     ddr_waitrequest
+	input                     ddr_waitrequest,
+
+	// ------------------------------------------------------------ diagnostics
+	//
+	// Observation only. Nothing in this module reads them back and removing
+	// them changes no behaviour; they exist so that what this module did can be
+	// seen from userspace at all. Every way a save or a restore can go wrong
+	// looks identical from outside otherwise -- a request that was never taken,
+	// a gate that refused, a DDR3 read that never returned and a restore that
+	// completed and then crashed the Amiga all present as "nothing happened,
+	// and no toast".
+	//
+	// The consumer is Minimig.sv, which aggregates these with the outcome
+	// levels above and publishes the result on hps_ext.v's 0xF600 UIO read
+	// sub-channel; support/minimig/minimig_ssdiag.cpp polls that and logs it.
+	// See the header of that file for why the aggregation (the last non-idle
+	// state, the change counter) has to happen in RTL rather than in the
+	// poller: at ~113.5 MHz almost every state this module passes through lives
+	// and dies between two 50 ms polls.
+	output     [5:0]          dbg_state,
+	output     [23:0]         dbg_idx
 );
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
@@ -527,6 +547,22 @@ wire [31:0] pay_word = pay_idx[0] ? rd_data[63:32] : rd_data[31:0];
 // and a match means the data genuinely is in hand rather than merely probably.
 reg  [23:0] rd_pair;
 wire        pay_held = (rd_pair == {1'b0, pay_win[23:1]});
+
+// ------------------------------------------------------------- diagnostics
+//
+// Two continuous assignments and nothing else: the diagnostic ports must not
+// be able to change what this module does, so they read registers rather than
+// adding any.
+assign dbg_state = state;
+
+// Progress within whichever direction is running. A save walks the DDR3 window
+// by word_idx; a restore walks the payload by pay_idx. The two never advance
+// together -- ss_ctrl serves one request at a time -- so one port carries both
+// and load_busy says which is on it. word_idx is deliberately the one shown
+// when nothing is running: after a save it is left at the last window word
+// written, which says how far the save got, and after a restore it is left
+// wherever the previous save ended, which the state code already disambiguates.
+assign dbg_idx   = load_busy ? pay_idx : word_idx;
 
 // Queue a 32-bit payload word: CRC it and write it into DDR3. Callers must
 // only invoke this when word_busy is false.

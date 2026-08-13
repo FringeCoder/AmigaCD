@@ -1,0 +1,269 @@
+// Save state diagnostics — Main_MiSTer side.
+//
+// A debugging aid, not a feature. Two faults in the save state path are
+// invisible from userspace and this exists to make them visible:
+//
+//   1. The core's OSD toast never appears. A save produces only the host's own
+//      "Saving the state" from process_ss(); the core's "Save state: saved"
+//      never shows. That could be the core never raising info_req, hps_io never
+//      latching it, the host never reading it back, or show_core_info()
+//      resolving it to an empty string — and from outside, all four look the
+//      same.
+//   2. A restore runs and then crashes the Amiga. Which validation gates
+//      passed, whether the sequence completed, and where it died are all
+//      unrecorded.
+//
+// TRANSPORT. hps_ext.v publishes a read-only status window on UIO class 0xF600
+// (io_din[15:9] == 7'b1111011), assembled in Minimig.sv from ss_ctrl's
+// diagnostic ports and its own outcome synchronisers. It is deliberately NOT on
+// the info_req / UIO_INFO_GET path, because that path is itself under suspicion:
+// a diagnostic carried on the channel it is meant to diagnose cannot tell its
+// own silence from the fault it is looking for.
+//
+// The read is a plain status mux in hps_ext with no strobe and no state, so
+// polling it cannot disturb what it observes — no FIFO is popped, no ack is
+// cleared, and ss_ctrl never sees it at all.
+//
+// WINDOW LAYOUT. Nine 16-bit words per read: a fixed 0x55AA signature followed
+// by eight payload words. Kept in step with the `assign ss_diag` block in
+// Minimig.sv; word 7 carries a layout version so the two can disagree out loud.
+//
+//   sig   0x55AA
+//   w0    [5:0] live ss_ctrl state, [13:8] last non-idle state
+//   w1    [3:0] {load_fail, load_ok, save_fail, save_ok}
+//         [7:4] load_fail_code
+//         [11:8] {rom_scan, freeze, load_busy, save_busy}
+//   w2    state-change counter (wraps at 16 bits)
+//   w3    progress index, low  16 bits
+//   w4    progress index, high  8 bits
+//   w5    [7:0] ss_state_fanout completions, [15:8] freeze falling edges
+//   w6    [7:0] code of the last OSD info request, [15:8] how many were raised
+//   w7    layout version
+//
+// WHY THE INTERESTING PART IS LATCHED IN RTL. ss_ctrl runs at 113.5 MHz and
+// most of its states last a handful of clocks. Sampling the live state at any
+// rate a userspace poller can manage would show S_IDLE essentially always. The
+// last non-idle state and the change counter are therefore latched in hardware;
+// this file mostly formats them.
+
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <string.h>
+#include <time.h>
+
+#include "../../spi.h"
+#include "../../user_io.h"
+#include "../../hardware.h"
+#include "minimig_ssdiag.h"
+
+#define SS_DIAG_LOG        "/tmp/ss_dbg.log"
+#define SS_DIAG_ADDR       0xF600
+#define SS_DIAG_SIG        0x55AA
+#define SS_DIAG_PAYLOAD    8
+// Two words of slack past the signature's expected position. The alignment of
+// the first readable word after spi32_w() is a convention of the UIO bus, not
+// something stated anywhere in the RTL, so the signature is searched for rather
+// than assumed — and a shift, if there ever is one, shows up in the log as a
+// number instead of as silently wrong data.
+#define SS_DIAG_SLACK      2
+#define SS_DIAG_WORDS      (1 + SS_DIAG_PAYLOAD + SS_DIAG_SLACK)
+
+#define SS_DIAG_PERIOD_MS  50
+// Consecutive signature misses before this concludes the core has no window and
+// stops. Matches the version-skew guard cdtv_push_sector() already applies to
+// the sector credit: the core and this binary live in separate repositories and
+// are deployed independently, so "reading zeros" is a state that has to be
+// named rather than logged forever as a plausible all-idle machine.
+#define SS_DIAG_GIVEUP     20
+
+// ss_ctrl.v's state encoding. Duplicated deliberately: these numbers are the
+// interface, and a table generated from the same source as the RTL could not
+// catch a renumbering. rtl/tb/ss_ctrl_tb.v pins the four that matter.
+static const char *ss_state_name(unsigned s)
+{
+	switch (s)
+	{
+	case 0:  return "S_IDLE";
+	case 1:  return "S_WAIT";
+	case 2:  return "S_STATE_CAP";
+	case 3:  return "S_STATE_DRAIN";
+	case 4:  return "S_CHIP_ISSUE";
+	case 5:  return "S_CHIP_WAIT";
+	case 6:  return "S_CHIP_DRAIN";
+	case 7:  return "S_HEADER";
+	case 8:  return "S_COUNT";
+	case 9:  return "S_DONE";
+	case 10: return "S_FAIL";
+	case 11: return "S_L_RD_ISSUE";
+	case 12: return "S_L_RD_WAIT";
+	case 13: return "S_L_RD_DATA";
+	case 14: return "S_L_MAGIC";
+	case 15: return "S_L_LEN_CAP";
+	case 16: return "S_L_LEN_CHK";
+	case 17: return "S_L_CRC_CAP";
+	case 18: return "S_L_PAY_FETCH";
+	case 19: return "S_L_PAY_FEED";
+	case 20: return "S_L_FREEZE";
+	case 21: return "S_L_ST_FETCH";
+	case 22: return "S_L_ST_FEED";
+	case 23: return "S_L_ST_WAIT";
+	case 24: return "S_L_CH_FETCH";
+	case 25: return "S_L_CH_ISSUE";
+	case 26: return "S_L_CH_WAIT";
+	case 27: return "S_L_RELEASE";
+	case 28: return "S_KICK_ISSUE";
+	case 29: return "S_KICK_WAIT";
+	case 30: return "S_KICK_DRAIN";
+	case 31: return "S_PAY_KICK";
+	case 32: return "S_L_KICK_CHK";
+	default: return "?";
+	}
+}
+
+static const char *ss_fail_name(unsigned c)
+{
+	switch (c)
+	{
+	case 0: return "none";
+	case 1: return "MAGIC";
+	case 2: return "VERSION";
+	case 3: return "LENGTH";
+	case 4: return "CRC";
+	case 5: return "KICK";
+	case 6: return "QUIESCE";
+	default: return "?";
+	}
+}
+
+// Same writer as akiko_diag() / cdtv_diag(): open, append one timestamped line,
+// flush, close. Opening per line rather than holding the file costs nothing at
+// this rate and means a log survives whatever the core does next, including a
+// reset that takes the process with it.
+static void ss_diag_write(const char *fmt, va_list ap)
+{
+	FILE *f = fopen(SS_DIAG_LOG, "a");
+	if (!f) return;
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	fprintf(f, "[%6lu.%06lu] ", (unsigned long)ts.tv_sec, (unsigned long)(ts.tv_nsec / 1000));
+	vfprintf(f, fmt, ap);
+	fputc('\n', f);
+	fflush(f);
+	fclose(f);
+}
+
+static void ss_diag(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void ss_diag(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	ss_diag_write(fmt, ap);
+	va_end(ap);
+}
+
+void minimig_ss_diag_log(const char *fmt, ...)
+{
+	if (!is_minimig()) return;
+	va_list ap;
+	va_start(ap, fmt);
+	ss_diag_write(fmt, ap);
+	va_end(ap);
+}
+
+// One transaction, SS_DIAG_WORDS words. Mirrors cdtv_sec_space_bytes()'s shape
+// exactly: command byte, 32-bit sub-channel address, then reads.
+static void ss_diag_read(uint16_t *w)
+{
+	EnableIO();
+	spi8(UIO_DMA_READ);
+	spi32_w(SS_DIAG_ADDR);
+	for (int i = 0; i < SS_DIAG_WORDS; i++) w[i] = (uint16_t)spi_w(0);
+	DisableIO();
+}
+
+void minimig_ss_diag_poll(void)
+{
+	static unsigned long timer = 0;
+	static int  give_up = 0;
+	static int  misses = 0;
+	static int  primed = 0;
+	static uint16_t prev[SS_DIAG_PAYLOAD];
+
+	if (!is_minimig() || give_up) return;
+	if (timer && !CheckTimer(timer)) return;
+	timer = GetTimer(SS_DIAG_PERIOD_MS);
+
+	uint16_t raw[SS_DIAG_WORDS];
+	ss_diag_read(raw);
+
+	// Find the signature rather than assuming it sits at raw[0]. A core without
+	// the window drives nothing for this class and every word reads back zero,
+	// which is exactly why the window starts with a constant that zero is not.
+	int base = -1;
+	for (int i = 0; i <= SS_DIAG_SLACK; i++)
+	{
+		if (raw[i] == SS_DIAG_SIG) { base = i + 1; break; }
+	}
+
+	if (base < 0)
+	{
+		if (++misses >= SS_DIAG_GIVEUP)
+		{
+			give_up = 1;
+			ss_diag("diag: no 0x%04X signature in %d polls (raw %04x %04x %04x) -- "
+			        "core has no 0xF600 window; giving up",
+			        (unsigned)SS_DIAG_SIG, misses,
+			        (unsigned)raw[0], (unsigned)raw[1], (unsigned)raw[2]);
+		}
+		return;
+	}
+	misses = 0;
+
+	const uint16_t *w = raw + base;
+
+	if (!primed)
+	{
+		primed = 1;
+		ss_diag("diag: window found at word %d, layout version %u, raw %04x %04x "
+		        "%04x %04x %04x %04x %04x %04x",
+		        base, (unsigned)w[7],
+		        (unsigned)w[0], (unsigned)w[1], (unsigned)w[2], (unsigned)w[3],
+		        (unsigned)w[4], (unsigned)w[5], (unsigned)w[6], (unsigned)w[7]);
+	}
+	else if (!memcmp(prev, w, sizeof(prev)))
+	{
+		// Nothing moved. This is the overwhelmingly common case and is what
+		// makes the poll cheap enough to leave enabled.
+		return;
+	}
+	memcpy(prev, w, sizeof(prev));
+
+	unsigned live      =  w[0]        & 0x3f;
+	unsigned last      = (w[0] >> 8)  & 0x3f;
+	unsigned save_ok   =  w[1]        & 1;
+	unsigned save_fail = (w[1] >> 1)  & 1;
+	unsigned load_ok   = (w[1] >> 2)  & 1;
+	unsigned load_fail = (w[1] >> 3)  & 1;
+	unsigned code      = (w[1] >> 4)  & 0x0f;
+	unsigned save_busy = (w[1] >> 8)  & 1;
+	unsigned load_busy = (w[1] >> 9)  & 1;
+	unsigned freeze    = (w[1] >> 10) & 1;
+	unsigned rom_scan  = (w[1] >> 11) & 1;
+	unsigned seq       =  (unsigned)w[2];
+	uint32_t idx       = (uint32_t)w[3] | ((uint32_t)(w[4] & 0xff) << 16);
+	unsigned fanout    =  w[5]        & 0xff;
+	unsigned ffall     = (w[5] >> 8)  & 0xff;
+	unsigned info_code =  w[6]        & 0xff;
+	unsigned info_cnt  = (w[6] >> 8)  & 0xff;
+
+	ss_diag("core state=%u(%s) last=%u(%s) seq=%u idx=%u "
+	        "save_busy=%u load_busy=%u freeze=%u rom_scan=%u "
+	        "save_ok=%u save_fail=%u load_ok=%u load_fail=%u code=%u(%s) "
+	        "freeze_falls=%u fanout=%u info_reqs=%u info_last=%u",
+	        live, ss_state_name(live), last, ss_state_name(last),
+	        seq, (unsigned)idx,
+	        save_busy, load_busy, freeze, rom_scan,
+	        save_ok, save_fail, load_ok, load_fail, code, ss_fail_name(code),
+	        ffall, fanout, info_cnt, info_code);
+}

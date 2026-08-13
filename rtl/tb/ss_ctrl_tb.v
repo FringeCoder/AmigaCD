@@ -87,6 +87,20 @@ reg [63:0] win_golden [0:63];
 
 wire rom_scan;
 
+// Diagnostic readback. Purely observational in the DUT; see the observer below.
+wire [5:0]  dbg_state;
+wire [23:0] dbg_idx;
+
+// The three state codes the diagnostic checks name. Written out here rather
+// than imported from ss_ctrl.v on purpose: these numbers are a published
+// interface -- support/minimig/minimig_ssdiag.cpp decodes them into names in a
+// log file, and a renumbering that both sides took from the same source would
+// go unnoticed until someone read a log that said the wrong thing.
+localparam [5:0] DBG_S_IDLE       = 6'd0;
+localparam [5:0] DBG_S_FAIL       = 6'd10;
+localparam [5:0] DBG_S_L_RELEASE  = 6'd27;
+localparam [5:0] DBG_S_L_KICK_CHK = 6'd32;
+
 // Short enough to simulate, long enough that it cannot fire on the mock's own
 // two-cycle latency. The synthesised default is 65536.
 localparam [23:0] SCAN_TIMEOUT = 24'd64;
@@ -114,7 +128,8 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.ddr_address(ddr_address), .ddr_writedata(ddr_writedata),
 	.ddr_byteenable(ddr_byteenable), .ddr_write(ddr_write),
 	.ddr_read(ddr_read), .ddr_readdata(ddr_readdata),
-	.ddr_readdatavalid(ddr_readdatavalid), .ddr_waitrequest(ddr_waitrequest)
+	.ddr_readdatavalid(ddr_readdatavalid), .ddr_waitrequest(ddr_waitrequest),
+	.dbg_state(dbg_state), .dbg_idx(dbg_idx)
 );
 
 always #5 clk = ~clk;
@@ -277,6 +292,20 @@ always @(posedge clk) begin
 	end
 end
 
+// ------------------------------------------------------- diagnostic observer
+//
+// dbg_state / dbg_idx exist so that userspace can tell one failure from another
+// on real hardware; they are worth nothing if they report something other than
+// what the controller did. dbg_seen is a one-bit-per-state visit bitmap, which
+// is the same thing the hardware poller reconstructs from dbg_state samples and
+// the change counter Minimig.sv derives from it. The checks below use it to
+// assert the property the instrumentation exists to establish: a restore that
+// completed and a restore that was refused at the last gate are distinguishable
+// from the diagnostic ports alone.
+reg [63:0] dbg_seen = 64'd0;
+
+always @(posedge clk) dbg_seen[dbg_state] <= 1'b1;
+
 task reset_observers;
 begin
 	chip_wr_count       = 0;
@@ -286,6 +315,7 @@ begin
 	freeze_rise_count   = 0;
 	chip_wr_at_release  = 0;
 	state_we_at_release = 0;
+	dbg_seen            = 64'd0;
 end
 endtask
 
@@ -563,6 +593,12 @@ initial begin
 	check("restore writes no DDR3",  ddr_write_count, 32'd0);
 	check("counter untouched",       ddr_word(0),     32'hA5A5A5A5);
 
+	// The diagnostic ports must describe the path actually taken. On hardware
+	// they are the only evidence there is, so a port that merely wiggled would
+	// be worse than none at all: it would be read as a sequence.
+	check("diag saw the release",  {31'd0, dbg_seen[DBG_S_L_RELEASE]}, 32'd1);
+	check("diag idle once done",   {26'd0, dbg_state},                 {26'd0, DBG_S_IDLE});
+
 	// Every refusal below must leave the machine running. saw_freeze is sticky
 	// across all of them; the successful restores above and below are outside
 	// the watched window, because those are supposed to freeze.
@@ -639,6 +675,11 @@ initial begin
 	check("wrong kickstart chip untouched", {16'd0, chip_mem[0]}, 32'h0000BAD0);
 	check("wrong kickstart writes no DDR3",     ddr_write_count,      32'd0);
 	check("wrong kickstart never froze",        freeze_rise_count,    32'd0);
+	// This is the discrimination the instrumentation exists to make: a restore
+	// that reached the last gate and was refused there, versus one that ran to
+	// completion. Both leave the machine in S_IDLE with nothing else to look at.
+	check("diag saw the kickstart gate", {31'd0, dbg_seen[DBG_S_L_KICK_CHK]}, 32'd1);
+	check("diag saw no release",         {31'd0, dbg_seen[DBG_S_L_RELEASE]},  32'd0);
 
 	// Gate order: the payload CRC is a verdict on the file and costs the machine
 	// nothing, while the fingerprint costs a full ROM scan over the running
@@ -729,6 +770,12 @@ initial begin
 	end
 	wait (save_fail);
 	$display("PASS timeout reports failure");
+
+	// S_FAIL is one clock wide, so a poller sampling dbg_state at any realistic
+	// rate will never see it. That is exactly why Minimig.sv latches the last
+	// non-idle state rather than publishing the live one alone -- the check here
+	// is that the port does carry the code at all, on the one clock it exists.
+	check("diag saw the save failure", {31'd0, dbg_seen[DBG_S_FAIL]}, 32'd1);
 
 	check("never steals the CPU port", {31'd0, bus_stolen}, 32'd0);
 
