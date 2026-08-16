@@ -105,8 +105,13 @@ localparam [5:0] DBG_S_L_KICK_CHK = 6'd32;
 // two-cycle latency. The synthesised default is 65536.
 localparam [23:0] SCAN_TIMEOUT = 24'd64;
 
+// SAVE_FRAMES is 120 in the synthesised default -- a save waits a long time
+// because waiting costs the Amiga nothing and three frames refused three
+// attempts in four on hardware. Shrunk to 3 here so the wedged-machine cases
+// below still reach their timeout without pulsing 120 frames apiece. LOAD_FRAMES
+// is already 3 in the real design and is left alone.
 ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
-          .SCAN_TIMEOUT(SCAN_TIMEOUT)) dut
+          .SCAN_TIMEOUT(SCAN_TIMEOUT), .SAVE_FRAMES(8'd3)) dut
 (
 	.clk(clk), .rst_n(rst_n),
 	.slot_base(29'd0),

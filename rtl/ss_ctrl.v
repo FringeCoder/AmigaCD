@@ -151,7 +151,13 @@ module ss_ctrl
 	// clk_114 cycles (~0.6 ms) is three orders of magnitude of headroom -- it
 	// cannot fire on a slow bus, only on a bus that is not connected. The
 	// testbench overrides it downwards so the case can be simulated.
-	parameter SCAN_TIMEOUT = 24'd65536
+	parameter SCAN_TIMEOUT = 24'd65536,
+
+	// Frames each direction waits for its quiet instant. See the ss_quiesce
+	// instance below for why the two differ, and ss_quiesce's header for why
+	// three frames was not enough for a save on real hardware.
+	parameter [7:0] SAVE_FRAMES = 8'd120,   // ~2 s at 60 Hz
+	parameter [7:0] LOAD_FRAMES = 8'd3
 )
 (
 	input                     clk,
@@ -354,10 +360,23 @@ wire timeout;
 // ss_ctrl_tb.v that holds this design to it.
 reg restore_busy;
 
+// How long each direction waits for its quiet instant. A save waits a long
+// time because the wait is harmless -- the Amiga runs untouched until the
+// instant it is caught -- and because giving up makes saving a running game
+// fail more often than it works: three frames refused three attempts in four
+// on hardware. A restore waits briefly because its wait is NOT harmless: the
+// 68k is parked by ss_arm throughout it while the chipset runs on, so every
+// frame waited is drift between the machine and the state about to be put
+// back into it. Better to refuse and be retried. See ss_quiesce's header.
+// Parameters rather than localparams so ss_ctrl_tb.v can shrink them: the
+// wedged-machine cases there have to drive the limit to a timeout, and pulsing
+// 120 frames per case to do it would buy nothing but simulation time.
+
 ss_quiesce quiesce
 (
 	.clk(clk), .rst_n(rst_n),
 	.req(save_busy || restore_busy),
+	.frame_limit(save_busy ? SAVE_FRAMES : LOAD_FRAMES),
 	.blit_busy(blit_busy), .disk_busy(disk_busy), .audio_busy(audio_busy),
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),
 	.freeze(freeze), .quiesced(quiesced), .timeout(timeout)

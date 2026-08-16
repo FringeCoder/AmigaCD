@@ -16,9 +16,17 @@ wire freeze, quiesced, timeout;
 integer errors = 0;
 integer i;
 
-ss_quiesce #(.FRAME_LIMIT(3)) dut
+// The limit is an input now, not a parameter: a save wants to wait a long time
+// and a restore wants to give up quickly, and there is one instance serving
+// both (see ss_quiesce's header). Held at 3 here so every existing case below
+// keeps testing exactly what it did; frame_limit_drive is varied by the case
+// added at the end, which is the one that would catch the input being ignored.
+reg [7:0] frame_limit_drive = 8'd3;
+
+ss_quiesce dut
 (
 	.clk(clk), .rst_n(rst_n), .req(req),
+	.frame_limit(frame_limit_drive),
 	.blit_busy(blit_busy), .disk_busy(disk_busy), .audio_busy(audio_busy),
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),
 	.freeze(freeze), .quiesced(quiesced), .timeout(timeout)
@@ -103,6 +111,24 @@ initial begin
 	cpu_boundary = 1;
 	@(negedge clk); @(negedge clk);
 	check("freeze once cpu reaches boundary", freeze, 1'b1);
+
+	// The limit is honoured as an INPUT, not baked in. Same never-quiet machine
+	// as the timeout case above, but with a longer limit: it must still be
+	// waiting at the frame count that used to give up, and only time out when
+	// its own limit is reached. A design that ignored frame_limit and kept the
+	// old constant would fail the first of these two.
+	req = 0;
+	@(negedge clk); @(negedge clk);
+	frame_limit_drive = 8'd8;
+	blit_busy = 1;                 // never quiet
+	req = 1;
+	@(negedge clk);
+	for (i = 0; i < 3; i = i + 1) pulse_frame;
+	@(negedge clk);
+	check("longer limit still waiting at 3 frames", timeout, 1'b0);
+	for (i = 0; i < 5; i = i + 1) pulse_frame;
+	@(negedge clk);
+	check("longer limit times out at its own limit", timeout, 1'b1);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
