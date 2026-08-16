@@ -157,7 +157,13 @@ module ss_ctrl
 	// instance below for why the two differ, and ss_quiesce's header for why
 	// three frames was not enough for a save on real hardware.
 	parameter [7:0] SAVE_FRAMES = 8'd120,   // ~2 s at 60 Hz
-	parameter [7:0] LOAD_FRAMES = 8'd3
+	parameter [7:0] LOAD_FRAMES = 8'd3,
+
+	// Custom chipset register shadow entries carried in the payload. 256 in the
+	// machine -- every even address $000-$1FE. A parameter so ss_ctrl_tb can
+	// shrink it: the bench's mock DDR3 is 64 words wide and a full-size section
+	// would not fit, and nothing about the streaming depends on the count.
+	parameter [8:0] SHADOW_ENTRIES = 9'd256
 )
 (
 	input                     clk,
@@ -210,6 +216,16 @@ module ss_ctrl
 	// chip RAM behind the cache's back and the CPU resumes executing and
 	// reading whatever lines it still holds from before the restore.
 	output reg                cache_flush,
+
+	// Custom chipset register shadow (ss_regshadow, instantiated in Minimig.sv).
+	// Read out on a save, loaded back and replayed on a restore.
+	output reg  [7:0]         shadow_rd_addr,
+	input      [15:0]         shadow_rd_data,
+	output reg                shadow_ld_we,
+	output reg  [7:0]         shadow_ld_addr,
+	output reg [15:0]         shadow_ld_data,
+	output reg                replay_start,
+	input                     replay_done,
 
 	output     [24:1]         sd_addr,
 	output                    sd_cs,
@@ -271,8 +287,16 @@ localparam KICK_PAIRS  = KICK_WORDS / 2;         // 32-bit words scanned per fin
 // so it sees one more word and no change of shape. It also puts the fingerprint
 // under core_crc32, so a fingerprint corrupted in transit is reported as a
 // corrupt file rather than misdiagnosed as the wrong ROM.
-localparam KICK_META   = 1;
-localparam CORE_WORDS  = KICK_META + STATE_WORDS + CHIP_PAIRS;
+localparam KICK_META    = 1;
+
+// Two 16-bit shadow entries per 32-bit payload word, low entry in the low half.
+localparam SHADOW_WORDS = SHADOW_ENTRIES / 2;
+
+// Payload: fingerprint, state vector, chipset register shadow, chip RAM. The
+// shadow goes before chip RAM so the restore has it in hand by the time memory
+// is in place -- it is replayed after chip RAM, because the copper lists the
+// chipset will be pointed at live there.
+localparam CORE_WORDS   = KICK_META + STATE_WORDS + SHADOW_WORDS + CHIP_PAIRS;
 
 localparam SS_MAGIC   = 32'h53534341;
 localparam SS_VERSION = 32'h00010000;
@@ -344,6 +368,14 @@ localparam [5:0] S_L_KICK_CHK  = 6'd32;   // restore: compare it against the fil
 
 // Invalidate the CPU's cache before letting it go. See `cache_flush`.
 localparam [5:0] S_L_FLUSH     = 6'd33;
+
+// Chipset register shadow: streamed out on a save, streamed back in and then
+// replayed into the machine on a restore.
+localparam [5:0] S_SHADOW_RD   = 6'd34;
+localparam [5:0] S_SHADOW_Q    = 6'd35;
+localparam [5:0] S_L_SH_FETCH  = 6'd36;
+localparam [5:0] S_L_SH_LOAD   = 6'd37;
+localparam [5:0] S_L_REPLAY    = 6'd38;
 
 // Refusal reasons, as seen by the OSD.
 localparam [3:0] FAIL_MAGIC   = 4'd1;
@@ -500,6 +532,13 @@ reg [23:0] fail_idx;
 localparam [23:0] FLUSH_HOLD = 24'd256;
 
 reg [23:0] flush_wd;
+
+// Shadow streaming. sh_idx counts entries in both directions; sh_half marks
+// which half of the current payload word is in hand; sh_low holds the low
+// entry until its pair arrives.
+reg  [8:0] sh_idx;
+reg        sh_half;
+reg [15:0] sh_low;
 reg [31:0] kick_crc;        // fingerprint of the ROM currently in the machine
 reg [31:0] file_kick_crc;   // fingerprint the state file was made under
 // Watchdog on one SDRAM word of the scan. See SCAN_TIMEOUT.
@@ -669,6 +708,8 @@ begin
 	fail_idx       <= {kick_pairs[15:0], scan_acks};
 	cache_flush    <= 1'b0;
 	flush_wd       <= 24'd0;
+	shadow_ld_we   <= 1'b0;
+	replay_start   <= 1'b0;
 	// Every refusal past S_L_FREEZE has to let the machine go again, and the
 	// freeze now goes up before the Kickstart fingerprint rather than after it,
 	// so that is most of them. Dropping it here rather than at each call site
@@ -704,6 +745,13 @@ always @(posedge clk) begin
 		scan_acks        <= 8'd0;
 		cache_flush      <= 1'b0;
 		flush_wd         <= 24'd0;
+		shadow_rd_addr   <= 8'd0;
+		shadow_ld_we     <= 1'b0;
+		shadow_ld_addr   <= 8'd0;
+		shadow_ld_data   <= 16'd0;
+		replay_start     <= 1'b0;
+		sh_idx           <= 9'd0;
+		sh_half          <= 1'b0;
 		fail_idx         <= 24'd0;
 		kick_low_held    <= 1'b0;
 		kick_pairs       <= 24'd0;
@@ -961,16 +1009,12 @@ always @(posedge clk) begin
 		S_STATE_DRAIN: begin
 			if (!word_busy) begin
 				if (drain_idx == STATE_WORDS[15:0]) begin
-					if (CHIP_PAIRS == 0) begin
-						saved_crc <= crc_value;
-						word_idx  <= 24'd1;
-						state     <= S_HEADER;
-					end
-					else begin
-						chip_addr  <= chip_base;
-						pair_count <= 24'd0;
-						state      <= S_CHIP_ISSUE;
-					end
+					// The chipset register shadow follows the state vector, then
+					// chip RAM. Both are streamed the same way -- CRC and DDR3
+					// write per word, self-paced by the CRC feeder.
+					sh_idx         <= 9'd0;
+					shadow_rd_addr <= 8'd0;
+					state          <= S_SHADOW_RD;
 				end
 				else begin
 					queue_word(state_buf[drain_idx]);
@@ -980,6 +1024,45 @@ always @(posedge clk) begin
 		end
 
 		// Ask ss_dma for exactly one packed word's worth (two half-words).
+		// One cycle for the shadow's readback to settle on the new address, then
+		// pack. shadow_rd_addr is registered and rd_data is combinational on it,
+		// so the value for an address is valid the cycle after it is driven --
+		// reading in the same cycle would pack the previous entry.
+		S_SHADOW_RD: begin
+			if (sh_idx == SHADOW_ENTRIES) begin
+				if (CHIP_PAIRS == 0) begin
+					saved_crc <= crc_value;
+					word_idx  <= 24'd1;
+					state     <= S_HEADER;
+				end
+				else begin
+					chip_addr  <= chip_base;
+					pair_count <= 24'd0;
+					state      <= S_CHIP_ISSUE;
+				end
+			end
+			else if (!sh_half) begin
+				sh_low         <= shadow_rd_data;
+				sh_half        <= 1'b1;
+				shadow_rd_addr <= shadow_rd_addr + 8'd1;
+				sh_idx         <= sh_idx + 9'd1;
+			end
+			else state <= S_SHADOW_Q;
+		end
+
+		// Two entries per payload word, low entry in the low half -- the same
+		// order the restore unpacks them in, and the only place that order is
+		// written down twice.
+		S_SHADOW_Q: begin
+			if (!word_busy) begin
+				queue_word({shadow_rd_data, sh_low});
+				sh_half        <= 1'b0;
+				shadow_rd_addr <= shadow_rd_addr + 8'd1;
+				sh_idx         <= sh_idx + 9'd1;
+				state          <= S_SHADOW_RD;
+			end
+		end
+
 		S_CHIP_ISSUE: begin
 			dma_start        <= 1'b1;
 			dma_base         <= chip_addr;
@@ -1319,18 +1402,65 @@ always @(posedge clk) begin
 		// already happened before anything downstream of here runs.
 		S_L_ST_WAIT: begin
 			if (ser_load_done) begin
-				if (CHIP_PAIRS == 0) state <= S_L_FLUSH;
+				sh_idx  <= 9'd0;
+				sh_half <= 1'b0;
+				state   <= S_L_SH_FETCH;
+			end
+		end
+
+		// The chipset register shadow, streamed back into ss_regshadow's
+		// storage. Loading is not replaying: the values go in here, and are
+		// written into the chipset only after chip RAM is in place, because the
+		// copper lists they point at live in chip RAM.
+		S_L_SH_FETCH: begin
+			shadow_ld_we <= 1'b0;
+			if (sh_idx == SHADOW_ENTRIES) begin
+				if (CHIP_PAIRS == 0) state <= S_L_REPLAY;
 				else begin
 					chip_addr <= chip_base;
 					state     <= S_L_CH_FETCH;
 				end
+			end
+			else if (sh_half) state <= S_L_SH_LOAD;
+			else if (pay_held) state <= S_L_SH_LOAD;
+			else begin
+				rd_idx <= pay_win;
+				rd_ret <= S_L_SH_LOAD;
+				state  <= S_L_RD_ISSUE;
+			end
+		end
+
+		// Two entries per word, low entry in the low half -- unpacked in the
+		// order S_SHADOW_Q packed them.
+		S_L_SH_LOAD: begin
+			shadow_ld_we   <= 1'b1;
+			shadow_ld_addr <= sh_idx[7:0];
+			shadow_ld_data <= sh_half ? pay_word[31:16] : pay_word[15:0];
+			sh_idx         <= sh_idx + 9'd1;
+			if (sh_half) begin
+				sh_half <= 1'b0;
+				pay_idx <= pay_idx + 24'd1;   // both halves consumed
+			end
+			else sh_half <= 1'b1;
+			state <= S_L_SH_FETCH;
+		end
+
+		// Everything the machine needs is in place: registers, memory, and the
+		// chipset shadow. Write the chipset back, in ss_regshadow's order --
+		// plain registers, then ADKCON, INTREQ, INTENA and DMACON last, so DMA
+		// and interrupts do not start against a half-restored machine.
+		S_L_REPLAY: begin
+			replay_start <= 1'b1;
+			if (replay_done) begin
+				replay_start <= 1'b0;
+				state        <= S_L_FLUSH;
 			end
 		end
 
 		// Chip RAM. pay_idx carries straight on from the state words, so the
 		// payload is walked exactly once, in order, in both directions.
 		S_L_CH_FETCH: begin
-			if (pay_idx == CORE_WORDS_24) state <= S_L_FLUSH;
+			if (pay_idx == CORE_WORDS_24) state <= S_L_REPLAY;
 			else if (pay_held) state <= S_L_CH_ISSUE;
 			else begin
 				rd_idx <= pay_win;

@@ -168,11 +168,19 @@ jobs:
       - name: Run chip RAM readout testbench
         run: vvp build/ss_dma_tb
 
+      # The chipset register shadow on its own: the snoop, the set/clear rule,
+      # the exclusions, the load path and the replay ordering.
+      - name: Build register shadow testbench
+        run: iverilog -g2005 -Wall -o build/ss_regshadow_tb rtl/ss_regshadow.v rtl/tb/ss_regshadow_tb.v
+
+      - name: Run register shadow testbench
+        run: vvp build/ss_regshadow_tb
+
       - name: Build save state controller testbench
         run: |
           iverilog -g2005 -Wall -o build/ss_ctrl_tb \
             rtl/ss_ctrl.v rtl/ss_crc32.v rtl/ss_quiesce.v rtl/ss_serdes.v \
-            rtl/ss_dma.v rtl/tb/ss_ctrl_tb.v
+            rtl/ss_dma.v rtl/ss_regshadow.v rtl/tb/ss_ctrl_tb.v
 
       - name: Run save state controller testbench
         run: vvp build/ss_ctrl_tb

@@ -30,8 +30,23 @@ localparam [23:0] KICK_BASE = 24'h000080;
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
 
-// Payload word 0 is the Kickstart CRC, then the state vector, then chip RAM.
-localparam CORE_WORDS  = 1 + STATE_WORDS + CHIP_WORDS / 2;
+// Payload: Kickstart CRC, state vector, chipset register shadow, chip RAM.
+// SHADOW_ENTRIES is 256 in the real design; shrunk here because the mock DDR3
+// below is 64 words wide and a full section would not fit. Nothing about the
+// streaming depends on the count.
+localparam SHADOW_ENTRIES = 8;
+localparam SHADOW_WORDS   = SHADOW_ENTRIES / 2;
+localparam CORE_WORDS  = 1 + STATE_WORDS + SHADOW_WORDS + CHIP_WORDS / 2;
+
+// Where each payload section starts in the DDR3 window, as word indices. The
+// header is eight words, then the fingerprint, the state vector, the chipset
+// register shadow and chip RAM. Computed rather than written out, so inserting
+// a section moves the checks with it instead of silently checking the wrong
+// words -- which is exactly what happened when the shadow was added.
+localparam W_KICK   = 8;
+localparam W_STATE  = W_KICK + 1;
+localparam W_SHADOW = W_STATE + STATE_WORDS;
+localparam W_CHIP   = W_SHADOW + SHADOW_WORDS;
 
 reg  clk = 0;
 reg  rst_n = 0;
@@ -106,13 +121,24 @@ localparam [5:0] DBG_S_L_KICK_CHK = 6'd32;
 // two-cycle latency. The synthesised default is 65536.
 localparam [23:0] SCAN_TIMEOUT = 24'd64;
 
+wire  [7:0] sh_rd_addr;
+wire [15:0] sh_rd_data;
+wire        sh_ld_we;
+wire  [7:0] sh_ld_addr;
+wire [15:0] sh_ld_data;
+wire        sh_replay_start, sh_replay_done;
+wire        sh_replay_we;
+wire  [8:1] sh_replay_addr;
+wire [15:0] sh_replay_data;
+
 // SAVE_FRAMES is 120 in the synthesised default -- a save waits a long time
 // because waiting costs the Amiga nothing and three frames refused three
 // attempts in four on hardware. Shrunk to 3 here so the wedged-machine cases
 // below still reach their timeout without pulsing 120 frames apiece. LOAD_FRAMES
 // is already 3 in the real design and is left alone.
 ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
-          .SCAN_TIMEOUT(SCAN_TIMEOUT), .SAVE_FRAMES(8'd3)) dut
+          .SCAN_TIMEOUT(SCAN_TIMEOUT), .SAVE_FRAMES(8'd3),
+          .SHADOW_ENTRIES(SHADOW_ENTRIES[8:0])) dut
 (
 	.clk(clk), .rst_n(rst_n),
 	.slot_base(29'd0),
@@ -135,7 +161,30 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.ddr_byteenable(ddr_byteenable), .ddr_write(ddr_write),
 	.ddr_read(ddr_read), .ddr_readdata(ddr_readdata),
 	.ddr_readdatavalid(ddr_readdatavalid), .ddr_waitrequest(ddr_waitrequest),
-	.dbg_state(dbg_state), .dbg_idx(dbg_idx)
+	.dbg_state(dbg_state), .dbg_idx(dbg_idx),
+	.shadow_rd_addr(sh_rd_addr), .shadow_rd_data(sh_rd_data),
+	.shadow_ld_we(sh_ld_we), .shadow_ld_addr(sh_ld_addr),
+	.shadow_ld_data(sh_ld_data),
+	.replay_start(sh_replay_start), .replay_done(sh_replay_done)
+);
+
+// The real shadow, not a mock: the packing order, the load path and the replay
+// handshake are exactly what this pairing has to get right, and a mock would
+// only prove ss_ctrl agrees with the mock.
+ss_regshadow shadow
+(
+	.clk(clk), .clk7_en(1'b1), .rst_n(rst_n),
+	// Address 0 is in the read window, which the shadow refuses, so the snoop
+	// records nothing here and the bench controls the contents through the
+	// load port alone.
+	.reg_address_in(8'd0), .data_in(16'd0),
+	.rd_addr(sh_rd_addr), .rd_data(sh_rd_data),
+	.rd_writable(), .rd_setclear(),
+	.ld_we(sh_ld_we), .ld_addr(sh_ld_addr), .ld_data(sh_ld_data),
+	.replay_start(sh_replay_start), .intreq_in(15'h0000),
+	.replay_active(), .replay_we(sh_replay_we),
+	.replay_addr(sh_replay_addr), .replay_data(sh_replay_data),
+	.replay_done(sh_replay_done)
 );
 
 always #5 clk = ~clk;
@@ -582,11 +631,11 @@ initial begin
 	// only a core_words that is one larger, which it already reads from the file
 	// rather than assuming.
 	compute_kick_crc();
-	check("kickstart crc", ddr_word(8), expect_kick_crc);
+	check("kickstart crc", ddr_word(W_KICK), expect_kick_crc);
 
 	// State vector words, least significant first.
-	check("state word 0", ddr_word(9),  32'h89ABCDEF);
-	check("state word 1", ddr_word(10), 32'h01234567);
+	check("state word 0", ddr_word(W_STATE),  32'h89ABCDEF);
+	check("state word 1", ddr_word(W_STATE + 1), 32'h01234567);
 
 	// Chip RAM packed two 16-bit words per 32-bit word, low word first, in
 	// ascending address order.
@@ -595,10 +644,10 @@ initial begin
 	// lower file offset; without the swap every Amiga word reads reversed and
 	// nothing in the payload is interpretable (measured on hardware,
 	// 2026-08-10, on the first real save state).
-	check("chip word 0", ddr_word(11), {bswap16(16'hD001), bswap16(16'hD000)});
-	check("chip word 1", ddr_word(12), {bswap16(16'hD003), bswap16(16'hD002)});
-	check("chip word 2", ddr_word(13), {bswap16(16'hD005), bswap16(16'hD004)});
-	check("chip word 3", ddr_word(14), {bswap16(16'hD007), bswap16(16'hD006)});
+	check("chip word 0", ddr_word(W_CHIP), {bswap16(16'hD001), bswap16(16'hD000)});
+	check("chip word 1", ddr_word(W_CHIP + 1), {bswap16(16'hD003), bswap16(16'hD002)});
+	check("chip word 2", ddr_word(W_CHIP + 2), {bswap16(16'hD005), bswap16(16'hD004)});
+	check("chip word 3", ddr_word(W_CHIP + 3), {bswap16(16'hD007), bswap16(16'hD006)});
 
 	// The same two words again, as literals, against the EXTERNAL contract
 	// rather than against bswap16(). The file's byte at offset 4*10+0 must be
@@ -607,8 +656,8 @@ initial begin
 	// 32'h01D000D0. Written out this way, capture and restore cannot agree with
 	// each other on a swap that is wrong in both directions -- a matched pair
 	// of errors round-trips perfectly but fails here.
-	check("chip word 0 in 68k byte order", ddr_word(11), 32'h01D000D0);
-	check("chip word 3 in 68k byte order", ddr_word(14), 32'h07D006D0);
+	check("chip word 0 in 68k byte order", ddr_word(W_CHIP), 32'h01D000D0);
+	check("chip word 3 in 68k byte order", ddr_word(W_CHIP + 3), 32'h07D006D0);
 
 	// core_crc32 against an independently computed reference over the exact
 	// bytes above, least-significant byte of each word first. A design that
@@ -619,6 +668,13 @@ initial begin
 	crc_word_step(expect_kick_crc);
 	crc_word_step(32'h89ABCDEF);
 	crc_word_step(32'h01234567);
+	// The chipset register shadow. Nothing has written a chipset register in
+	// this bench -- the snoop input is tied to a read-window address the shadow
+	// refuses -- so every entry is zero, and the section is SHADOW_WORDS zero
+	// words. It still has to be in the CRC: a design that streamed the section
+	// but left it out of the running value, or vice versa, would round-trip
+	// against itself and fail only here.
+	for (i = 0; i < SHADOW_WORDS; i = i + 1) crc_word_step(32'h00000000);
 	crc_word_step({bswap16(16'hD001), bswap16(16'hD000)});
 	crc_word_step({bswap16(16'hD003), bswap16(16'hD002)});
 	crc_word_step({bswap16(16'hD005), bswap16(16'hD004)});
@@ -745,7 +801,7 @@ initial begin
 
 	// One flipped bit anywhere in the payload, caught by the CRC and nothing
 	// else -- every header word here is still perfectly well formed.
-	restore_window(); poke_word(9, ddr_word(9) ^ 32'd1);
+	restore_window(); poke_word(W_STATE, ddr_word(W_STATE) ^ 32'd1);
 	run_load();
 	check("bad payload refused",    {28'd0, load_fail_code}, 32'd4);
 	check("bad payload not ok",     {31'd0, load_ok},        32'd0);
@@ -795,7 +851,7 @@ initial begin
 	// therefore report 4, not 5 -- both because "corrupt" is the more actionable
 	// diagnosis, and because a payload that has not been CRC-checked cannot be
 	// trusted to carry a meaningful fingerprint in the first place.
-	restore_window(); poke_word(9, ddr_word(9) ^ 32'd1);
+	restore_window(); poke_word(W_STATE, ddr_word(W_STATE) ^ 32'd1);
 	run_load();
 	check("payload CRC precedes fingerprint", {28'd0, load_fail_code}, 32'd4);
 	check("both-bad releases the machine",               freeze_fall_count,     freeze_rise_count);
