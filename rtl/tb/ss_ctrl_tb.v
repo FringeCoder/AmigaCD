@@ -285,6 +285,27 @@ reg scan_unfrozen = 0;
 
 always @(posedge clk) if (rom_scan && !freeze) scan_unfrozen <= 1'b1;
 
+// A restore may write ONLY inside chip RAM.
+//
+// On hardware a restore completed (load_ok), the Amiga rebooted on the spot,
+// and every restore afterwards refused with FAIL_KICK -- the machine's live
+// Kickstart no longer fingerprinted the same, i.e. something had written to
+// the ROM. Two candidates: this write-back walking past the end of chip RAM,
+// or the machine crashing after release and the runaway CPU writing ROM space
+// (gary allows that when rom_readonly is clear, and rom_readonly is restored
+// from the state vector). They are not distinguishable from the hardware log,
+// so the write-back gets checked here directly.
+//
+// The save direction's read path was proven correct against a reference CRC.
+// That says nothing about this path, which until now nothing checked at all.
+// sd_state 3 is "write data", the same encoding the mock captures on.
+wire wr_in_chip = (sd_addr >= 24'h000000) && (sd_addr < CHIP_WORDS);
+
+reg wrote_outside_chip = 0;
+
+always @(posedge clk)
+	if (sd_cs && sd_state == 2'd3 && !wr_in_chip) wrote_outside_chip <= 1'b1;
+
 // The general rule the scan check is one instance of: A RESTORE DOES NO WORK
 // BEFORE IT HAS STOPPED THE MACHINE.
 //
@@ -841,6 +862,8 @@ initial begin
 	check("never scans the ROM unfrozen", {31'd0, scan_unfrozen}, 32'd0);
 
 	check("no restore work before the freeze", {31'd0, work_before_freeze}, 32'd0);
+
+	check("restore writes only inside chip RAM", {31'd0, wrote_outside_chip}, 32'd0);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
