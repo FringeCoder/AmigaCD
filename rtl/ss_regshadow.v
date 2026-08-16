@@ -119,6 +119,37 @@ reg [15:0] shadow [0:255];
 
 wire [7:0] wr_idx = reg_address_in;
 
+// DMACON, INTENA and ADKCON live OUTSIDE the array, in three named registers.
+//
+// Not tidiness: they are why the array would not infer as a memory. As entries,
+// the set/clear rule made every write a read-modify-write on the array, and
+// sc_value() read three more fixed addresses out of it, giving the array four
+// read ports. Quartus built it from flip-flops instead -- ~4700 ALMs for four
+// kilobytes, and two fits that missed timing.
+localparam [7:0] IDX_DMACON = 8'h4B;   // $096 >> 1
+localparam [7:0] IDX_INTENA = 8'h4D;   // $09A >> 1
+localparam [7:0] IDX_ADKCON = 8'h4F;   // $09E >> 1
+
+reg [15:0] r_dmacon;
+reg [15:0] r_intena;
+reg [15:0] r_adkcon;
+
+initial begin
+	r_dmacon = 16'd0;
+	r_intena = 16'd0;
+	r_adkcon = 16'd0;
+end
+
+// Value of a set/clear register by index.
+//
+// Deliberately NOT a function. A function called from a continuous assignment
+// is re-evaluated when its ARGUMENTS change, not when signals it reads inside
+// change -- so a `wire cur = sc_reg(wr_idx)` held its value for as long as the
+// address stayed put, and DMACON accumulated exactly once and then froze. The
+// directed accumulate-then-read test caught it at the first step; the original
+// checks only showed it three steps later, looking like an ordinary mismatch.
+`define SC_REG(idx) ((idx) == IDX_DMACON ? r_dmacon :                      (idx) == IDX_INTENA ? r_intena : r_adkcon)
+
 // ---------------------------------------------------------------- exclusions
 //
 // Held as a function rather than a table so the reasons stay next to the
@@ -175,7 +206,7 @@ begin
 end
 endfunction
 
-wire [15:0] cur = shadow[wr_idx];
+wire [15:0] cur = `SC_REG(wr_idx);
 
 // The hardware's own rule, bit for bit: see paula.v:167 and
 // paula_intcontroller.v:54. Bit 15 is the direction and never stored.
@@ -208,14 +239,27 @@ always @(posedge clk) begin
 		// the machine is frozen while this runs, so there is nothing legitimate
 		// for the snoop to see, and if there were, the payload is what the
 		// restore is here to install.
-		shadow[ld_addr] <= ld_data;
+		// Loaded values are contents, not writes, so the set/clear registers
+		// take them verbatim rather than through the accumulate rule.
+		if      (ld_addr == IDX_DMACON) r_dmacon <= ld_data;
+		else if (ld_addr == IDX_INTENA) r_intena <= ld_data;
+		else if (ld_addr == IDX_ADKCON) r_adkcon <= ld_data;
+		else                            shadow[ld_addr] <= ld_data;
 	end
 	else if (clk7_en && writable(wr_idx)) begin
-		shadow[wr_idx] <= setclear(wr_idx) ? applied : data_in;
+		if      (wr_idx == IDX_DMACON) r_dmacon <= applied;
+		else if (wr_idx == IDX_INTENA) r_intena <= applied;
+		else if (wr_idx == IDX_ADKCON) r_adkcon <= applied;
+		else                           shadow[wr_idx] <= data_in;
 	end
 end
 
-assign rd_data     = shadow[rd_addr];
+// ONE read port on the array, shared between the save readback and the replay
+// walk. They never run together: a save is not a restore.
+wire [7:0]  mem_addr = replay_active ? ridx[7:0] : rd_addr;
+wire [15:0] mem_q    = shadow[mem_addr];
+
+assign rd_data     = setclear(rd_addr) ? `SC_REG(rd_addr) : mem_q;
 assign rd_writable = writable(rd_addr);
 assign rd_setclear = setclear(rd_addr);
 
@@ -254,10 +298,10 @@ reg       rphase;    // 0 = the clearing write, 1 = the setting write
 function [15:0] sc_value(input [2:0] st);
 begin
 	case (st)
-		R_ADKCON: sc_value = shadow[8'h4F];            // $09E >> 1
+		R_ADKCON: sc_value = r_adkcon;
 		R_INTREQ: sc_value = {1'b0, intreq_in};
-		R_INTENA: sc_value = shadow[8'h4D];            // $09A >> 1
-		default:  sc_value = shadow[8'h4B];            // $096 >> 1, DMACON
+		R_INTENA: sc_value = r_intena;
+		default:  sc_value = r_dmacon;
 	endcase
 end
 endfunction
@@ -309,7 +353,7 @@ always @(posedge clk) begin
 			end
 			else if (writable(ridx[7:0]) && !setclear(ridx[7:0])) begin
 				replay_addr <= ridx[7:0];
-				replay_data <= shadow[ridx[7:0]];
+				replay_data <= mem_q;
 				replay_we   <= 1'b1;
 				ridx        <= ridx + 9'd1;
 			end
