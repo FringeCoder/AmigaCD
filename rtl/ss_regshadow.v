@@ -87,6 +87,16 @@ module ss_regshadow
 	//
 	// Must only be started while the machine is frozen. Nothing here checks
 	// that; ss_ctrl owns the freeze and the ordering.
+	// Load path, used by a restore to put the saved shadow back before replaying
+	// it. Separate from the snoop because the two run at different times and for
+	// different reasons: the snoop follows the machine, this overwrites it. It
+	// bypasses writable() deliberately -- the payload is a fixed 256-entry
+	// section, so every index is written, and the excluded ones simply hold
+	// values the replay will never look at.
+	input             ld_we,
+	input       [7:0] ld_addr,
+	input      [15:0] ld_data,
+
 	input             replay_start,
 	input      [14:0] intreq_in,     // by value; see the header
 	output reg        replay_active,
@@ -177,6 +187,13 @@ integer i;
 always @(posedge clk) begin
 	if (!rst_n) begin
 		for (i = 0; i < 256; i = i + 1) shadow[i] <= 16'd0;
+	end
+	else if (ld_we) begin
+		// A restore loading the saved section. Takes precedence over the snoop:
+		// the machine is frozen while this runs, so there is nothing legitimate
+		// for the snoop to see, and if there were, the payload is what the
+		// restore is here to install.
+		shadow[ld_addr] <= ld_data;
 	end
 	else if (clk7_en && writable(wr_idx)) begin
 		shadow[wr_idx] <= setclear(wr_idx) ? applied : data_in;

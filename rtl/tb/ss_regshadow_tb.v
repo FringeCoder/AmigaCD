@@ -24,6 +24,9 @@ wire [15:0] rd_data;
 wire        rd_writable;
 wire        rd_setclear;
 
+reg         ld_we = 0;
+reg   [7:0] ld_addr = 0;
+reg  [15:0] ld_data = 0;
 reg         replay_start = 0;
 reg  [14:0] intreq_in = 0;
 wire        replay_active;
@@ -41,6 +44,7 @@ ss_regshadow dut
 	.reg_address_in(reg_address_in), .data_in(data_in),
 	.rd_addr(rd_addr), .rd_data(rd_data), .rd_writable(rd_writable),
 	.rd_setclear(rd_setclear),
+	.ld_we(ld_we), .ld_addr(ld_addr), .ld_data(ld_data),
 	.replay_start(replay_start), .intreq_in(intreq_in),
 	.replay_active(replay_active), .replay_we(replay_we), .replay_addr(replay_addr),
 	.replay_data(replay_data), .replay_done(replay_done)
@@ -211,6 +215,19 @@ initial begin
 	rd(9'h0A6); check("AUD0PER recorded", {16'd0, rd_data}, 32'h000000FA);
 	rd(9'h19E); check("COLOR31 recorded", {16'd0, rd_data}, 32'h00000FFF);
 
+	// The load path a restore uses to put a saved section back. It must beat the
+	// snoop -- the machine is frozen while it runs -- and it must reach entries
+	// the snoop refuses, because the payload is a fixed 256-entry section and
+	// the restore streams all of it.
+	@(negedge clk);
+	ld_addr = 8'hC0;              // COLOR00 >> 1
+	ld_data = 16'h0777;
+	ld_we   = 1'b1;
+	@(negedge clk);
+	ld_we   = 1'b0;
+	rd(9'h180);
+	check("load overwrites the shadow", {16'd0, rd_data}, 32'h00000777);
+
 	// ------------------------------------------------------------- replay
 	//
 	// Ordering is the point. Replaying in address order would bring DMA and
@@ -242,7 +259,7 @@ initial begin
 	check("replay drove no read window", {31'd0, saw_readwin},  32'd0);
 
 	// Plain registers come back with their values.
-	check("replay wrote COLOR00", {16'd0, val_of(9'h180)}, 32'h00000456);
+	check("replay wrote the loaded COLOR00", {16'd0, val_of(9'h180)}, 32'h00000777);
 	check("replay wrote BPLCON0", {16'd0, val_of(9'h100)}, 32'h00004200);
 	check("replay wrote COLOR31", {16'd0, val_of(9'h19E)}, 32'h00000FFF);
 
