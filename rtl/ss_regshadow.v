@@ -257,7 +257,20 @@ end
 // ONE read port on the array, shared between the save readback and the replay
 // walk. They never run together: a save is not a restore.
 wire [7:0]  mem_addr = replay_active ? ridx[7:0] : rd_addr;
-wire [15:0] mem_q    = shadow[mem_addr];
+
+// REGISTERED read. A 256-deep asynchronous read is a very wide mux, and with
+// ss_ctrl's address register on one side and replay_data on the other it was
+// the critical path of the whole design: -1.081 ns, from
+// ss_ctrl|shadow_rd_addr[0] to ss_regshadow_inst|replay_data[12]. Registering
+// it breaks the path at a flop and is also the last thing standing between this
+// array and a real M10K.
+//
+// The cost is a cycle of latency on every read, which both readers allow for:
+// ss_ctrl waits an extra cycle in S_SHADOW_RD, and the replay walk below drives
+// the address one step before it emits.
+reg [15:0] mem_q;
+
+always @(posedge clk) mem_q <= shadow[mem_addr];
 
 assign rd_data     = setclear(rd_addr) ? `SC_REG(rd_addr) : mem_q;
 assign rd_writable = writable(rd_addr);
@@ -288,6 +301,7 @@ localparam [2:0] R_INTREQ = 3'd3;
 localparam [2:0] R_INTENA = 3'd4;
 localparam [2:0] R_DMACON = 3'd5;
 localparam [2:0] R_DONE   = 3'd6;
+localparam [2:0] R_PLAIN_EMIT = 3'd7;
 
 reg [2:0] rstate;
 reg [8:0] ridx;      // 9 bits so it can pass 255 and terminate
@@ -345,22 +359,29 @@ always @(posedge clk) begin
 			end
 		end
 
+		// Two steps per entry now that the read is registered: the address is
+		// already on mem_addr (it follows ridx), so this step lets mem_q catch
+		// up, and R_PLAIN_EMIT takes it. Skipped entries never reach the emit
+		// step, so nothing is driven for them.
 		R_PLAIN: if (clk7_en) begin
+			replay_we <= 1'b0;
 			if (ridx == 9'd256) begin
-				rstate    <= R_ADKCON;
-				rphase    <= 1'b0;
-				replay_we <= 1'b0;
+				rstate <= R_ADKCON;
+				rphase <= 1'b0;
 			end
-			else if (writable(ridx[7:0]) && !setclear(ridx[7:0])) begin
-				replay_addr <= ridx[7:0];
-				replay_data <= mem_q;
-				replay_we   <= 1'b1;
-				ridx        <= ridx + 9'd1;
-			end
-			else begin
-				replay_we <= 1'b0;      // excluded: skipped, nothing driven
-				ridx      <= ridx + 9'd1;
-			end
+			else if (writable(ridx[7:0]) && !setclear(ridx[7:0]))
+				rstate <= R_PLAIN_EMIT;
+			else
+				ridx <= ridx + 9'd1;    // excluded: skipped, nothing driven
+		end
+
+		// mem_q now holds shadow[ridx].
+		R_PLAIN_EMIT: if (clk7_en) begin
+			replay_addr <= ridx[7:0];
+			replay_data <= mem_q;
+			replay_we   <= 1'b1;
+			ridx        <= ridx + 9'd1;
+			rstate      <= R_PLAIN;
 		end
 
 		R_ADKCON, R_INTREQ, R_INTENA, R_DMACON: if (clk7_en) begin

@@ -121,9 +121,14 @@ begin
 end
 endtask
 
+// The array read is REGISTERED -- it was the critical path of the whole design
+// as a 256-deep async mux -- so a read costs a clock: drive the address, let
+// mem_q follow it, then sample. The set/clear registers are combinational and
+// would not need this, but reading them the same way keeps one task.
 task rd(input [8:0] addr);
 begin
 	rd_addr = addr[8:1];
+	@(negedge clk);
 	#1;
 end
 endtask
