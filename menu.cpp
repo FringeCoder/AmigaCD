@@ -7132,7 +7132,20 @@ void HandleUI(void)
 				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
 				user_io_status_set("[51]", 1);
 				user_io_status_set("[51]", 0);
-				menustate = MENU_AMIGACD_SETTINGS1;
+				// Close the OSD rather than returning to the Settings page.
+				//
+				// The outcome arrives as a toast ~250 ms later, and Info()
+				// draws only while menustate <= MENU_INFO (== 2). Staying on
+				// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
+				// far above it, so every toast this feature produces was
+				// silently discarded -- measured on hardware: "Save state:
+				// saved" and "Save state: FAILED" both logged as DROPPED at
+				// menustate=98, and the video-mode toasts with them.
+				//
+				// Closing also matches what the press means. The user asked
+				// the machine to do something and wants to watch it happen,
+				// not sit in a menu while it does.
+				menustate = MENU_NONE1;
 			}
 			else if (menusub == 6 && select && !minimig_ss_blocked()) // Restore state
 			{
@@ -7167,7 +7180,20 @@ void HandleUI(void)
 				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
 				user_io_status_set("[54]", 1);
 				user_io_status_set("[54]", 0);
-				menustate = MENU_AMIGACD_SETTINGS1;
+				// Close the OSD rather than returning to the Settings page.
+				//
+				// The outcome arrives as a toast ~250 ms later, and Info()
+				// draws only while menustate <= MENU_INFO (== 2). Staying on
+				// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
+				// far above it, so every toast this feature produces was
+				// silently discarded -- measured on hardware: "Save state:
+				// saved" and "Save state: FAILED" both logged as DROPPED at
+				// menustate=98, and the video-mode toasts with them.
+				//
+				// Closing also matches what the press means. The user asked
+				// the machine to do something and wants to watch it happen,
+				// not sit in a menu while it does.
+				menustate = MENU_NONE1;
 			}
 			else if (menusub == 7 && select) // Back
 			{
