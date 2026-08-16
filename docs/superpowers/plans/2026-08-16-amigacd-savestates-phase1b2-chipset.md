@@ -226,3 +226,38 @@ ALMs back and timing with it.
 
 Do this before any more fits: two fits have already been spent on the same
 cause.
+
+### Read-port fix: worked for area, timing still fails
+
+| | slack | ALMs |
+|---|---|---|
+| baseline (no chipset vector) | +0.212 | 26,232 (63%) |
+| four read ports, array reset | -0.357 | 31,223 (75%) |
+| four read ports, `initial` | -0.199 | 31,028 (74%) |
+| one read port, set/clear regs out | **-0.512** | **28,095 (67%)** |
+
+The read-port fix did what it was for: ~2900 ALMs came back. But timing went
+further negative, and the two failing clocks are the PLL outputs
+(`counter[1]`, `counter[0]`), i.e. the fastest domains — not a path named
+inside ss_regshadow.
+
+So the remaining problem is not that one module's structure. The chipset vector
+costs ~1900 ALMs over baseline and the design is now at 67%, and that is enough
+to push the fastest clock negative.
+
+Next, in order:
+
+1. **Seed sweep.** Slack on identical logic has ranged +0.05 to +0.46 across
+   this session, so the fitter's variance is roughly 0.4 ns. -0.512 is outside
+   that band, so a seed alone probably will not close it -- but it is one fit to
+   find out and it needs no design change.
+2. **Read the actual failing path**, from the STA report's per-path detail rather
+   than the clock summary, and see whether it runs through the new logic at all.
+   If it does not, the vector is simply the straw and the fix is elsewhere.
+3. **Register the shadow's read port.** A combinational 256-entry read is still a
+   wide mux even with one port; registering it would infer a true M10K, at the
+   cost of a cycle of latency that ss_ctrl's S_SHADOW_RD already anticipates for
+   one cycle and would need to anticipate for two.
+
+Do not deploy any of these builds. The last good one is the quiesce + cache
+invalidate fit at +0.212.
