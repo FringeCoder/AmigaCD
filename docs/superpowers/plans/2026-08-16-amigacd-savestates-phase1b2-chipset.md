@@ -139,3 +139,57 @@ Recorded so they are not lost:
 - The save state toast has never appeared. The core raises it, the host reads it
   back and resolves a non-empty string, and `Info()` drops it unless
   `menustate <= MENU_INFO` (== 2). A diagnostic now logs which.
+
+## Phase 1B-3: fast RAM
+
+Not optional. The machines this core targets have no fast RAM as standard, but
+it is switched on in practice (4 MB here), and a game keeping state there
+restores wrong today with no warning — chip RAM and the CPU come from the save,
+fast RAM is whatever is there now. That is the worst failure shape available: it
+looks like it worked.
+
+### Where it lives
+
+DDR3, not SDRAM. `Minimig.sv`'s `zram_sel = |ram_addr[28:26]` routes Zorro fast
+RAM to `ddram_ctrl` (ram2), and the save window sits deliberately above it —
+the comment at `SS_SLOT_BASE` records that a truncated literal once put the
+window "squarely inside fast RAM".
+
+So capture is a DDR3-to-DDR3 copy on the master `ss_ctrl` already owns, not the
+borrowed SDRAM CPU port the chip RAM path uses. The chip RAM machinery does not
+extend to it; this is a second streaming path.
+
+### Transport
+
+The window cannot carry it as it stands: `SS3E000000:400000` is 4 MB per slot,
+and 2 MB chip + up to 8 MB fast is 10 MB.
+
+Decision: **8 MB slots, four of them**, `0x3E000000`–`0x40000000`. That is 32 MB,
+which fits exactly to the top of DDR3 (`user_io.cpp` rejects
+`ss_base + ss_size >= 0x40000000`), keeps all four slots, and needs no new
+region. It carries 2 MB chip plus ~5.9 MB fast.
+
+Consequences:
+- the config string token changes to `SS3E000000:800000`
+- `SS_SLOT_STRIDE` doubles
+- 8 MB of Z2 fast RAM still does not fit and must be refused, alongside the Z3
+  refusal that already exists for a different reason (Z3 collides with the
+  window rather than overflowing the slot)
+
+### Format
+
+The fast RAM section is variable-length: its size follows the configured fast
+RAM, so `CORE_WORDS` becomes a runtime value rather than a localparam, and the
+size has to reach ss_ctrl as an input. The header already carries a length the
+host reads rather than assumes, so the on-disk shape does not change — but the
+length gate's `MIN_LENGTH` comparison and `CORE_WORDS_24/32` need to follow the
+configured size instead of a constant.
+
+Payload order: fingerprint, state vector, register shadow, chip RAM, fast RAM.
+Fast RAM last so that a reader which stops early still has a coherent machine.
+
+### Interim safety
+
+Until the above lands, `minimig_ss_blocked()` should refuse a save whenever ANY
+fast RAM is configured, not only Z3. A clear refusal is better than a restore
+that silently drops several megabytes of the machine's state.
