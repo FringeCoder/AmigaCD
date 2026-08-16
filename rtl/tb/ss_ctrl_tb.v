@@ -285,6 +285,33 @@ reg scan_unfrozen = 0;
 
 always @(posedge clk) if (rom_scan && !freeze) scan_unfrozen <= 1'b1;
 
+// The general rule the scan check is one instance of: A RESTORE DOES NO WORK
+// BEFORE IT HAS STOPPED THE MACHINE.
+//
+// This is the assertion that would have caught the bug above from a testbench
+// instead of from a reset Amiga. It is not about the accesses being harmful in
+// themselves -- reading the state file out of DDR3 does not touch the Amiga --
+// it is about the TIME they take. Every cycle a restore spends working while
+// the machine is unfrozen is a cycle the chipset advances and the state being
+// restored goes further out of date, and the amount of that drift is invisible
+// in any check that only looks at final values. On hardware it was ~270 ms.
+//
+// So: between load_busy rising and the freeze being granted, the controller may
+// issue no DDR3 read and no SDRAM access at all. Armed at the start of each
+// restore and disarmed the moment freeze rises, which also keeps it clear of
+// S_L_RELEASE, where freeze drops while load_busy and a trailing ss_dma cycle
+// can still be up.
+reg work_before_freeze = 0;
+reg pre_freeze_armed   = 0;
+reg load_busy_d        = 0;
+
+always @(posedge clk) begin
+	load_busy_d <= load_busy;
+	if (load_busy && !load_busy_d) pre_freeze_armed <= 1'b1;
+	if (freeze)                    pre_freeze_armed <= 1'b0;
+	if (pre_freeze_armed && (ddr_read || sd_cs)) work_before_freeze <= 1'b1;
+end
+
 // ------------------------------------------------------- ordering observers
 //
 // A restore that puts the machine back together in the wrong order resumes and
@@ -807,6 +834,8 @@ initial begin
 	check("never steals the CPU port", {31'd0, bus_stolen}, 32'd0);
 
 	check("never scans the ROM unfrozen", {31'd0, scan_unfrozen}, 32'd0);
+
+	check("no restore work before the freeze", {31'd0, work_before_freeze}, 32'd0);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
