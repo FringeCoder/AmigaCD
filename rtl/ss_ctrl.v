@@ -450,6 +450,13 @@ reg [23:0] kick_pairs;
 reg [15:0] kick_low;
 reg        kick_low_held;
 reg [5:0]  kick_ret;
+
+// Scan post-mortem. scan_acks counts the sd_ready pulses the Kickstart scan was
+// answered with, saturating rather than wrapping so that "a few" never reads as
+// zero. Cleared wherever rom_scan is raised, so it always describes the scan
+// that is running now. fail_idx freezes both at the refusal; see dbg_idx.
+reg [7:0]  scan_acks;
+reg [23:0] fail_idx;
 reg [31:0] kick_crc;        // fingerprint of the ROM currently in the machine
 reg [31:0] file_kick_crc;   // fingerprint the state file was made under
 // Watchdog on one SDRAM word of the scan. See SCAN_TIMEOUT.
@@ -567,7 +574,21 @@ assign dbg_state = state;
 // when nothing is running: after a save it is left at the last window word
 // written, which says how far the save got, and after a restore it is left
 // wherever the previous save ended, which the state code already disambiguates.
-assign dbg_idx   = load_busy ? pay_idx : word_idx;
+// After a FAILED restore it carries the post-mortem instead, because the thing
+// that needs diagnosing does not survive to be sampled: these failures complete
+// in well under the host's ~50 ms poll interval, so every sample the log has
+// ever contained was taken at S_IDLE afterwards. Latching at the instant of the
+// refusal is the only way to see inside one.
+//
+//   [23:8] kick_pairs -- how far the Kickstart scan got
+//   [7:0]  scan_acks  -- sd_ready pulses seen while rom_scan was up, saturating
+//
+// Which tells the two candidate stories apart. scan_acks == 0 means the SDRAM
+// CPU port never answered at all, i.e. the mux did not route the scan. Non-zero
+// with kick_pairs short of KICK_PAIRS means it answered and then stopped, which
+// is a different bug entirely.
+assign dbg_idx   = load_busy  ? pay_idx :
+                   load_fail  ? fail_idx : word_idx;
 
 // Queue a 32-bit payload word: CRC it and write it into DDR3. Callers must
 // only invoke this when word_busy is false.
@@ -602,6 +623,7 @@ begin
 	load_fail      <= 1'b1;
 	load_busy      <= 1'b0;
 	ddr_read       <= 1'b0;
+	fail_idx       <= {kick_pairs[15:0], scan_acks};
 	// Every refusal past S_L_FREEZE has to let the machine go again, and the
 	// freeze now goes up before the Kickstart fingerprint rather than after it,
 	// so that is most of them. Dropping it here rather than at each call site
@@ -634,6 +656,8 @@ always @(posedge clk) begin
 		dma_write_mode   <= 1'b0;
 		restore_busy     <= 1'b0;
 		rom_scan         <= 1'b0;
+		scan_acks        <= 8'd0;
+		fail_idx         <= 24'd0;
 		kick_low_held    <= 1'b0;
 		kick_pairs       <= 24'd0;
 		scan_wd          <= 24'd0;
@@ -766,6 +790,7 @@ always @(posedge clk) begin
 			else if (quiesced) begin
 				crc_init   <= 1'b1;
 				rom_scan   <= 1'b1;
+				scan_acks  <= 8'd0;
 				kick_addr  <= kick_base;
 				kick_pairs <= 24'd0;
 				kick_ret   <= S_PAY_KICK;
@@ -803,6 +828,11 @@ always @(posedge clk) begin
 		// and ss_dma's `start` re-arms it from any state (ss_dma.v:114, ahead of
 		// its case), so the next save or restore is unaffected.
 		S_KICK_WAIT: begin
+			// Counted here rather than beside the DMA so it measures the thing
+			// in question: whether the SDRAM CPU port answered this scan at all.
+			// Saturating, so a handful of acks can never be read as none.
+			if (sd_ready && scan_acks != 8'hFF) scan_acks <= scan_acks + 8'd1;
+
 			if (dma_word_valid) begin
 				scan_wd <= 24'd0;
 				if (!kick_low_held) begin
@@ -1136,6 +1166,7 @@ always @(posedge clk) begin
 						// always been on the save side.
 						crc_init   <= 1'b1;
 						rom_scan   <= 1'b1;
+						scan_acks  <= 8'd0;
 						kick_addr  <= kick_base;
 						kick_pairs <= 24'd0;
 						kick_ret   <= S_L_KICK_CHK;

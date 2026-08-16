@@ -756,6 +756,10 @@ initial begin
 	check("wrong kickstart chip untouched", {16'd0, chip_mem[0]}, 32'h0000BAD0);
 	check("wrong kickstart writes no DDR3",     ddr_write_count,      32'd0);
 	check("wrong kickstart froze once",         freeze_rise_count,    32'd1);
+	// The scan post-mortem in dbg_idx[7:0], proven here rather than trusted on
+	// hardware. This refusal ran the scan to completion, so the port answered.
+	check("wrong kickstart counted acks",
+	      {31'd0, (dbg_idx[7:0] != 8'd0)},                            32'd1);
 	// This is the discrimination the instrumentation exists to make: a restore
 	// that reached the last gate and was refused there, versus one that ran to
 	// completion. Both leave the machine in S_IDLE with nothing else to look at.
@@ -794,6 +798,13 @@ initial begin
 	check("dead port chip untouched", {16'd0, chip_mem[0]},    32'h0000BAD0);
 	check("dead port writes no DDR3", ddr_write_count,         32'd0);
 	check("dead port froze once",      freeze_rise_count,       32'd1);
+	// The other half of the post-mortem's job: this is the case where the port
+	// never answered, and it must read as zero acks and zero pairs. Together
+	// with the check above, dbg_idx after a refusal now tells "the mux never
+	// routed the scan" apart from "it answered and then stopped" -- which is
+	// exactly the question the hardware log cannot currently answer.
+	check("dead port counted no acks", {16'd0, dbg_idx[7:0], 8'd0}, 32'd0);
+	check("dead port scanned no pairs", {8'd0, dbg_idx[23:8], 8'd0}, 32'd0);
 	check("dead port dropped rom_scan", {31'd0, rom_scan},     32'd0);
 	// Let the abandoned ss_dma transfer finish so the port is clean again, then
 	// put the watch back for the rest of the run.
