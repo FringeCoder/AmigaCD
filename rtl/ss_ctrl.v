@@ -103,16 +103,21 @@
 // payload word 0 and not a ninth header word.
 //
 // WIRING. Minimig.sv muxes the SDRAM CPU port on `ss_freeze | ss_rom_scan`.
-// The save-side scan runs frozen and would have been covered by ss_freeze
-// alone; the restore-side scan is not, because it runs with the machine still
-// going, by design, and so needs the port while ss_freeze is low. This module
-// raises `rom_scan` for exactly that window. The 68k is off its own port for
-// the duration by a different mechanism: cpu_wrapper's ss_arm (Minimig.sv ties
-// it to save_busy | load_busy | fan-out busy) parks the CPU at its next
-// no-memaccess boundary, and both of those are high milliseconds before
-// rom_scan can rise. `kick_base` is a port rather than a parameter so that
-// copying this file over without doing the wiring is at least a visible
-// unconnected-input diagnostic.
+// Both scans now run frozen, so `rom_scan` is redundant with ss_freeze in both
+// directions; it is kept because it names the window the port is borrowed for,
+// and because the mux would have to change in lockstep with removing it.
+//
+// The restore-side scan used to run with the machine still going, and the
+// ss_freeze term did not cover it. That was safe as far as the CPU went --
+// cpu_wrapper's ss_arm (Minimig.sv ties it to save_busy | load_busy | fan-out
+// busy) parks the 68k at its next no-memaccess boundary, milliseconds before
+// rom_scan can rise, so the CPU is not on its port to be robbed of it. What it
+// was not safe for is everything ss_arm does NOT stop. Parking the CPU is not
+// freezing the Amiga: the chipset runs on. See S_IDLE's load branch for what
+// that cost on hardware and why the restore now freezes up front.
+//
+// `kick_base` is a port rather than a parameter so that copying this file over
+// without doing the wiring is at least a visible unconnected-input diagnostic.
 //
 // SCAN_TIMEOUT is the backstop for that wiring, and the reason it exists is
 // worth stating: if the port mux does not route ss_dma's chip select, the scan
@@ -597,6 +602,12 @@ begin
 	load_fail      <= 1'b1;
 	load_busy      <= 1'b0;
 	ddr_read       <= 1'b0;
+	// Every refusal past S_L_FREEZE has to let the machine go again, and the
+	// freeze now goes up before the Kickstart fingerprint rather than after it,
+	// so that is most of them. Dropping it here rather than at each call site
+	// means a refusal added later cannot forget to. Harmless for the refusals
+	// that happen before the freeze: restore_busy is already low there.
+	restore_busy   <= 1'b0;
 	state          <= S_IDLE;
 end
 endtask
@@ -712,17 +723,36 @@ always @(posedge clk) begin
 				state     <= S_WAIT;
 			end
 			else if (load_req_rise) begin
-				// Cheapest gate first, so a file that is not ours costs one
-				// DDR3 read rather than a scan of the whole payload. Word 1
-				// of the window holds magic in its low half and version in
-				// its high half, which is both of them for that one read.
+				// Stop the machine FIRST, before reading a single word of the
+				// file. This used to validate the whole file with the Amiga
+				// still running and freeze only at the end, on the reasoning
+				// that a refusal should not disturb a machine it was never
+				// going to touch. The reasoning was sound; the premise was
+				// not. `ss_arm` (Minimig.sv ties it to save/load/fan-out busy)
+				// parks the 68k for the whole of that validation, but parking
+				// the CPU is not freezing the Amiga: Agnus, Denise, Paula and
+				// the CIAs keep running. Measured on hardware, validation
+				// takes ~270 ms, so a restore ran the chipset on for some
+				// sixteen frames against a stopped CPU and then dropped in a
+				// CPU and a chip RAM from an earlier moment. CIA timers have
+				// overflowed by then and INTREQ has bits pending, and neither
+				// is in the state vector to be corrected. The Amiga reset.
+				//
+				// A save never had this: it quiesces within a frame of
+				// save_busy and everything downstream of that runs frozen.
+				// This makes the restore symmetrical -- one freeze, raised
+				// here, dropped once in S_L_RELEASE.
+				//
+				// The cost is that refusing a file now stops the machine for
+				// the length of the validation before releasing it. That is
+				// the same freeze-and-release a save performs, which runs on
+				// this hardware today without disturbing the running game.
 				load_busy      <= 1'b1;
 				load_ok        <= 1'b0;
 				load_fail      <= 1'b0;
 				load_fail_code <= 4'd0;
-				rd_idx         <= 24'd2;
-				rd_ret         <= S_L_MAGIC;
-				state          <= S_L_RD_ISSUE;
+				restore_busy   <= 1'b1;
+				state          <= S_L_FREEZE;
 			end
 		end
 
@@ -788,7 +818,9 @@ always @(posedge clk) begin
 			end
 			else if (scan_wd == SCAN_TIMEOUT) begin
 				rom_scan <= 1'b0;
-				// Restore: refuse, machine untouched and still running.
+				// Restore: refuse. Nothing was written, but the machine is
+				// frozen by now, so load_reject drops restore_busy and lets
+				// it go again.
 				// Save: fail, which drops save_busy and with it the freeze.
 				if (kick_ret == S_L_KICK_CHK) load_reject(FAIL_QUIESCE);
 				else                          state <= S_FAIL;
@@ -1088,13 +1120,20 @@ always @(posedge clk) begin
 						// even though it is the cheaper of the two scans.
 						// The payload CRC costs the machine nothing -- it is
 						// DDR3 reads only -- while the fingerprint borrows
-						// the SDRAM CPU port out from under a running Amiga,
-						// so it is not worth spending on a file that has not
-						// yet proved itself. It also keeps the diagnosis
-						// honest: the stored fingerprint is only meaningful
-						// once the payload carrying it has been checked, and
-						// a corrupt file must read as corrupt, not as "wrong
-						// ROM". Still no freeze: rom_scan, not restore_busy.
+						// the SDRAM CPU port, so it is not worth spending on
+						// a file that has not yet proved itself. It also
+						// keeps the diagnosis honest: the stored fingerprint
+						// is only meaningful once the payload carrying it has
+						// been checked, and a corrupt file must read as
+						// corrupt, not as "wrong ROM".
+						//
+						// The machine is already frozen -- S_L_FREEZE ran
+						// before any of this, so the scan and both directions
+						// of it now behave the same way. rom_scan still rises
+						// because Minimig.sv muxes the SDRAM CPU port on
+						// (ss_freeze | ss_rom_scan) and the scan needs that
+						// port; here it is redundant with ss_freeze, as it has
+						// always been on the save side.
 						crc_init   <= 1'b1;
 						rom_scan   <= 1'b1;
 						kick_addr  <= kick_base;
@@ -1126,16 +1165,22 @@ always @(posedge clk) begin
 		end
 
 		// The machine's ROM is not the one this state was made under. Refuse.
-		// Nothing has been written and nothing has been frozen: the ROM scan
-		// reads SDRAM and does not touch the Amiga's own state, so this is as
-		// much a no-op as the four gates above it.
+		// Nothing has been WRITTEN -- the scan only read SDRAM -- but by now the
+		// machine is frozen, so unlike the four gates above it this refusal has
+		// to let the Amiga go again. load_reject drops restore_busy and with it
+		// the freeze, and the machine resumes where it was stopped, exactly as
+		// it does at the end of a save.
 		S_L_KICK_CHK: begin
 			if (kick_crc == file_kick_crc) begin
-				// Last gate passed. Only now may the machine be stopped:
-				// everything above this line is a verdict on the file,
-				// delivered with the Amiga still running.
-				restore_busy <= 1'b1;
-				state        <= S_L_FREEZE;
+				// Last gate passed, and the machine is already stopped: the
+				// freeze went up before the fingerprint, because the scan
+				// itself is not safe to run against a live 68k. Go straight
+				// to the state vector.
+				ser_load_start <= 1'b1;
+				// Skip payload word 0: the fingerprint is metadata about the
+				// machine, already checked, and is not part of the state vector.
+				pay_idx        <= ST_FIRST_24;
+				state          <= S_L_ST_FETCH;
 			end
 			else load_reject(FAIL_KICK);
 		end
@@ -1148,18 +1193,22 @@ always @(posedge clk) begin
 		// bug. ss_ctrl_tb.v counts the falling edges for exactly that reason.
 		S_L_FREEZE: begin
 			if (timeout) begin
-				// The file was fine; the machine would not hold still. Nothing
-				// has been written yet, so dropping the request here leaves
-				// the Amiga exactly as it was found.
-				restore_busy <= 1'b0;
+				// The machine would not hold still. Nothing has been read and
+				// nothing written, so dropping the request here leaves the
+				// Amiga exactly as it was found. load_reject drops
+				// restore_busy.
 				load_reject(FAIL_QUIESCE);
 			end
 			else if (quiesced) begin
-				ser_load_start <= 1'b1;
-				// Skip payload word 0: the fingerprint is metadata about the
-				// machine, already checked, and is not part of the state vector.
-				pay_idx        <= ST_FIRST_24;
-				state          <= S_L_ST_FETCH;
+				// Stopped, and stopped for the whole restore from here. Now
+				// validate the file. Cheapest gate first, so a file that is
+				// not ours costs one DDR3 read rather than a scan of the whole
+				// payload. Word 1 of the window holds magic in its low half
+				// and version in its high half, which is both of them for that
+				// one read.
+				rd_idx <= 24'd2;
+				rd_ret <= S_L_MAGIC;
+				state  <= S_L_RD_ISSUE;
 			end
 		end
 
