@@ -261,3 +261,43 @@ Next, in order:
 
 Do not deploy any of these builds. The last good one is the quiesce + cache
 invalidate fit at +0.212.
+
+### The failing path, named
+
+Seed 7 gave -1.081 against seed 1's -0.512, so seed variance is not going to
+close this. `report_timing -detail full_path` names the path:
+
+```
+From: ss_ctrl:savestate|shadow_rd_addr[0]
+To:   ss_regshadow:ss_regshadow_inst|replay_data[12]
+Slack: -1.081
+```
+
+ss_ctrl's registered read address, across the module boundary, through the
+address mux, through the **256-entry combinational array read**, into
+replay_data. A 256-deep asynchronous read is a very wide mux and it sits
+between two registers in different modules.
+
+So the chipset vector is not merely the straw. The remaining cost is the
+combinational read port, which is also the last thing stopping a true M10K.
+
+**Fix: register the read port.** `mem_q` becomes synchronous, which infers block
+RAM and breaks the path at the register.
+
+Consequences for ss_ctrl, which must be handled together:
+
+- `S_SHADOW_RD` already allows one cycle for the readback to settle. With a
+  registered read it needs **two**: drive the address, wait, then sample.
+- The replay walk takes `replay_data <= mem_q`, where `mem_q` will correspond to
+  the address driven the cycle before. The walk must drive `ridx` one step ahead
+  of the entry it is about to emit, or hold a cycle between the address and the
+  emit.
+- `ss_ctrl_tb` and `ss_regshadow_tb` both assert the current one-cycle
+  behaviour, so both change with it. The directed accumulate-then-read test is
+  unaffected -- the set/clear registers are no longer in the array.
+
+Note on the -through investigation: `get_pins -compatibility_mode {*name*}`
+matched 32339 pins for the shadow and 22108 for ss_ctrl, i.e. the wildcards
+matched most of the design, so a `-through` filter built that way is worthless
+and silently returns the global worst path. Use `-detail full_path -file` and
+read the node names instead.
