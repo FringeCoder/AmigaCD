@@ -391,7 +391,12 @@ begin
 end
 endfunction
 
-task check(input [255:0] name, input [31:0] actual, input [31:0] want);
+// 512 bits = 64 characters. Verilog truncates an over-long string literal from
+// the LEFT when it is assigned to a narrower reg, so a label past the limit
+// loses its opening characters rather than its tail: "no restore work before
+// the freeze" was reported as "o restore work before the freeze" at 256 bits.
+// Silent, and it makes a log say something slightly different from the source.
+task check(input [511:0] name, input [31:0] actual, input [31:0] want);
 begin
 	if (actual !== want) begin
 		$display("FAIL %0s: got %08h, want %08h", name, actual, want);
