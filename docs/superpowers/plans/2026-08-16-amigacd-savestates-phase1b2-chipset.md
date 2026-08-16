@@ -193,3 +193,36 @@ Fast RAM last so that a reader which stops early still has a coherent machine.
 Until the above lands, `minimig_ss_blocked()` should refuse a save whenever ANY
 fast RAM is configured, not only Z3. A clear refusal is better than a restore
 that silently drops several megabytes of the machine's state.
+
+## Open: the shadow does not infer a memory
+
+Two fits, both failing timing, with the shadow costing ~4700 ALMs for 4 KB:
+
+| | slack | ALMs |
+|---|---|---|
+| before the chipset vector | +0.212 | 26,232 (63%) |
+| chipset vector, reset over the array | -0.357 | 31,223 (75%) |
+| chipset vector, `initial` instead | -0.199 | 31,028 (74%) |
+
+Removing the reset was necessary and not sufficient. The array has FOUR read
+ports and Quartus will not infer a block memory for that:
+
+1. `rd_data` — the save readback
+2. `cur` — the read-modify-write behind the set/clear rule
+3. `replay_data <= shadow[ridx]` — the replay walk
+4. `sc_value()` — three fixed-address reads for DMACON/INTENA/ADKCON
+
+Fix, in order of what it removes:
+
+- **Take the set/clear registers out of the array.** DMACON, INTENA and ADKCON
+  are three 16-bit registers; hold them as three named regs instead of array
+  entries. That deletes read ports 2 and 4 outright, and the set/clear rule
+  stops being a read-modify-write on a memory.
+- **Share one read port between the save readback and the replay.** They never
+  run at once — a save is not a restore — so one address mux serves both.
+
+That leaves one write port and one read port, which infers. Expect the ~4700
+ALMs back and timing with it.
+
+Do this before any more fits: two fits have already been spent on the same
+cause.
