@@ -67,6 +67,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "ide.h"
 #include "support/physical_disc/physical_disc.h"
 #include "support/physical_disc/physical_disc_autoboot.h"
+#include "support/minimig/minimig_ssdiag.h"
 #include "profiling.h"
 #include "str_util.h"
 #include "autofire.h"
@@ -8956,6 +8957,20 @@ int menu_present()
 
 void Info(const char *message, int timeout, int width, int height, int frame)
 {
+	// Diagnostic for the save state toast, which has never once appeared on
+	// hardware even though the log shows the core raising the request, the host
+	// reading it back and resolving it to a non-empty string, and this function
+	// being called with it. The gate below is the next candidate: MENU_INFO is
+	// 2, so anything from MENU_SYSTEM1 upward -- every real menu page, the
+	// AmigaCD settings page included -- drops the call without a word.
+	//
+	// Logging menustate here separates "the gate dropped it" from "it was drawn
+	// and not visible", which no amount of reading either file can settle.
+	// A no-op off Minimig; see support/minimig/minimig_ssdiag.cpp.
+	minimig_ss_diag_log("host Info(\"%s\") menustate=%u gate=%s",
+	                    message, menustate,
+	                    (menustate <= MENU_INFO) ? "open" : "DROPPED");
+
 	if (menustate <= MENU_INFO)
 	{
 		OSD_PrintInfo(message, &width, &height, frame);
