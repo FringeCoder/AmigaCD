@@ -166,6 +166,52 @@ initial begin
 	check("DMACON needs set/clear replay", {31'd0, rd_setclear}, 32'd1);
 	check("DMACON is replayable",          {31'd0, rd_writable}, 32'd1);
 
+	// Directed: accumulate, then read, repeatedly, on every set/clear register.
+	//
+	// The three checks above pass if the FIRST write lands and the register
+	// never moves again -- a restructure that broke the read-modify-write left
+	// DMACON reading 0x0200 for all three and only the third check's value made
+	// that obvious. This walks each register through four writes, reading
+	// between every one, so a register that stops accumulating is caught at the
+	// step it stops on rather than at the end.
+	wr(9'h096, 16'h0FFF);                                    // clear everything
+	rd(9'h096); check("acc: DMACON starts clear",   {16'd0, rd_data}, 32'h00000000);
+	wr(9'h096, 16'h8001);
+	rd(9'h096); check("acc: DMACON after set 1",    {16'd0, rd_data}, 32'h00000001);
+	wr(9'h096, 16'h8002);
+	rd(9'h096); check("acc: DMACON after set 2",    {16'd0, rd_data}, 32'h00000003);
+	wr(9'h096, 16'h8004);
+	rd(9'h096); check("acc: DMACON after set 3",    {16'd0, rd_data}, 32'h00000007);
+	wr(9'h096, 16'h0002);
+	rd(9'h096); check("acc: DMACON after clear 2",  {16'd0, rd_data}, 32'h00000005);
+
+	wr(9'h09E, 16'h0FFF);
+	wr(9'h09E, 16'h8010);
+	rd(9'h09E); check("acc: ADKCON after set 1",    {16'd0, rd_data}, 32'h00000010);
+	wr(9'h09E, 16'h8020);
+	rd(9'h09E); check("acc: ADKCON after set 2",    {16'd0, rd_data}, 32'h00000030);
+
+	// A write to one set/clear register must not disturb another. Three named
+	// registers behind one interface can alias if the write decode is wrong.
+	wr(9'h09A, 16'h0FFF);
+	wr(9'h09A, 16'h8100);
+	rd(9'h09A); check("acc: INTENA took its write", {16'd0, rd_data}, 32'h00000100);
+	rd(9'h096); check("acc: DMACON undisturbed",    {16'd0, rd_data}, 32'h00000005);
+	rd(9'h09E); check("acc: ADKCON undisturbed",    {16'd0, rd_data}, 32'h00000030);
+
+	// A plain register interleaved with them must also be unaffected, and must
+	// still take values verbatim rather than accumulating.
+	wr(9'h180, 16'h0111);
+	wr(9'h180, 16'h0222);
+	rd(9'h180); check("acc: plain reg replaced",    {16'd0, rd_data}, 32'h00000222);
+	rd(9'h096); check("acc: DMACON still intact",   {16'd0, rd_data}, 32'h00000005);
+
+	// Leave the values the later checks expect.
+	wr(9'h096, 16'h0FFF); wr(9'h096, 16'h8060);
+	wr(9'h09E, 16'h0FFF); wr(9'h09E, 16'h8800);
+	wr(9'h09A, 16'h0FFF);
+	wr(9'h180, 16'h0456);
+
 	wr(9'h09A, 16'hC000);   // INTENA: set INTEN
 	rd(9'h09A); check("INTENA accumulates",        {16'd0, rd_data}, 32'h00004000);
 	wr(9'h09E, 16'h8800);   // ADKCON
