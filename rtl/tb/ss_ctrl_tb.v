@@ -240,12 +240,13 @@ end
 // save does, and what each case below checks is that `freeze` is low again once
 // the refusal has been reported.
 //
-// saw_freeze is retained as the observer for the one thing still forbidden
-// outright: freeze rising OUTSIDE a restore, i.e. left standing after one.
-reg saw_freeze   = 0;
-reg watch_freeze = 0;
-
-always @(posedge clk) if (watch_freeze && freeze && !load_busy) saw_freeze <= 1'b1;
+// There is no separate sticky observer for it. `freeze` sampled after run_load
+// cannot fail -- run_load waits on it -- so the per-case checks below are on
+// freeze_fall_count instead: exactly one fall means the machine was stopped and
+// let go once, which a design that never released would fail and a design that
+// never froze would fail too. An earlier attempt here sampled (freeze &&
+// !load_busy) as a backstop and fired on every refusal, because ss_quiesce
+// drops freeze one cycle behind load_busy by design.
 
 // The SDRAM CPU port is not ours to take. Minimig.sv routes it to ss_ctrl while
 // the machine is frozen; the restore-side fingerprint scan needs it while the
@@ -625,45 +626,42 @@ initial begin
 	check("diag idle once done",   {26'd0, dbg_state},                 {26'd0, DBG_S_IDLE});
 
 	// Every refusal below must leave the machine running once it has reported.
-	// Each case checks `freeze` directly at that point. saw_freeze runs across
-	// all of them as the backstop for a freeze left standing after load_busy has
-	// gone -- the failure a per-case sample taken one cycle early would miss.
-	saw_freeze   = 0;
-	watch_freeze = 1;
-
+	// Each case checks freeze_fall_count, which reset_observers clears per case:
+	// exactly one fall means the refusal stopped the machine and let it go again.
+	//
 	// Each gate refuses with its own code, and each must let the machine go
 	// again to do it.
 	restore_window(); poke_word(2, 32'hDEADBEEF);
 	run_load();
 	check("bad magic refused",     {28'd0, load_fail_code}, 32'd1);
 	check("bad magic not ok",      {31'd0, load_ok},        32'd0);
-	check("bad magic releases the machine",   {31'd0, freeze},     32'd0);
+	check("bad magic releases the machine",   freeze_fall_count,     32'd1);
 
 	restore_window(); poke_word(3, 32'h00020000);
 	run_load();
 	check("bad version refused",   {28'd0, load_fail_code}, 32'd2);
 	check("bad version not ok",    {31'd0, load_ok},        32'd0);
-	check("bad version releases the machine", {31'd0, freeze},     32'd0);
+	check("bad version releases the machine", freeze_fall_count,     32'd1);
 
 	restore_window(); poke_word(1, 32'hFFFFFFFF);
 	run_load();
 	check("long length refused",   {28'd0, load_fail_code}, 32'd3);
 	check("long length not ok",    {31'd0, load_ok},        32'd0);
-	check("long length releases the machine", {31'd0, freeze},     32'd0);
+	check("long length releases the machine", freeze_fall_count,     32'd1);
 
 	// The lower bound matters as much as the upper: a length that cannot even
 	// cover this core's payload describes a file that is not ours.
 	restore_window(); poke_word(1, 32'd5);
 	run_load();
 	check("short length refused",   {28'd0, load_fail_code}, 32'd3);
-	check("short length releases the machine", {31'd0, freeze},     32'd0);
+	check("short length releases the machine", freeze_fall_count,     32'd1);
 
 	// A payload of a different size is a different core's state file, even
 	// when every other header word looks right.
 	restore_window(); poke_word(4, CORE_WORDS + 32'd1);
 	run_load();
 	check("bad core_words refused", {28'd0, load_fail_code}, 32'd3);
-	check("core_words releases the machine",   {31'd0, freeze},     32'd0);
+	check("core_words releases the machine",   freeze_fall_count,     32'd1);
 
 	// One flipped bit anywhere in the payload, caught by the CRC and nothing
 	// else -- every header word here is still perfectly well formed.
@@ -671,7 +669,7 @@ initial begin
 	run_load();
 	check("bad payload refused",    {28'd0, load_fail_code}, 32'd4);
 	check("bad payload not ok",     {31'd0, load_ok},        32'd0);
-	check("bad payload releases the machine",  {31'd0, freeze},     32'd0);
+	check("bad payload releases the machine",  freeze_fall_count,     32'd1);
 
 	// A flipped bit in the last payload word is the case a CRC sampled one
 	// cycle early would miss: the feeder is still folding that word's final
@@ -679,7 +677,7 @@ initial begin
 	restore_window(); poke_word(8 + CORE_WORDS - 1, ddr_word(8 + CORE_WORDS - 1) ^ 32'h80000000);
 	run_load();
 	check("last word refused",      {28'd0, load_fail_code}, 32'd4);
-	check("last word releases the machine",    {31'd0, freeze},     32'd0);
+	check("last word releases the machine",    freeze_fall_count,     32'd1);
 
 	// A state file made under a different Kickstart. Every header word is right
 	// and the payload CRC still matches -- the FILE is untouched. What changed is
@@ -695,12 +693,12 @@ initial begin
 	run_load();
 	check("wrong kickstart refused",   {28'd0, load_fail_code}, 32'd5);
 	check("wrong kickstart not ok",    {31'd0, load_ok},        32'd0);
-	check("wrong kickstart releases the machine", {31'd0, freeze},     32'd0);
+	check("wrong kickstart releases the machine", freeze_fall_count,     32'd1);
 	// The refusal is a no-op: the ROM scan reads SDRAM but writes nothing, and
 	// nothing of the state vector or chip RAM was applied on the way to saying no.
 	check("wrong kickstart chip untouched", {16'd0, chip_mem[0]}, 32'h0000BAD0);
 	check("wrong kickstart writes no DDR3",     ddr_write_count,      32'd0);
-	check("wrong kickstart never froze",        freeze_rise_count,    32'd0);
+	check("wrong kickstart froze once",         freeze_rise_count,    32'd1);
 	// This is the discrimination the instrumentation exists to make: a restore
 	// that reached the last gate and was refused there, versus one that ran to
 	// completion. Both leave the machine in S_IDLE with nothing else to look at.
@@ -716,7 +714,7 @@ initial begin
 	restore_window(); poke_word(9, ddr_word(9) ^ 32'd1);
 	run_load();
 	check("payload CRC precedes fingerprint", {28'd0, load_fail_code}, 32'd4);
-	check("both-bad releases the machine",               {31'd0, freeze},     32'd0);
+	check("both-bad releases the machine",               freeze_fall_count,     32'd1);
 	rom_alt = 0;
 
 	// The SDRAM CPU port is not routed to ss_ctrl at all: chip select is taken
@@ -735,10 +733,10 @@ initial begin
 	run_load();
 	check("dead port refused",        {28'd0, load_fail_code}, 32'd6);
 	check("dead port not ok",         {31'd0, load_ok},        32'd0);
-	check("dead port releases the machine",      {31'd0, freeze},     32'd0);
+	check("dead port releases the machine",      freeze_fall_count,     32'd1);
 	check("dead port chip untouched", {16'd0, chip_mem[0]},    32'h0000BAD0);
 	check("dead port writes no DDR3", ddr_write_count,         32'd0);
-	check("dead port never froze",    freeze_rise_count,       32'd0);
+	check("dead port froze once",      freeze_rise_count,       32'd1);
 	check("dead port dropped rom_scan", {31'd0, rom_scan},     32'd0);
 	// Let the abandoned ss_dma transfer finish so the port is clean again, then
 	// put the watch back for the rest of the run.
@@ -748,8 +746,6 @@ initial begin
 	watch_bus = 1;
 
 	check("machine released after every refusal",  {31'd0, freeze}, 32'd0);
-	check("no freeze left standing after a refusal", {31'd0, saw_freeze}, 32'd0);
-	watch_freeze = 0;
 
 	// A perfectly good file against a machine that will not stand still. The
 	// freeze is requested, never granted, and given up on. Nothing has been
