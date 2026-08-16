@@ -86,6 +86,7 @@ reg [63:0] ddr_mem [0:63];
 reg [63:0] win_golden [0:63];
 
 wire rom_scan;
+wire cache_flush;
 
 // Diagnostic readback. Purely observational in the DUT; see the observer below.
 wire [5:0]  dbg_state;
@@ -125,7 +126,7 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),
 	.freeze(freeze),
 	.chip_base(24'h000000),
-	.kick_base(KICK_BASE), .rom_scan(rom_scan),
+	.kick_base(KICK_BASE), .rom_scan(rom_scan), .cache_flush(cache_flush),
 	.sd_addr(sd_addr), .sd_cs(sd_cs), .sd_state(sd_state),
 	.sd_uds_n(sd_uds_n), .sd_lds_n(sd_lds_n),
 	.sd_cache_inhibit(sd_cache_inhibit),
@@ -327,6 +328,23 @@ always @(posedge clk)
 // restore and disarmed the moment freeze rises, which also keeps it clear of
 // S_L_RELEASE, where freeze drops while load_busy and a trailing ss_dma cycle
 // can still be up.
+// The cache invalidate has to land INSIDE the freeze. The restore writes chip
+// RAM through the borrowed SDRAM CPU port, and the cache's snoop is tied to
+// chipWE -- the chip DMA path -- so those 2 MB never reach the cache and every
+// line it holds is stale by the end. Clearing it after the machine is running
+// again would be a race with the first instruction fetched from a stale line,
+// which is the kind of bug that reproduces once a session.
+//
+// So: cache_flush must be seen high while freeze is high, and must not still be
+// asserted once the machine has been let go.
+reg saw_flush_frozen  = 0;
+reg saw_flush_running = 0;
+
+always @(posedge clk) begin
+	if (cache_flush &&  freeze) saw_flush_frozen  <= 1'b1;
+	if (cache_flush && !freeze) saw_flush_running <= 1'b1;
+end
+
 reg work_before_freeze = 0;
 reg pre_freeze_armed   = 0;
 reg load_busy_d        = 0;
@@ -880,6 +898,9 @@ initial begin
 	check("no restore work before the freeze", {31'd0, work_before_freeze}, 32'd0);
 
 	check("restore writes only inside chip RAM", {31'd0, wrote_outside_chip}, 32'd0);
+
+	check("cache invalidated inside the freeze", {31'd0, saw_flush_frozen},  32'd1);
+	check("cache flush not left asserted",      {31'd0, saw_flush_running}, 32'd0);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);

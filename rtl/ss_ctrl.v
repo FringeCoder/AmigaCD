@@ -198,6 +198,19 @@ module ss_ctrl
 	input      [24:1]         kick_base,
 	output reg                rom_scan,
 
+	// Invalidate the 68020's cache at the end of a restore, before the machine
+	// is let go. Minimig.sv ORs this into cpu_cache_ctrl[3], the CACR clear
+	// bit, so this reuses the machine's own invalidate rather than adding a
+	// second one; cpu_cache_new edge-detects that bit (cpu_cache_clear).
+	//
+	// Necessary because the restore writes chip RAM through the borrowed SDRAM
+	// CPU port, and the cache's snoop port is tied to chipWE -- the chip DMA
+	// write path (sdram_ctrl.v:135). A DMA write updates the cache; ours does
+	// not go anywhere near it. So without this, a restore rewrites all 2 MB of
+	// chip RAM behind the cache's back and the CPU resumes executing and
+	// reading whatever lines it still holds from before the restore.
+	output reg                cache_flush,
+
 	output     [24:1]         sd_addr,
 	output                    sd_cs,
 	output     [1:0]          sd_state,
@@ -328,6 +341,9 @@ localparam [5:0] S_KICK_WAIT   = 6'd29;
 localparam [5:0] S_KICK_DRAIN  = 6'd30;
 localparam [5:0] S_PAY_KICK    = 6'd31;   // save: write it as payload word 0
 localparam [5:0] S_L_KICK_CHK  = 6'd32;   // restore: compare it against the file
+
+// Invalidate the CPU's cache before letting it go. See `cache_flush`.
+localparam [5:0] S_L_FLUSH     = 6'd33;
 
 // Refusal reasons, as seen by the OSD.
 localparam [3:0] FAIL_MAGIC   = 4'd1;
@@ -476,6 +492,14 @@ reg [5:0]  kick_ret;
 // that is running now. fail_idx freezes both at the refusal; see dbg_idx.
 reg [7:0]  scan_acks;
 reg [23:0] fail_idx;
+
+// How long cache_flush is held in S_L_FLUSH. Generous on purpose: the cost is
+// microseconds on a restore that already took a fifth of a second, and the
+// thing it is buying is that cpu_cache_new's `!cpu_cs`-gated edge detector
+// cannot miss the transition.
+localparam [23:0] FLUSH_HOLD = 24'd256;
+
+reg [23:0] flush_wd;
 reg [31:0] kick_crc;        // fingerprint of the ROM currently in the machine
 reg [31:0] file_kick_crc;   // fingerprint the state file was made under
 // Watchdog on one SDRAM word of the scan. See SCAN_TIMEOUT.
@@ -643,6 +667,8 @@ begin
 	load_busy      <= 1'b0;
 	ddr_read       <= 1'b0;
 	fail_idx       <= {kick_pairs[15:0], scan_acks};
+	cache_flush    <= 1'b0;
+	flush_wd       <= 24'd0;
 	// Every refusal past S_L_FREEZE has to let the machine go again, and the
 	// freeze now goes up before the Kickstart fingerprint rather than after it,
 	// so that is most of them. Dropping it here rather than at each call site
@@ -676,6 +702,8 @@ always @(posedge clk) begin
 		restore_busy     <= 1'b0;
 		rom_scan         <= 1'b0;
 		scan_acks        <= 8'd0;
+		cache_flush      <= 1'b0;
+		flush_wd         <= 24'd0;
 		fail_idx         <= 24'd0;
 		kick_low_held    <= 1'b0;
 		kick_pairs       <= 24'd0;
@@ -1291,7 +1319,7 @@ always @(posedge clk) begin
 		// already happened before anything downstream of here runs.
 		S_L_ST_WAIT: begin
 			if (ser_load_done) begin
-				if (CHIP_PAIRS == 0) state <= S_L_RELEASE;
+				if (CHIP_PAIRS == 0) state <= S_L_FLUSH;
 				else begin
 					chip_addr <= chip_base;
 					state     <= S_L_CH_FETCH;
@@ -1302,7 +1330,7 @@ always @(posedge clk) begin
 		// Chip RAM. pay_idx carries straight on from the state words, so the
 		// payload is walked exactly once, in order, in both directions.
 		S_L_CH_FETCH: begin
-			if (pay_idx == CORE_WORDS_24) state <= S_L_RELEASE;
+			if (pay_idx == CORE_WORDS_24) state <= S_L_FLUSH;
 			else if (pay_held) state <= S_L_CH_ISSUE;
 			else begin
 				rd_idx <= pay_win;
@@ -1353,6 +1381,30 @@ always @(posedge clk) begin
 			end
 		end
 
+		// Everything is in place but the CPU's cache still describes the memory
+		// that was there before, so throw it away before the machine runs.
+		//
+		// Held for a window rather than pulsed for a cycle. cpu_cache_new
+		// edge-detects the CACR clear bit through a shift register clocked only
+		// while `!cpu_cs` (cpu_cache_new.v:229), and for the whole of a restore
+		// that chip select belongs to ss_dma and is busy -- so a one-cycle pulse
+		// can fall entirely inside the window where nothing is sampling. A level
+		// held across the state guarantees the rising edge is seen, and being an
+		// edge it still clears exactly once.
+		//
+		// It is a state of its own, ahead of S_L_RELEASE, so the invalidate
+		// provably happens INSIDE the freeze: the machine cannot refill a line
+		// from stale memory while it is stopped, and by the time it runs again
+		// the cache is empty and chip RAM is the restored image.
+		S_L_FLUSH: begin
+			cache_flush <= 1'b1;
+			if (flush_wd == FLUSH_HOLD) begin
+				flush_wd <= 24'd0;
+				state    <= S_L_RELEASE;
+			end
+			else flush_wd <= flush_wd + 24'd1;
+		end
+
 		// Both halves of the machine are back in place, so it may run again.
 		// Word 0 of the window -- the counter -- has not been touched: it is
 		// the host poller's save handshake, and bumping it here would make the
@@ -1361,6 +1413,7 @@ always @(posedge clk) begin
 		S_L_RELEASE: begin
 			restore_busy   <= 1'b0;
 			dma_write_mode <= 1'b0;
+			cache_flush    <= 1'b0;
 			load_ok        <= 1'b1;
 			load_busy      <= 1'b0;
 			state          <= S_IDLE;
