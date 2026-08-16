@@ -75,7 +75,32 @@ module ss_regshadow
 	// the wanted bits raised. Writing rd_data straight back would set the bits
 	// that happen to be 1 and clear nothing, so a register that should have
 	// gone from 0x03FF to 0x0060 would keep every bit it already had.
-	output            rd_setclear
+	output            rd_setclear,
+
+	// ------------------------------------------------------------- replay
+	//
+	// Writes the shadow back into the chipset by driving the same two buses the
+	// machine writes them on. Minimig.sv muxes reg_address and custom_data_in
+	// onto these while replay_active is high; the chipset cannot tell the
+	// difference, because there is nothing to tell -- an address and a value on
+	// a clk7_en tick is exactly what a CPU or copper write is.
+	//
+	// Must only be started while the machine is frozen. Nothing here checks
+	// that; ss_ctrl owns the freeze and the ordering.
+	input             replay_start,
+	input      [14:0] intreq_in,     // by value; see the header
+	output reg        replay_active,
+
+	// High only on the cycles carrying an actual write. replay_active alone is
+	// not enough to mux on: the sequencer skips every excluded address, and
+	// while it skips, the registered outputs still hold whatever they held
+	// last -- address $000 at the start of a replay. Muxing on the level would
+	// therefore drive a read-window address onto the bus for those cycles,
+	// which is exactly what excluding them was for. Caught by the bench.
+	output reg        replay_we,
+	output reg  [8:1] replay_addr,
+	output reg [15:0] replay_data,
+	output reg        replay_done
 );
 
 // Register addresses are 9 bits ($000-$1FE) and always even, so reg_address_in
@@ -161,5 +186,135 @@ end
 assign rd_data     = shadow[rd_addr];
 assign rd_writable = writable(rd_addr);
 assign rd_setclear = setclear(rd_addr);
+
+// ------------------------------------------------------------------- replay
+//
+// Order is the whole design here. Replaying the shadow in address order would
+// bring DMA and interrupts up partway through, against a chipset that is half
+// old and half new, and the resulting misbehaviour would look like a game bug
+// rather than a restore bug.
+//
+//   1. every plain register, in address order
+//   2. ADKCON      -- audio/disk modulation, wanted before DMA starts
+//   3. INTREQ      -- the pending interrupts, from the exported value
+//   4. INTENA      -- enables interrupts, so after the requests are in place
+//   5. DMACON      -- starts DMA, so last of all
+//
+// Steps 2-5 are set/clear registers and take two writes each: 0x7FFF to clear
+// every bit, then 0x8000 with the wanted bits raised.
+//
+// Strobes and the read window are never replayed -- writable() excludes them,
+// and step 1 skips anything it excludes, so the two sides cannot disagree.
+localparam [2:0] R_IDLE   = 3'd0;
+localparam [2:0] R_PLAIN  = 3'd1;
+localparam [2:0] R_ADKCON = 3'd2;
+localparam [2:0] R_INTREQ = 3'd3;
+localparam [2:0] R_INTENA = 3'd4;
+localparam [2:0] R_DMACON = 3'd5;
+localparam [2:0] R_DONE   = 3'd6;
+
+reg [2:0] rstate;
+reg [8:0] ridx;      // 9 bits so it can pass 255 and terminate
+reg       rphase;    // 0 = the clearing write, 1 = the setting write
+
+// The value each set/clear step restores. INTREQ is the exported register
+// rather than a shadow entry, for the reason in the header.
+function [15:0] sc_value(input [2:0] st);
+begin
+	case (st)
+		R_ADKCON: sc_value = shadow[8'h4F];            // $09E >> 1
+		R_INTREQ: sc_value = {1'b0, intreq_in};
+		R_INTENA: sc_value = shadow[8'h4D];            // $09A >> 1
+		default:  sc_value = shadow[8'h4B];            // $096 >> 1, DMACON
+	endcase
+end
+endfunction
+
+function [8:1] sc_addr(input [2:0] st);
+begin
+	case (st)
+		R_ADKCON: sc_addr = 8'h4F;
+		R_INTREQ: sc_addr = 8'h4E;
+		R_INTENA: sc_addr = 8'h4D;
+		default:  sc_addr = 8'h4B;
+	endcase
+end
+endfunction
+
+// One step per clk7_en, because that is the tick the chipset decodes writes on.
+// Holding an address for several clk7_en ticks would write it several times,
+// which is harmless for a plain register and wrong for a set/clear one.
+always @(posedge clk) begin
+	if (!rst_n) begin
+		rstate        <= R_IDLE;
+		ridx          <= 9'd0;
+		rphase        <= 1'b0;
+		replay_active <= 1'b0;
+		replay_we     <= 1'b0;
+		replay_done   <= 1'b0;
+		replay_addr   <= 8'd0;
+		replay_data   <= 16'd0;
+	end
+	else begin
+		replay_done <= 1'b0;
+
+		case (rstate)
+		R_IDLE: begin
+			if (replay_start) begin
+				rstate        <= R_PLAIN;
+				ridx          <= 9'd0;
+				rphase        <= 1'b0;
+				replay_active <= 1'b1;
+				replay_we     <= 1'b0;
+			end
+		end
+
+		R_PLAIN: if (clk7_en) begin
+			if (ridx == 9'd256) begin
+				rstate    <= R_ADKCON;
+				rphase    <= 1'b0;
+				replay_we <= 1'b0;
+			end
+			else if (writable(ridx[7:0]) && !setclear(ridx[7:0])) begin
+				replay_addr <= ridx[7:0];
+				replay_data <= shadow[ridx[7:0]];
+				replay_we   <= 1'b1;
+				ridx        <= ridx + 9'd1;
+			end
+			else begin
+				replay_we <= 1'b0;      // excluded: skipped, nothing driven
+				ridx      <= ridx + 9'd1;
+			end
+		end
+
+		R_ADKCON, R_INTREQ, R_INTENA, R_DMACON: if (clk7_en) begin
+			replay_addr <= sc_addr(rstate);
+			replay_we   <= 1'b1;
+			// Clear everything first, then set what the state says. Both writes
+			// are needed: without the clear, bits the machine has set now but
+			// the state did not would survive the restore.
+			replay_data <= rphase ? (16'h8000 | (sc_value(rstate) & 16'h7FFF))
+			                      :  16'h7FFF;
+			rphase      <= ~rphase;
+			if (rphase) rstate <= rstate + 3'd1;
+		end
+
+		// Wait one more clk7_en before dropping the mux. The outputs are
+		// registered, so the value set up on the last clk7_en is not sampled by
+		// the chipset until the next one -- and the last value is DMACON's set
+		// write, the single most ordering-critical write in the sequence.
+		// Dropping replay_active first would lose it silently and leave DMA
+		// off in a machine that looks entirely restored.
+		R_DONE: if (clk7_en) begin
+			replay_active <= 1'b0;
+			replay_we     <= 1'b0;
+			replay_done   <= 1'b1;
+			rstate        <= R_IDLE;
+		end
+
+		default: rstate <= R_IDLE;
+		endcase
+	end
+end
 
 endmodule

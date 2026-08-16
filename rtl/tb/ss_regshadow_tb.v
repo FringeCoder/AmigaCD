@@ -24,17 +24,75 @@ wire [15:0] rd_data;
 wire        rd_writable;
 wire        rd_setclear;
 
+reg         replay_start = 0;
+reg  [14:0] intreq_in = 0;
+wire        replay_active;
+wire        replay_we;
+wire  [8:1] replay_addr;
+wire [15:0] replay_data;
+wire        replay_done;
+
 integer errors = 0;
+integer i;
 
 ss_regshadow dut
 (
 	.clk(clk), .clk7_en(clk7_en), .rst_n(rst_n),
 	.reg_address_in(reg_address_in), .data_in(data_in),
 	.rd_addr(rd_addr), .rd_data(rd_data), .rd_writable(rd_writable),
-	.rd_setclear(rd_setclear)
+	.rd_setclear(rd_setclear),
+	.replay_start(replay_start), .intreq_in(intreq_in),
+	.replay_active(replay_active), .replay_we(replay_we), .replay_addr(replay_addr),
+	.replay_data(replay_data), .replay_done(replay_done)
 );
 
 always #5 clk = ~clk;
+
+// Replay monitor. Records every write the sequencer drives, in order, exactly
+// as the chipset would take them: on a clk7_en tick while the mux is handed
+// over. Order is what the checks below are about, so a monitor that only kept
+// final values would miss the failure this design exists to avoid.
+integer rec_n = 0;
+reg     recording = 0;
+reg  [8:1] rec_addr [0:1023];
+reg [15:0] rec_data [0:1023];
+reg saw_strobe  = 0;
+reg saw_readwin = 0;
+
+always @(posedge clk) begin
+	if (recording && replay_we && clk7_en) begin
+		rec_addr[rec_n] = replay_addr;
+		rec_data[rec_n] = replay_data;
+		rec_n = rec_n + 1;
+		if (replay_addr == 8'h45 || replay_addr == 8'h46 ||   // COPJMP1/2
+		    replay_addr == 8'h1C || replay_addr == 8'h1E)     // STREQU/STRHOR
+			saw_strobe <= 1'b1;
+		if (replay_addr < 8'h10) saw_readwin <= 1'b1;
+	end
+end
+
+// First recorded index for a register address, or -1.
+function integer idx_of(input [8:0] addr);
+	integer k;
+begin
+	idx_of = -1;
+	for (k = rec_n - 1; k >= 0; k = k - 1)
+		if (rec_addr[k] == addr[8:1]) idx_of = k;
+end
+endfunction
+
+function [15:0] nth_val(input integer k);
+begin
+	nth_val = (k >= 0 && k < rec_n) ? rec_data[k] : 16'hDEAD;
+end
+endfunction
+
+// Value written for a plain register.
+function [15:0] val_of(input [8:0] addr);
+begin
+	val_of = nth_val(idx_of(addr));
+end
+endfunction
 
 task check(input [511:0] name, input [31:0] actual, input [31:0] want);
 begin
@@ -152,6 +210,59 @@ initial begin
 	rd(9'h120); check("SPR0PTH recorded", {16'd0, rd_data}, 32'h00001234);
 	rd(9'h0A6); check("AUD0PER recorded", {16'd0, rd_data}, 32'h000000FA);
 	rd(9'h19E); check("COLOR31 recorded", {16'd0, rd_data}, 32'h00000FFF);
+
+	// ------------------------------------------------------------- replay
+	//
+	// Ordering is the point. Replaying in address order would bring DMA and
+	// interrupts up partway through, against a chipset that is half old and
+	// half new, and that misbehaves later rather than failing here -- which is
+	// why the monitor records every write and the checks below interrogate the
+	// sequence rather than the final state.
+	@(negedge clk);
+	rec_n  = 0;
+	recording = 1;
+	intreq_in = 15'h0011;
+	replay_start = 1;
+	@(negedge clk);
+	replay_start = 0;
+
+	// clk7_en is driven from here rather than free-running, so the replay has
+	// to be clocked by hand. Bounded rather than a bare wait: a sequencer that
+	// never terminates is a plausible bug and should fail the run, not hang it.
+	for (i = 0; i < 4000 && !replay_done; i = i + 1) begin
+		@(negedge clk); clk7_en = 1'b1;
+		@(negedge clk); clk7_en = 1'b0;
+	end
+	check("replay finished", {31'd0, replay_done}, 32'd1);
+	@(negedge clk);
+	recording = 0;
+
+	// Nothing excluded may ever be driven onto the bus.
+	check("replay drove no strobe",      {31'd0, saw_strobe},   32'd0);
+	check("replay drove no read window", {31'd0, saw_readwin},  32'd0);
+
+	// Plain registers come back with their values.
+	check("replay wrote COLOR00", {16'd0, val_of(9'h180)}, 32'h00000456);
+	check("replay wrote BPLCON0", {16'd0, val_of(9'h100)}, 32'h00004200);
+	check("replay wrote COLOR31", {16'd0, val_of(9'h19E)}, 32'h00000FFF);
+
+	// The set/clear four are each a clearing write then a setting write.
+	check("DMACON cleared first",  {16'd0, nth_val(idx_of(9'h096))},     32'h00007FFF);
+	check("DMACON set after",      {16'd0, nth_val(idx_of(9'h096) + 1)}, 32'h00008060);
+	check("INTENA set after clear",{16'd0, nth_val(idx_of(9'h09A) + 1)}, 32'h0000C000);
+	check("ADKCON set after clear",{16'd0, nth_val(idx_of(9'h09E) + 1)}, 32'h00008800);
+
+	// INTREQ is replayed from the exported value, not from a shadow entry.
+	check("INTREQ from the export", {16'd0, nth_val(idx_of(9'h09C) + 1)}, 32'h00008011);
+
+	// And the order that matters: DMA and interrupts last, DMACON after INTENA,
+	// every plain register before any of them.
+	check("ADKCON before INTREQ", {31'd0, (idx_of(9'h09E) < idx_of(9'h09C))}, 32'd1);
+	check("INTREQ before INTENA", {31'd0, (idx_of(9'h09C) < idx_of(9'h09A))}, 32'd1);
+	check("INTENA before DMACON", {31'd0, (idx_of(9'h09A) < idx_of(9'h096))}, 32'd1);
+	check("colours before DMACON",{31'd0, (idx_of(9'h180) < idx_of(9'h096))}, 32'd1);
+	check("DMACON set is the last write",
+	      {31'd0, ((idx_of(9'h096) + 1) == (rec_n - 1))}, 32'd1);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
