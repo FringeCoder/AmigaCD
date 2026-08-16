@@ -68,7 +68,14 @@ module ss_regshadow
 	// to validate than a sparse one -- but the restore side must only replay
 	// the tracked ones, and this is the same predicate both sides use so they
 	// cannot disagree about which those are.
-	output            rd_writable
+	output            rd_writable,
+
+	// Whether replaying rd_addr needs the set/clear dance rather than a plain
+	// write: first a write of 16'h7FFF to clear every bit, then 16'h8000 with
+	// the wanted bits raised. Writing rd_data straight back would set the bits
+	// that happen to be 1 and clear nothing, so a register that should have
+	// gone from 0x03FF to 0x0060 would keep every bit it already had.
+	output            rd_setclear
 );
 
 // Register addresses are 9 bits ($000-$1FE) and always even, so reg_address_in
@@ -87,12 +94,11 @@ function writable(input [7:0] idx);
 begin
 	a = {idx, 1'b0};
 	writable =
-		// Set/clear registers. Captured by value via their read counterparts;
-		// the last write is not the contents. See the header.
-		(a != 9'h096) &&   // DMACON
-		(a != 9'h09A) &&   // INTENA
-		(a != 9'h09C) &&   // INTREQ
-		(a != 9'h09E) &&   // ADKCON
+		// INTREQ is the one set/clear register hardware also writes: Paula
+		// raises a bit whenever it wants an interrupt. Accumulating writes
+		// here would drift from the real register within a frame, so it is
+		// captured from paula_intcontroller's own intreq instead.
+		(a != 9'h09C) &&
 		// Strobes. Writing one is an event, not a value.
 		(a != 9'h038) &&   // STREQU
 		(a != 9'h03A) &&   // STRVBL
@@ -108,6 +114,39 @@ begin
 end
 endfunction
 
+// DMACON, INTENA and ADKCON take bit 15 as "set the bits I have raised" and
+// otherwise "clear them", so the last value written is not the register's
+// contents. They are still shadowed here rather than exported from paula and
+// agnus, because the same rule the hardware applies can be applied to the
+// shadow entry and the result IS the contents.
+//
+// Two reasons that is better than exporting the real registers. DMACON is
+// split -- paula keeps bits [4:0] and dmaen, agnus keeps the bitplane, copper,
+// blitter and sprite bits -- so an export would have to gather and reassemble
+// two partial copies. And an export means new ports through paula.v, agnus.v
+// and minimig.v, which is precisely the plumbing this approach exists to
+// avoid.
+//
+// INTREQ is excluded from this and from the shadow entirely: Paula raises its
+// bits in hardware, not only by write, so an accumulator would drift from the
+// real register within a frame.
+function setclear(input [7:0] idx);
+	reg [8:0] a;
+begin
+	a = {idx, 1'b0};
+	setclear = (a == 9'h096) ||   // DMACON
+	           (a == 9'h09A) ||   // INTENA
+	           (a == 9'h09E);     // ADKCON
+end
+endfunction
+
+wire [15:0] cur = shadow[wr_idx];
+
+// The hardware's own rule, bit for bit: see paula.v:167 and
+// paula_intcontroller.v:54. Bit 15 is the direction and never stored.
+wire [15:0] applied = data_in[15] ? (cur |  {1'b0, data_in[14:0]})
+                                  : (cur & ~{1'b0, data_in[14:0]});
+
 integer i;
 
 always @(posedge clk) begin
@@ -115,11 +154,12 @@ always @(posedge clk) begin
 		for (i = 0; i < 256; i = i + 1) shadow[i] <= 16'd0;
 	end
 	else if (clk7_en && writable(wr_idx)) begin
-		shadow[wr_idx] <= data_in;
+		shadow[wr_idx] <= setclear(wr_idx) ? applied : data_in;
 	end
 end
 
 assign rd_data     = shadow[rd_addr];
 assign rd_writable = writable(rd_addr);
+assign rd_setclear = setclear(rd_addr);
 
 endmodule

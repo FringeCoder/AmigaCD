@@ -22,6 +22,7 @@ reg [15:0] data_in = 16'd0;
 reg  [7:0] rd_addr = 8'd0;
 wire [15:0] rd_data;
 wire        rd_writable;
+wire        rd_setclear;
 
 integer errors = 0;
 
@@ -29,7 +30,8 @@ ss_regshadow dut
 (
 	.clk(clk), .clk7_en(clk7_en), .rst_n(rst_n),
 	.reg_address_in(reg_address_in), .data_in(data_in),
-	.rd_addr(rd_addr), .rd_data(rd_data), .rd_writable(rd_writable)
+	.rd_addr(rd_addr), .rd_data(rd_data), .rd_writable(rd_writable),
+	.rd_setclear(rd_setclear)
 );
 
 always #5 clk = ~clk;
@@ -89,20 +91,34 @@ initial begin
 	rd(9'h182);
 	check("no write without clk7_en", {16'd0, rd_data},     32'h00000000);
 
-	// Set/clear registers. The last value written is NOT the register's
-	// contents -- bit 15 decides whether the raised bits are set or cleared --
-	// so replaying it verbatim would corrupt the machine. Captured by value
-	// through DMACONR/INTENAR/INTREQR/ADKCONR instead.
-	wr(9'h096, 16'h8200);   // DMACON
-	wr(9'h09A, 16'hC000);   // INTENA
-	wr(9'h09C, 16'h8020);   // INTREQ
+	// Set/clear registers. Bit 15 is the direction and is never stored, so the
+	// entry must accumulate the way the hardware does (paula.v:167) rather
+	// than record the last value written. A shadow that stored writes verbatim
+	// would report 0x8200 here instead of 0x0200.
+	wr(9'h096, 16'h8200);   // DMACON: set bit 9
+	rd(9'h096); check("DMACON accumulates a set",   {16'd0, rd_data}, 32'h00000200);
+	wr(9'h096, 16'h8060);   // set bits 5 and 6, keeping bit 9
+	rd(9'h096); check("DMACON keeps earlier bits",  {16'd0, rd_data}, 32'h00000260);
+	wr(9'h096, 16'h0200);   // clear bit 9 only
+	rd(9'h096); check("DMACON clears without bit15",{16'd0, rd_data}, 32'h00000060);
+	check("DMACON needs set/clear replay", {31'd0, rd_setclear}, 32'd1);
+	check("DMACON is replayable",          {31'd0, rd_writable}, 32'd1);
+
+	wr(9'h09A, 16'hC000);   // INTENA: set INTEN
+	rd(9'h09A); check("INTENA accumulates",        {16'd0, rd_data}, 32'h00004000);
 	wr(9'h09E, 16'h8800);   // ADKCON
-	rd(9'h096); check("DMACON not shadowed", {16'd0, rd_data}, 32'd0);
-	            check("DMACON not replayable", {31'd0, rd_writable}, 32'd0);
-	rd(9'h09A); check("INTENA not shadowed", {16'd0, rd_data}, 32'd0);
-	            check("INTENA not replayable", {31'd0, rd_writable}, 32'd0);
-	rd(9'h09C); check("INTREQ not shadowed", {16'd0, rd_data}, 32'd0);
-	rd(9'h09E); check("ADKCON not shadowed", {16'd0, rd_data}, 32'd0);
+	rd(9'h09E); check("ADKCON accumulates",        {16'd0, rd_data}, 32'h00000800);
+
+	// INTREQ is the exception among the four: Paula raises its bits in
+	// hardware, so accumulating writes would drift from the real register
+	// within a frame. It comes from paula_intcontroller's own intreq instead.
+	wr(9'h09C, 16'h8020);
+	rd(9'h09C); check("INTREQ not shadowed",   {16'd0, rd_data},     32'd0);
+	            check("INTREQ not replayable", {31'd0, rd_writable}, 32'd0);
+
+	// A plain register must NOT take the set/clear path, or every colour write
+	// would OR into the previous colour instead of replacing it.
+	rd(9'h180); check("COLOR00 is a plain write", {31'd0, rd_setclear}, 32'd0);
 
 	// Strobes. Writing one is an event. A replayed COPJMP1 restarts the copper
 	// at COP1LC in the middle of a restore, which is the kind of bug that
