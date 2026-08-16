@@ -182,13 +182,28 @@ wire [15:0] cur = shadow[wr_idx];
 wire [15:0] applied = data_in[15] ? (cur |  {1'b0, data_in[14:0]})
                                   : (cur & ~{1'b0, data_in[14:0]});
 
-integer i;
 
+// Zeroed at power-up rather than on reset. An `initial` block is the memory's
+// initial contents to Quartus -- it costs no logic and does not stop inference
+// -- whereas a reset over the array does both.
+//
+// The contents matter, so this is not decoration: a save streams all 256
+// entries, and an entry for a register the game never wrote would otherwise be
+// undefined, get written into the payload, and be replayed into the chipset on
+// restore. Zero is the value the machine powers up with.
+initial begin : shadow_init
+	integer k;
+	for (k = 0; k < 256; k = k + 1) shadow[k] = 16'd0;
+end
+
+// No reset over the array, deliberately. Clearing 256 entries on reset stops
+// Quartus inferring a memory for them: it built 4096 flip-flops and a 256-way
+// read mux instead, which cost ~5000 ALMs (63% -> 75% of the device) and put
+// the design 0.357 ns behind timing. Nothing needs the reset either -- a
+// restore's load writes every entry of the section before the replay reads
+// any of them, and outside a restore the machine's own writes fill it.
 always @(posedge clk) begin
-	if (!rst_n) begin
-		for (i = 0; i < 256; i = i + 1) shadow[i] <= 16'd0;
-	end
-	else if (ld_we) begin
+	if (ld_we) begin
 		// A restore loading the saved section. Takes precedence over the snoop:
 		// the machine is frozen while this runs, so there is nothing legitimate
 		// for the snoop to see, and if there were, the payload is what the
