@@ -251,12 +251,14 @@ initial begin
 	wr(9'h05C, 16'h0040);   // BLTSIZV (ECS)
 	wr(9'h05E, 16'h0040);   // BLTSIZH (ECS)
 	wr(9'h030, 16'h00FF);   // SERDAT  -- starts a transmission
+	wr(9'h024, 16'h8100);   // DSKLEN  -- arms disk DMA on the second write
 	wr(9'h026, 16'hFFFF);   // DSKDAT  -- writes into the disk buffer
 	wr(9'h0AA, 16'h1234);   // AUD0DAT -- a sample event for the channel
 	rd(9'h058); check("BLTSIZE not shadowed",  {31'd0, rd_writable}, 32'd0);
 	rd(9'h05C); check("BLTSIZV not shadowed",  {31'd0, rd_writable}, 32'd0);
 	rd(9'h05E); check("BLTSIZH not shadowed",  {31'd0, rd_writable}, 32'd0);
 	rd(9'h030); check("SERDAT not shadowed",   {31'd0, rd_writable}, 32'd0);
+	rd(9'h024); check("DSKLEN not shadowed",   {31'd0, rd_writable}, 32'd0);
 	rd(9'h026); check("DSKDAT not shadowed",   {31'd0, rd_writable}, 32'd0);
 	rd(9'h0AA); check("AUD0DAT not shadowed",  {31'd0, rd_writable}, 32'd0);
 

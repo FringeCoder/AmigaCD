@@ -203,6 +203,19 @@ begin
 		(a != 9'h05E) &&   // BLTSIZH (ECS)
 		// SERDAT starts a serial transmission on write, same reasoning.
 		(a != 9'h030) &&   // SERDAT
+		// DSKLEN arms disk DMA. paula_floppy.v:689 is
+		//     dmaen <= data_in[15] & dsklen[15]
+		// -- the second of two writes with bit 15 set starts the transfer, and
+		// the "first" write is whatever the LIVE register holds when the replay
+		// runs. A machine saved mid-disk-load has bit 15 set in the shadow, and
+		// a machine being replaced may have it set too, so a replay can arm a
+		// disk DMA into the chip RAM the restore has just written. Same shape
+		// as the blitter fault, one condition rarer.
+		//
+		// Nothing durable is lost: a driver writes DSKLEN twice for every
+		// transfer it starts, so the length is always re-established before it
+		// is used.
+		(a != 9'h024) &&   // DSKLEN
 		// DSKDAT writes a word into the disk buffer at the current pointer
 		// (paula_floppy.v:725) -- a replay would push a stray word into a
 		// track being written.

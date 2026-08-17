@@ -666,7 +666,9 @@ initial begin
 	// per entry for the packing to be provable.
 	sh_wr(8'h10, 16'h1234);   // $020
 	sh_wr(8'h11, 16'h5678);   // $022
-	sh_wr(8'h12, 16'h9ABC);   // $024
+	// $028, not $024: DSKLEN lives at $024 and is no longer shadowed, since
+	// replaying it can arm a disk DMA. $028 is a plain register.
+	sh_wr(8'h14, 16'h9ABC);   // $028
 	sh_wr(8'h15, 16'hDEF0);   // $02A
 	sh_wr(8'h1B, 16'hA5A5);   // $036
 
@@ -726,10 +728,10 @@ initial begin
 	// plausible.
 	check("shadow word 8 packs $020,$022",
 	      ddr_word(W_SHADOW + 8),  {16'h5678, 16'h1234});
-	check("shadow word 9 packs $024,$026",
-	      ddr_word(W_SHADOW + 9),  {16'h0000, 16'h9ABC});
+	check("shadow word 9 packs $024,$026, both excluded and so zero",
+	      ddr_word(W_SHADOW + 9),  32'h00000000);
 	check("shadow word 10 packs $028,$02A",
-	      ddr_word(W_SHADOW + 10), {16'hDEF0, 16'h0000});
+	      ddr_word(W_SHADOW + 10), {16'hDEF0, 16'h9ABC});
 	check("shadow word 13 packs $034,$036",
 	      ddr_word(W_SHADOW + 13), {16'hA5A5, 16'h0000});
 	check("shadow word 0 is the read window, zero",
@@ -816,17 +818,18 @@ initial begin
 	// every check above it would still pass.
 	check("replayed $020", {16'd0, seen_replay[8'h10]}, 32'h00001234);
 	check("replayed $022", {16'd0, seen_replay[8'h11]}, 32'h00005678);
-	check("replayed $024", {16'd0, seen_replay[8'h12]}, 32'h00009ABC);
-	// $028, not $026: DSKDAT lives at $026 and is excluded from the shadow now
-	// that writing it pushes a word into the disk buffer, so it is never
-	// replayed and cannot stand in for an untouched entry.
-	check("replayed $028 is still zero",
-	      {16'd0, seen_replay[8'h14]}, 32'h00000000);
+	check("replayed $028", {16'd0, seen_replay[8'h14]}, 32'h00009ABC);
+	// The untouched neighbour has to be a register that IS replayed, or the
+	// check passes for the wrong reason. $02E (COPCON) is plain and unwritten;
+	// $024 and $026 are both excluded now and never appear at all.
+	check("replayed $02E is still zero",
+	      {16'd0, seen_replay[8'h17]}, 32'h00000000);
 	check("replayed $02A", {16'd0, seen_replay[8'h15]}, 32'h0000DEF0);
 	check("replayed $036", {16'd0, seen_replay[8'h1B]}, 32'h0000A5A5);
 	check("every plain entry was replayed",
 	      {31'd0, seen_replay_valid[8'h10] & seen_replay_valid[8'h14] &
-	              seen_replay_valid[8'h1B] & seen_replay_valid[8'hFF]}, 32'd1);
+	              seen_replay_valid[8'h17] & seen_replay_valid[8'h1B] &
+	              seen_replay_valid[8'hFF]}, 32'd1);
 
 	// Chip RAM back in SDRAM, in SDRAM's own word order -- the inverse of the
 	// 68k-order file contract asserted above, pinned to literals for the same
