@@ -70,6 +70,7 @@
 // into /tmp/ss_peek and the next poll reads four longwords from there into
 // the log. Chip RAM byte address B is word address B/2.
 #define SS_PEEK_BIT        0x0020
+#define SS_PEEK_ARM        0x0010   // io_din[4]: fetch. Without it, read only.
 #define SS_PEEK_TRIGGER    "/tmp/ss_peek"
 #define SS_PEEK_WORDS      13
 #define SS_DIAG_SIG        0x55AA
@@ -198,10 +199,10 @@ static void ss_diag_read(uint16_t *w)
 // One peek transaction. addr is a 24-bit SDRAM WORD address.
 static void ss_peek_request(uint32_t addr)
 {
-	uint32_t hi = (addr >> 17) & 0xFF;
-	uint16_t cls = (uint16_t)(SS_DIAG_ADDR | SS_PEEK_BIT
-	                          | ((hi & 0xE0) << 1)   // -> io_din[8:6]
-	                          | (hi & 0x1F));        // -> io_din[4:0]
+	uint32_t hi = (addr >> 17) & 0x7F;
+	uint16_t cls = (uint16_t)(SS_DIAG_ADDR | SS_PEEK_BIT | SS_PEEK_ARM
+	                          | ((hi & 0x70) << 2)   // -> io_din[8:6]
+	                          | (hi & 0x0F));        // -> io_din[3:0]
 	EnableIO();
 	spi8(UIO_DMA_READ);
 	spi_w(cls);
@@ -213,6 +214,8 @@ static void ss_peek_read(uint16_t *w)
 {
 	EnableIO();
 	spi8(UIO_DMA_READ);
+	// No arm bit: this reads the last fetch back and must not start another,
+	// or it would clear the valid flag it is here to report.
 	spi_w((uint16_t)(SS_DIAG_ADDR | SS_PEEK_BIT));
 	spi_w(0);
 	for (int i = 0; i < SS_PEEK_WORDS; i++) w[i] = (uint16_t)spi_w(0);
