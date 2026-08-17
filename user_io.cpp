@@ -38,6 +38,7 @@
 #include "support/physical_disc/physical_disc_autoboot.h"
 #include "support/minimig/cdtv_cd.h"
 #include "support/minimig/minimig_ssdiag.h"
+#include "support/minimig/minimig_savestate.h"
 #include "support/snac/snac_psx.h"
 #ifdef PROFILING
 #include "profiling.h"
@@ -2053,6 +2054,28 @@ int process_ss(const char *rom_name, int enable)
 				if (size) size = (size + 2) * 4;
 				if (size > 0 && size <= ss_size)
 				{
+					// Amiga only: this is the one core whose payload format is
+					// defined here rather than in the core alone, in
+					// support/minimig/minimig_savestate.cpp, and validating
+					// before the write is what stops a half-written or foreign
+					// window reaching the disk under a name the user will later
+					// try to load. The core refuses a bad file on the way back
+					// in, but by then the file has replaced a good one.
+					//
+					// Every other core keeps the original behaviour: their
+					// windows are their own business and nothing here knows
+					// their format.
+					if (is_minimig())
+					{
+						ss_header_t h;
+						if (!ss_header_parse((const uint32_t *)base[i], ss_size / 4, &h))
+						{
+							printf("process_ss: slot %d failed validation, not written\n", i + 1);
+							Info("Save state not written", 2000);
+							continue;
+						}
+					}
+
 					MenuHide();
 					Info("Saving the state", 500);
 

@@ -34,7 +34,10 @@ static void build_window(uint32_t *win, uint32_t core_words)
 
 int main(void)
 {
-	uint32_t win[SS_MAX_WORDS];
+	// Static, not automatic: the window is 4 MB and the default thread stack
+	// on the Windows dev machine is 1 MB, so an automatic one overflows the
+	// stack before main() runs a single check. Linux CI never noticed.
+	static uint32_t win[SS_MAX_WORDS];
 	ss_header_t h;
 
 	build_window(win, 3);
