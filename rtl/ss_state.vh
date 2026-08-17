@@ -1,3 +1,9 @@
+`ifndef SS_STATE_VH
+`define SS_STATE_VH
+// Guarded because two files include it now: Minimig.sv and
+// ss_state_fanout.v. Without this the second include redefines both
+// macros and Quartus warns on every build.
+
 // ---------------------------------------------------------------------------
 // Save state vector, Phase 1A.
 //
@@ -54,3 +60,5 @@
 
 // 16 registers + PC + USP + VBR (32 each) + SR (16) + CACR (4) + 4 map bits
 `define SS_STATE_W (16*32 + 32 + 32 + 32 + 16 + 4 + 4)
+
+`endif
