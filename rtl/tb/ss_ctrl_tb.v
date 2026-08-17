@@ -90,6 +90,11 @@ integer errors = 0;
 integer latency = 0;
 integer i;
 
+// Its own loop variable: `i` is shared with the mock's init loops and the
+// refusal cases, and a reference CRC that walks the section with a clobbered
+// index reads out of range and comes back X.
+integer si;
+
 // Chip RAM as the restore leaves it. The read model below is a pure function
 // of the address and is deliberately NOT fed from this array: it is a
 // write-capture buffer only, pre-poisoned so that a restore which never wrote
@@ -131,6 +136,12 @@ reg  [15:0] sh_snoop_data = 16'd0;
 // What the bench expects the section to contain, so the payload checks and the
 // reference CRC agree with one source rather than two lists.
 reg  [15:0] exp_shadow [0:SHADOW_ENTRIES-1];
+
+// Zeroed here rather than inside the stimulus block, where an earlier attempt
+// silently did not apply and left the array X -- which showed up only as a
+// reference CRC of xxxxxxxx, not as a missing initialisation.
+integer ei;
+initial for (ei = 0; ei < SHADOW_ENTRIES; ei = ei + 1) exp_shadow[ei] = 16'd0;
 
 wire  [7:0] sh_rd_addr;
 wire [15:0] sh_rd_data;
@@ -724,8 +735,8 @@ initial begin
 	// words. It still has to be in the CRC: a design that streamed the section
 	// but left it out of the running value, or vice versa, would round-trip
 	// against itself and fail only here.
-	for (i = 0; i < SHADOW_WORDS; i = i + 1)
-		crc_word_step({exp_shadow[2*i + 1], exp_shadow[2*i]});
+	for (si = 0; si < SHADOW_WORDS; si = si + 1)
+		crc_word_step({exp_shadow[2*si + 1], exp_shadow[2*si]});
 	crc_word_step({bswap16(16'hD001), bswap16(16'hD000)});
 	crc_word_step({bswap16(16'hD003), bswap16(16'hD002)});
 	crc_word_step({bswap16(16'hD005), bswap16(16'hD004)});

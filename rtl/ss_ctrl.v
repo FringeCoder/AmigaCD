@@ -371,7 +371,13 @@ localparam [5:0] S_L_FLUSH     = 6'd33;
 
 // Chipset register shadow: streamed out on a save, streamed back in and then
 // replayed into the machine on a restore.
+// Reading the shadow costs a settle cycle per entry: its read port is
+// registered, because a 256-deep asynchronous read was the design's critical
+// path. So each entry is "address is already up, wait" then "sample", and a
+// payload word takes two of those.
 localparam [5:0] S_SHADOW_RD   = 6'd34;
+localparam [5:0] S_SHADOW_LOW  = 6'd39;
+localparam [5:0] S_SHADOW_HI   = 6'd40;
 localparam [5:0] S_SHADOW_Q    = 6'd35;
 localparam [5:0] S_L_SH_FETCH  = 6'd36;
 localparam [5:0] S_L_SH_LOAD   = 6'd37;
@@ -1028,6 +1034,12 @@ always @(posedge clk) begin
 		// pack. shadow_rd_addr is registered and rd_data is combinational on it,
 		// so the value for an address is valid the cycle after it is driven --
 		// reading in the same cycle would pack the previous entry.
+		// The address for this entry is already on shadow_rd_addr; this cycle
+		// is the settle the registered read needs. Sampling in the same visit
+		// that advances the address -- which is what this did -- takes entry
+		// N-1 for every N and shifts the whole section by one. An all-zero
+		// section cannot show that, which is why ss_ctrl_tb now writes real
+		// values into the shadow before the save.
 		S_SHADOW_RD: begin
 			if (sh_idx == SHADOW_ENTRIES) begin
 				if (CHIP_PAIRS == 0) begin
@@ -1041,22 +1053,30 @@ always @(posedge clk) begin
 					state      <= S_CHIP_ISSUE;
 				end
 			end
-			else if (!sh_half) begin
-				sh_low         <= shadow_rd_data;
-				sh_half        <= 1'b1;
-				shadow_rd_addr <= shadow_rd_addr + 8'd1;
-				sh_idx         <= sh_idx + 9'd1;
-			end
-			else state <= S_SHADOW_Q;
+			else state <= S_SHADOW_LOW;
 		end
+
+		// shadow_rd_data is this entry. Take it, then point at the next one and
+		// give that its own settle in S_SHADOW_HI.
+		S_SHADOW_LOW: begin
+			sh_low         <= shadow_rd_data;
+			shadow_rd_addr <= shadow_rd_addr + 8'd1;
+			sh_idx         <= sh_idx + 9'd1;
+			state          <= S_SHADOW_HI;
+		end
+
+		S_SHADOW_HI: state <= S_SHADOW_Q;
 
 		// Two entries per payload word, low entry in the low half -- the same
 		// order the restore unpacks them in, and the only place that order is
 		// written down twice.
+		//
+		// Waiting on word_busy here is safe for the read: the address has been
+		// stable since S_SHADOW_LOW, so shadow_rd_data holds this entry however
+		// many cycles the wait takes.
 		S_SHADOW_Q: begin
 			if (!word_busy) begin
 				queue_word({shadow_rd_data, sh_low});
-				sh_half        <= 1'b0;
 				shadow_rd_addr <= shadow_rd_addr + 8'd1;
 				sh_idx         <= sh_idx + 9'd1;
 				state          <= S_SHADOW_RD;
