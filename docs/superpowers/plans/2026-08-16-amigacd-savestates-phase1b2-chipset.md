@@ -301,3 +301,51 @@ matched 32339 pins for the shadow and 22108 for ss_ctrl, i.e. the wildcards
 matched most of the design, so a `-through` filter built that way is worthless
 and silently returns the global worst path. Use `-detail full_path -file` and
 read the node names instead.
+
+## What the replay actually did before it was simulated (2026-08-17)
+
+Everything above was implemented and every module bench passed, and the replay
+still wrote nothing into the machine. Both faults are of the same kind: the
+module benches end at `ss_regshadow`'s pins, and nothing had ever elaborated
+`minimig.v` to see what happened after them.
+
+`rtl/sim/ssmux/tb_ss_regbus_mux.sv` in the core repo now does. It instantiates
+the real `minimig` -- real agnus, paula, denise, gary -- with a real
+`ss_regshadow` beside it, wired as `Minimig.sv` wires them, including both
+`amiga_clk` instances and the freeze, and then reads the chipset's own
+flip-flops. On the wiring as it stood, all three sampled registers stayed at
+zero after a replay.
+
+**1. The freeze stops the clock the writes are decoded on.** Point 5 above --
+"all of it inside the freeze" -- is what breaks it. The freeze works by dropping
+`ce` on the Amiga's `amiga_clk`, which holds `clk7_en` low, and every chipset
+register decode in the machine is `always @(posedge clk) if (clk7_en)`. The
+replay drove both buses correctly for the whole walk and not one write was ever
+sampled.
+
+Fixed with `ss_replay_tick`: `Minimig.sv` derives `clk7_en & ss_replay_we` from
+the *master* generator and `minimig.v` ORs it into the clock enable of the
+modules that decode the register bus (agnus, paula, denise, userio, cart). Only
+the cycles carrying a replay write produce a tick.
+
+That tick has a consequence: `agnus_beamcounter` increments `hpos` under
+`clk7_en && cck`, so a machine parked with `cck` high would walk the beam
+forward once per replay write, about two raster lines over a full walk. The
+freeze sampler now samples `ss_freeze` on `clk7_en && cck`, which parks the
+Amiga with `cck` low -- that edge is the one that toggles `cck`, and the freeze
+lands on the edge after it. The bench checks the beam position rather than the
+polarity.
+
+**2. Agnus never saw the mux at all.** `minimig.v` muxes `reg_address` onto
+`ss_replay_addr`, and that is the bus paula, denise and the rest read. Agnus
+does not read it -- Agnus *generates* it, and decodes its own registers from an
+internal copy chosen by the DMA priority mux. So DMACON, every DMA pointer,
+DIWSTRT/STOP, DDFSTRT/STOP, BEAMCON0, VPOSW/VHPOSW and the copper and blitter
+registers ignored a replay completely, which is most of the chipset state the
+phase exists to restore. Denise and Paula took their values; Agnus's DMACON sat
+at 0.
+
+Fixed by passing `ss_replay_we`/`ss_replay_addr` into `agnus.v` and taking them
+at the head of that priority mux.
+
+Both fixes are in the core repo. The bench runs in its `rtl-sim` workflow.
