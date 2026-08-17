@@ -349,3 +349,55 @@ Fixed by passing `ss_replay_we`/`ss_replay_addr` into `agnus.v` and taking them
 at the head of that priority mux.
 
 Both fixes are in the core repo. The bench runs in its `rtl-sim` workflow.
+
+## Coverage audit, and what it turned up (2026-08-17)
+
+Prompted by asking whether the benches actually cover the phase. Four things
+came out of it; three were defects, not gaps.
+
+**The shadow section was never checked on the way back in.** `ss_ctrl_tb`
+asserted the packing -- two entries per payload word, low entry in the low half
+-- and nothing asserted the unpacking. A restore that took the halves the other
+way round would reload every chipset register with its neighbour's value and
+pass every check in the suite: the save-side words are right, the CRC agrees
+with itself, and `ss_regshadow_tb` drives `ld_we` itself rather than receiving a
+section `ss_ctrl` unpacked. The bench now records the replay writes during the
+restore and checks the entries come back at their own addresses. Mutating
+`S_L_SH_LOAD` to swap the halves fails six checks and nothing else.
+
+**INTREQ was captured nowhere and restored from the wrong machine.**
+`ss_regshadow` excludes it from the array -- correctly, Paula raises its bits in
+hardware, so accumulating bus writes drifts -- and says it is "captured by value
+elsewhere". There was no elsewhere. It was absent from `SS_STATE_LIST`, so a
+save wrote zero for `$09C`, and the replay's INTREQ step wrote back
+`intreq_in`, which `Minimig.sv` had wired to Paula's LIVE output: a restore
+reinstalled the pending interrupts of the machine it was replacing and then
+enabled them with the restored INTENA. `ss_intreq` is now in the vector,
+`ss_state_fanout` exposes the restored field, and the shadow reads that.
+`SS_STATE_W` goes 632 -> 647, so the payload length changes again.
+
+**`ss_state_fanout` -- the whole register-write half of a restore -- had no
+bench**, because it was written at the bottom of `Minimig.sv` where nothing
+could compile it without the top level. Now `rtl/ss_state_fanout.sv` with a
+bench covering the register indices, the five singles, the map bit order, the
+one-shared-bus rule, the ordering and the handshake. Two things fell out:
+
+- The re-seed went out in the same edge that dropped `busy`, so the kernel's
+  "seed before the clock enable is released" requirement rested on
+  `ss_load_busy` still being high in `Minimig.sv`'s `ss_arm` term -- another
+  module's timing holding up a property this one documents as its own. An idle
+  step after the re-seed fixes it.
+- Quartus 17.0 rejects `$bits` in a `.v` file and accepts it in `.sv`. The
+  width guard had always been in `Minimig.sv`, which is `.sv`; moving the module
+  to `.v` broke the fit. The extension was carrying the feature and nothing said
+  so. Hence `.sv` and `SYSTEMVERILOG_FILE`.
+
+**The host-side parser was tested and unused.**
+`support/minimig/minimig_savestate.cpp` had good coverage and no callers: the
+shipped path is upstream's generic `process_ss()`, which writes the window out
+on a counter change with no validation. It now validates before the write, gated
+on `is_minimig()`, so a corrupt window cannot replace a good state file.
+
+Also from the audit, not a defect: the freeze sampler and the replay tick were
+written twice, once in `Minimig.sv` and once in the ssmux bench. They are now
+one module, `ss_freeze_phase`, that both instantiate.
