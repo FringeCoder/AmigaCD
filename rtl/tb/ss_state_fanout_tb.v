@@ -30,7 +30,7 @@ reg clk   = 1'b0;
 reg rst_n = 1'b0;
 always #5 clk = ~clk;
 
-localparam integer STATE_W = 632;
+localparam integer STATE_W = 647;
 
 // The vector, in SS_STATE_LIST order. The list is a concatenation, so the
 // FIRST name in it occupies the HIGH bits -- which is why this is assembled by
@@ -50,12 +50,14 @@ localparam [31:0] VBR  = 32'h0000_0400;
 localparam [15:0] SR   = 16'h2700;
 localparam  [3:0] CACR = 4'b1010;
 localparam        OVL = 1'b1, ROM_RO = 1'b0, K1MB = 1'b1, K256 = 1'b1;
+localparam [14:0] INTREQ = 15'h2841;   // a pending set with no pattern to it
 
 wire [STATE_W-1:0] state = {
 	D0, D1, D2, D3, D4, D5, D6, D7,
 	A0, A1, A2, A3, A4, A5, A6, A7,
 	PC, USP, VBR, SR, CACR,
-	OVL, ROM_RO, K1MB, K256 };
+	OVL, ROM_RO, K1MB, K256,
+	INTREQ };
 
 // The same sixteen values in register-index order, which is the order the
 // sequencer must write them in: 0-7 = D0-D7, 8-15 = A0-A7. Written out
@@ -80,6 +82,7 @@ wire        cpu_pc_wr, cpu_sr_wr, cpu_usp_wr, cpu_vbr_wr, cpu_cacr_wr;
 wire        cpu_resume;
 wire  [3:0] map_in;
 wire        map_we;
+wire [14:0] intreq_out;
 wire        busy;
 
 ss_state_fanout #(.STATE_W(STATE_W)) dut
@@ -100,6 +103,7 @@ ss_state_fanout #(.STATE_W(STATE_W)) dut
 	.cpu_resume   (cpu_resume  ),
 	.map_in       (map_in      ),
 	.map_we       (map_we      ),
+	.intreq_out   (intreq_out  ),
 	.busy         (busy        )
 );
 
@@ -206,6 +210,13 @@ initial begin
 	check("USP restored",  got_usp,  USP);
 	check("VBR restored",  got_vbr,  VBR);
 	check("CACR restored", got_cacr, {28'd0, CACR});
+
+	// INTREQ is not written by this sequencer -- ss_regshadow's replay puts it
+	// into Paula, in its own ordering -- so what is checked here is that the
+	// field comes off the vector at all and at the right offset. Appending it
+	// to SS_STATE_LIST shifted nothing above it; getting the width wrong would
+	// shift everything and show up in the map bits below as well.
+	check("restored INTREQ off the vector", {17'd0, intreq_out}, {17'd0, INTREQ});
 
 	// Bit order is ss_map's, in both directions. [3] is ovl and [2] is gary's
 	// rom_readonly; swapping them puts the wrong thing at address zero after a

@@ -56,9 +56,27 @@
 	ss_cpu_a0, ss_cpu_a1, ss_cpu_a2, ss_cpu_a3, \
 	ss_cpu_a4, ss_cpu_a5, ss_cpu_a6, ss_cpu_a7, \
 	ss_pc, ss_usp, ss_vbr, ss_sr, ss_cacr, \
-	ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror }
+	ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror, \
+	ss_intreq }
+
+// INTREQ, the one chipset register that must be carried by VALUE.
+//
+// It is a set/clear register like DMACON and INTENA, but unlike them Paula
+// raises its bits in hardware as well as by write, so ss_regshadow's
+// accumulate-from-bus-writes rule drifts from the real register within a
+// frame and it is excluded there. The shadow's replay writes it back from
+// its intreq_in input -- which was wired to Paula's LIVE output, so before
+// this a restore reinstalled whatever interrupts happened to be pending in
+// the machine being replaced, and then enabled them with the restored
+// INTENA. The saved value went nowhere: nothing carried it.
+//
+// Appended rather than placed with the other Paula state, of which there is
+// none yet. Position in this list is the payload's field order and the two
+// directions take it from here, so the choice is free; the length is not,
+// and it changes with this.
 
 // 16 registers + PC + USP + VBR (32 each) + SR (16) + CACR (4) + 4 map bits
-`define SS_STATE_W (16*32 + 32 + 32 + 32 + 16 + 4 + 4)
+// + INTREQ (15)
+`define SS_STATE_W (16*32 + 32 + 32 + 32 + 16 + 4 + 4 + 15)
 
 `endif

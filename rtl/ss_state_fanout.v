@@ -83,6 +83,16 @@ module ss_state_fanout
 	output reg  [3:0]         map_in,
 	output reg                map_we,
 
+	// The restored INTREQ, straight off the unpacked vector rather than
+	// written anywhere by this sequencer: ss_regshadow's replay writes it
+	// into Paula itself, by the set/clear dance, in its own ordering --
+	// after the plain registers, before INTENA. This output is what that
+	// replay reads.
+	//
+	// Combinational, and stable for as long as ss_ctrl holds `state`,
+	// which is until the next restore. The replay runs inside this one.
+	output     [14:0]         intreq_out,
+
 	output                    busy
 );
 
@@ -96,8 +106,12 @@ wire [31:0] ss_pc, ss_usp, ss_vbr;
 wire [15:0] ss_sr;
 wire  [3:0] ss_cacr;
 wire        ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror;
+wire [14:0] ss_intreq;
 
 assign `SS_STATE_LIST = state;
+
+// The restored INTREQ, out to ss_regshadow's replay. See the port.
+assign intreq_out = ss_intreq;
 
 // Elaboration guard. A concatenation assignment silently truncates, so a
 // mistyped width above would shift every field beyond it and restore a
