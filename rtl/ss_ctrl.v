@@ -298,7 +298,14 @@ module ss_ctrl
 	// This parks the CPU and nothing else. The chipset keeps running, which is
 	// what a debugging read of memory wants: the machine carries on, minus a
 	// few microseconds of CPU time.
-	output reg                peek_busy
+	output reg                peek_busy,
+
+	// Port ownership for a peek, kept SEPARATE from rom_scan on purpose.
+	// Driving rom_scan from the peek states too widened its fan-in enough to
+	// fail setup by 0.136 ns -- the failing paths ended at rom_scan and came
+	// from the CRC and the payload index, i.e. the save path's own logic.
+	// Minimig.sv ORs the two into the port mux instead, which costs nothing.
+	output reg                peek_scan
 );
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
@@ -798,6 +805,7 @@ always @(posedge clk) begin
 		peek_data        <= 128'd0;
 		peek_valid       <= 1'b0;
 		peek_busy        <= 1'b0;
+		peek_scan        <= 1'b0;
 		peek_words       <= 4'd0;
 		peek_low_held    <= 1'b0;
 		restore_busy     <= 1'b0;
@@ -942,7 +950,7 @@ always @(posedge clk) begin
 				peek_cur      <= peek_addr;
 				peek_words    <= 4'd0;
 				peek_low_held <= 1'b0;
-				rom_scan      <= 1'b1;   // borrow the SDRAM CPU port
+				peek_scan     <= 1'b1;   // borrow the SDRAM CPU port
 				state         <= S_PEEK_ISSUE;
 			end
 		end
@@ -967,7 +975,7 @@ always @(posedge clk) begin
 			// peek that finds no port simply reports nothing.
 			scan_wd <= scan_wd + 24'd1;
 			if (scan_wd > SCAN_TIMEOUT) begin
-				rom_scan  <= 1'b0;
+				peek_scan <= 1'b0;
 				peek_busy <= 1'b0;
 				state     <= S_IDLE;
 			end
@@ -985,7 +993,7 @@ always @(posedge clk) begin
 					              dma_word_out[7:0], dma_word_out[15:8]};
 					peek_low_held <= 1'b0;
 					if (peek_words == 4'd6) begin
-						rom_scan   <= 1'b0;
+						peek_scan  <= 1'b0;
 						peek_busy  <= 1'b0;
 						peek_valid <= 1'b1;
 						state      <= S_IDLE;

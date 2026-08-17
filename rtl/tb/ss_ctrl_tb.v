@@ -121,6 +121,7 @@ reg  [24:1] peek_addr = 24'd0;
 wire [127:0] peek_data;
 wire         peek_valid;
 wire         peek_busy;
+wire         peek_scan;
 
 // The three state codes the diagnostic checks name. Written out here rather
 // than imported from ss_ctrl.v on purpose: these numbers are a published
@@ -193,6 +194,7 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.dbg_kick_warn(dbg_kick_warn),
 	.peek_req(peek_req), .peek_addr(peek_addr),
 	.peek_data(peek_data), .peek_valid(peek_valid), .peek_busy(peek_busy),
+	.peek_scan(peek_scan),
 	.shadow_rd_addr(sh_rd_addr), .shadow_rd_data(sh_rd_data),
 	.shadow_ld_we(sh_ld_we), .shadow_ld_addr(sh_ld_addr),
 	.shadow_ld_data(sh_ld_data),
@@ -1110,6 +1112,10 @@ initial begin
 	check("peek longword 3", peek_data[31:0],   32'h06E007E0);
 	check("peek left the controller idle", {26'd0, dbg_state}, {26'd0, DBG_S_IDLE});
 	check("peek released the CPU", {31'd0, peek_busy}, 32'd0);
+	check("peek released the port", {31'd0, peek_scan}, 32'd0);
+	// rom_scan belongs to the fingerprint alone now; a peek must not have
+	// touched it, which is what keeps its timing where it was.
+	check("peek left rom_scan alone", {31'd0, rom_scan}, 32'd0);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
