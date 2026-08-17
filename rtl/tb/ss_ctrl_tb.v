@@ -817,12 +817,15 @@ initial begin
 	check("replayed $020", {16'd0, seen_replay[8'h10]}, 32'h00001234);
 	check("replayed $022", {16'd0, seen_replay[8'h11]}, 32'h00005678);
 	check("replayed $024", {16'd0, seen_replay[8'h12]}, 32'h00009ABC);
-	check("replayed $026 is still zero",
-	      {16'd0, seen_replay[8'h13]}, 32'h00000000);
+	// $028, not $026: DSKDAT lives at $026 and is excluded from the shadow now
+	// that writing it pushes a word into the disk buffer, so it is never
+	// replayed and cannot stand in for an untouched entry.
+	check("replayed $028 is still zero",
+	      {16'd0, seen_replay[8'h14]}, 32'h00000000);
 	check("replayed $02A", {16'd0, seen_replay[8'h15]}, 32'h0000DEF0);
 	check("replayed $036", {16'd0, seen_replay[8'h1B]}, 32'h0000A5A5);
 	check("every plain entry was replayed",
-	      {31'd0, seen_replay_valid[8'h10] & seen_replay_valid[8'h13] &
+	      {31'd0, seen_replay_valid[8'h10] & seen_replay_valid[8'h14] &
 	              seen_replay_valid[8'h1B] & seen_replay_valid[8'hFF]}, 32'd1);
 
 	// Chip RAM back in SDRAM, in SDRAM's own word order -- the inverse of the

@@ -172,6 +172,38 @@ begin
 		(a != 9'h03E) &&   // STRLONG
 		(a != 9'h08A) &&   // COPJMP1
 		(a != 9'h08C) &&   // COPJMP2
+		// The blitter's GO buttons. BLTSIZE is not a value the chipset holds:
+		// agnus_blitter.v:501 raises busy on ANY write to it, so it is a strobe
+		// that happens to carry a size. Every blit a game performs ends by
+		// writing it, so the shadow entry is never empty -- and replaying it
+		// started a blit as part of the restore, with restored pointers, into
+		// the chip RAM the restore had just installed, one step before DMACON
+		// came back on and let it run. On hardware that is a machine that
+		// completes its restore, reports success, and then dies.
+		//
+		// BLTSIZV/BLTSIZH are the ECS pair, and BLTSIZH starts a blit the same
+		// way (same line, `|| BLTSIZH && ecs`).
+		//
+		// Nothing is lost by not restoring them. ss_quiesce waits for the
+		// blitter to be idle before the freeze, so a save never happens
+		// mid-blit, and a blit that has finished has nothing left to say.
+		(a != 9'h058) &&   // BLTSIZE
+		(a != 9'h05C) &&   // BLTSIZV (ECS)
+		(a != 9'h05E) &&   // BLTSIZH (ECS)
+		// SERDAT starts a serial transmission on write, same reasoning.
+		(a != 9'h030) &&   // SERDAT
+		// DSKDAT writes a word into the disk buffer at the current pointer
+		// (paula_floppy.v:725) -- a replay would push a stray word into a
+		// track being written.
+		(a != 9'h026) &&   // DSKDAT
+		// AUDxDAT is the "a sample has arrived" event for its channel
+		// (paula_audio_channel.v:108): the write drives the channel's state
+		// machine and the DAC, it does not merely store. Period, volume,
+		// length and the pointers are all restored by their own registers.
+		(a != 9'h0AA) &&   // AUD0DAT
+		(a != 9'h0BA) &&   // AUD1DAT
+		(a != 9'h0CA) &&   // AUD2DAT
+		(a != 9'h0DA) &&   // AUD3DAT
 		// Below $020 is the read window (DMACONR, INTENAR, JOYxDAT, the disk
 		// and blitter status). Nothing writes there, so an entry would only
 		// ever be noise -- and replaying into it would drive a read address

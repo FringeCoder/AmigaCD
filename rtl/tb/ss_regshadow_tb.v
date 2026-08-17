@@ -240,6 +240,25 @@ initial begin
 	wr(9'h08C, 16'h0000);   // COPJMP2
 	wr(9'h038, 16'h0000);   // STREQU
 	wr(9'h03C, 16'h0000);   // STRHOR
+	// The write-to-act registers that are not called strobes and behave like
+	// them anyway. BLTSIZE is the one that mattered: agnus_blitter.v:501 raises
+	// busy on any write, every blit ends by writing it, so the entry is always
+	// populated -- and a replay therefore STARTED A BLIT during the restore,
+	// with restored pointers, into freshly restored chip RAM. Found on
+	// hardware as a restore that reported success and then reset the machine.
+	wr(9'h058, 16'h0140);   // BLTSIZE
+	wr(9'h05C, 16'h0040);   // BLTSIZV (ECS)
+	wr(9'h05E, 16'h0040);   // BLTSIZH (ECS)
+	wr(9'h030, 16'h00FF);   // SERDAT  -- starts a transmission
+	wr(9'h026, 16'hFFFF);   // DSKDAT  -- writes into the disk buffer
+	wr(9'h0AA, 16'h1234);   // AUD0DAT -- a sample event for the channel
+	rd(9'h058); check("BLTSIZE not shadowed",  {31'd0, rd_writable}, 32'd0);
+	rd(9'h05C); check("BLTSIZV not shadowed",  {31'd0, rd_writable}, 32'd0);
+	rd(9'h05E); check("BLTSIZH not shadowed",  {31'd0, rd_writable}, 32'd0);
+	rd(9'h030); check("SERDAT not shadowed",   {31'd0, rd_writable}, 32'd0);
+	rd(9'h026); check("DSKDAT not shadowed",   {31'd0, rd_writable}, 32'd0);
+	rd(9'h0AA); check("AUD0DAT not shadowed",  {31'd0, rd_writable}, 32'd0);
+
 	rd(9'h08A); check("COPJMP1 not replayable", {31'd0, rd_writable}, 32'd0);
 	rd(9'h08C); check("COPJMP2 not replayable", {31'd0, rd_writable}, 32'd0);
 	rd(9'h038); check("STREQU not replayable",  {31'd0, rd_writable}, 32'd0);
