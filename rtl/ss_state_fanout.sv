@@ -93,6 +93,14 @@ module ss_state_fanout
 	// which is until the next restore. The replay runs inside this one.
 	output     [14:0]         intreq_out,
 
+	// The CIAs, by value, and the pulse that writes them. Unlike the CPU
+	// register file these go in as one wide word each rather than a sequence:
+	// ciaa.v and ciab.v take the whole thing on one clk edge, so there is
+	// nothing to sequence and nothing that can land half-written.
+	output    [190:0]         cia_a_out,
+	output    [202:0]         cia_b_out,
+	output reg                cia_we,
+
 	output                    busy
 );
 
@@ -107,11 +115,15 @@ wire [15:0] ss_sr;
 wire  [3:0] ss_cacr;
 wire        ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror;
 wire [14:0] ss_intreq;
+wire [190:0] ss_cia_a;
+wire [202:0] ss_cia_b;
 
 assign `SS_STATE_LIST = state;
 
 // The restored INTREQ, out to ss_regshadow's replay. See the port.
 assign intreq_out = ss_intreq;
+assign cia_a_out  = ss_cia_a;
+assign cia_b_out  = ss_cia_b;
 
 // Elaboration guard. A concatenation assignment silently truncates, so a
 // mistyped width above would shift every field beyond it and restore a
@@ -181,7 +193,9 @@ localparam [4:0] STEP_USP  = 5'd18;
 localparam [4:0] STEP_VBR  = 5'd19;
 localparam [4:0] STEP_CACR = 5'd20;
 localparam [4:0] STEP_MAP  = 5'd21;
-localparam [4:0] STEP_RES  = 5'd22;
+// The CIAs go in before the re-seed and after the map, on their own pulse.
+localparam [4:0] STEP_CIA  = 5'd22;
+localparam [4:0] STEP_RES  = 5'd23;
 // One idle step after the re-seed, so `running` -- and therefore busy, and
 // therefore cpu_wrapper's ss_arm -- is still high on the cycle cpu_resume
 // goes out. The kernel wants the seed applied before the CPU clock enable
@@ -190,7 +204,7 @@ localparam [4:0] STEP_RES  = 5'd22;
 // ss_load_busy still being high in Minimig.sv's ss_arm term -- another
 // module's timing, for a property this module claims to enforce on its own.
 // Caught by ss_state_fanout_tb.
-localparam [4:0] STEP_DONE = 5'd23;
+localparam [4:0] STEP_DONE = 5'd24;
 localparam [4:0] STEP_LAST = STEP_DONE;
 
 reg [4:0] step;
@@ -210,6 +224,7 @@ always @(posedge clk) begin
 		cpu_vbr_wr   <= 1'b0;
 		cpu_cacr_wr  <= 1'b0;
 		map_we       <= 1'b0;
+		cia_we       <= 1'b0;
 		cpu_resume   <= 1'b0;
 	end
 	else begin
@@ -223,6 +238,7 @@ always @(posedge clk) begin
 		cpu_vbr_wr  <= 1'b0;
 		cpu_cacr_wr <= 1'b0;
 		map_we      <= 1'b0;
+		cia_we      <= 1'b0;
 		cpu_resume  <= 1'b0;
 
 		if (!running) begin
@@ -252,6 +268,9 @@ always @(posedge clk) begin
 			end
 			// Last, and after STEP_PC: the re-seed leaves TG68_PC alone and
 			// starts the CPU fetching from whatever it already holds.
+			// Both CIAs at once: the two buses are independent and each lands
+			// whole on one edge.
+			STEP_CIA:  cia_we <= 1'b1;
 			STEP_RES:  cpu_resume <= 1'b1;
 			// Nothing is strobed here; the step exists to hold busy over the
 			// cycle the re-seed is on the wire.

@@ -57,7 +57,8 @@
 	ss_cpu_a4, ss_cpu_a5, ss_cpu_a6, ss_cpu_a7, \
 	ss_pc, ss_usp, ss_vbr, ss_sr, ss_cacr, \
 	ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror, \
-	ss_intreq }
+	ss_intreq, \
+	ss_cia_a, ss_cia_b }
 
 // INTREQ, the one chipset register that must be carried by VALUE.
 //
@@ -76,7 +77,13 @@
 // and it changes with this.
 
 // 16 registers + PC + USP + VBR (32 each) + SR (16) + CACR (4) + 4 map bits
-// + INTREQ (15)
-`define SS_STATE_W (16*32 + 32 + 32 + 32 + 16 + 4 + 4 + 15)
+// + INTREQ (15) + CIA A (191) + CIA B (203)
+// The CIAs, by value: 191 bits for CIA A and 203 for CIA B. Both sit on the
+// CPU bus, invisible to the chipset register shadow, and cannot be read back
+// through their own registers without side effects -- reading ICR clears the
+// pending interrupts, reading TOD moves its latch. ciaa.v and ciab.v carry the
+// bit layouts; the widths are stated there and here and nowhere else.
+
+`define SS_STATE_W (16*32 + 32 + 32 + 32 + 16 + 4 + 4 + 15 + 191 + 203)
 
 `endif

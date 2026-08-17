@@ -30,7 +30,7 @@ reg clk   = 1'b0;
 reg rst_n = 1'b0;
 always #5 clk = ~clk;
 
-localparam integer STATE_W = 647;
+localparam integer STATE_W = 1041;
 
 // The vector, in SS_STATE_LIST order. The list is a concatenation, so the
 // FIRST name in it occupies the HIGH bits -- which is why this is assembled by
@@ -51,13 +51,20 @@ localparam [15:0] SR   = 16'h2700;
 localparam  [3:0] CACR = 4'b1010;
 localparam        OVL = 1'b1, ROM_RO = 1'b0, K1MB = 1'b1, K256 = 1'b1;
 localparam [14:0] INTREQ = 15'h2841;   // a pending set with no pattern to it
+// The two CIA words. Distinct top and bottom bits so a field that lost its
+// high or low end shows up rather than looking plausible.
+localparam [190:0] CIA_A = {75'h7B_1234_5678_9ABC_DEF0, 39'h55_AAAA_5555,
+                            39'h2A_5555_AAAA, 10'h3C1, 8'hC3, 8'h0F, 8'hF0, 4'h9};
+localparam [202:0] CIA_B = {75'h1D_0F0F_0F0F_F0F0_F0F0, 39'h11_2233_4455,
+                            39'h66_7788_99AA, 10'h1E2, 8'h3C, 8'hAA, 8'h55, 8'hCC, 8'h81};
 
 wire [STATE_W-1:0] state = {
 	D0, D1, D2, D3, D4, D5, D6, D7,
 	A0, A1, A2, A3, A4, A5, A6, A7,
 	PC, USP, VBR, SR, CACR,
 	OVL, ROM_RO, K1MB, K256,
-	INTREQ };
+	INTREQ,
+	CIA_A, CIA_B };
 
 // The same sixteen values in register-index order, which is the order the
 // sequencer must write them in: 0-7 = D0-D7, 8-15 = A0-A7. Written out
@@ -83,6 +90,9 @@ wire        cpu_resume;
 wire  [3:0] map_in;
 wire        map_we;
 wire [14:0] intreq_out;
+wire [190:0] cia_a_out;
+wire [202:0] cia_b_out;
+wire         cia_we;
 wire        busy;
 
 ss_state_fanout #(.STATE_W(STATE_W)) dut
@@ -104,6 +114,9 @@ ss_state_fanout #(.STATE_W(STATE_W)) dut
 	.map_in       (map_in      ),
 	.map_we       (map_we      ),
 	.intreq_out   (intreq_out  ),
+	.cia_a_out    (cia_a_out   ),
+	.cia_b_out    (cia_b_out   ),
+	.cia_we       (cia_we      ),
 	.busy         (busy        )
 );
 
@@ -122,6 +135,8 @@ integer    usp_writes  = 0;
 integer    vbr_writes  = 0;
 integer    cacr_writes = 0;
 integer    map_writes  = 0;
+integer    cia_writes  = 0;
+integer    ev_cia      = 0;
 integer    resumes     = 0;
 reg [31:0] got_pc, got_sr, got_usp, got_vbr, got_cacr;
 reg  [3:0] got_map;
@@ -155,6 +170,7 @@ always @(posedge clk) if (rst_n) begin
 	if (cpu_vbr_wr)  begin ev = ev + 1; got_vbr = cpu_wr_data; vbr_writes = vbr_writes + 1; end
 	if (cpu_cacr_wr) begin ev = ev + 1; got_cacr= cpu_wr_data; cacr_writes= cacr_writes+ 1; end
 	if (map_we)      begin ev = ev + 1; ev_map = ev; got_map = map_in; map_writes = map_writes + 1; end
+	if (cia_we)      begin ev = ev + 1; ev_cia = ev; cia_writes = cia_writes + 1; end
 	if (cpu_resume)  begin
 		ev = ev + 1; ev_resume = ev; resumes = resumes + 1;
 		busy_at_resume = busy;
@@ -218,6 +234,16 @@ initial begin
 	// shift everything and show up in the map bits below as well.
 	check("restored INTREQ off the vector", {17'd0, intreq_out}, {17'd0, INTREQ});
 
+	// The CIAs go in as whole words on one pulse rather than as a sequence, so
+	// what matters is that the words are the vector's own fields and that the
+	// pulse happens once, before the CPU is let go.
+	check("CIA A word off the vector, low half",  cia_a_out[31:0],  CIA_A[31:0]);
+	check("CIA A word off the vector, high half", cia_a_out[190:159], CIA_A[190:159]);
+	check("CIA B word off the vector, low half",  cia_b_out[31:0],  CIA_B[31:0]);
+	check("CIA B word off the vector, high half", cia_b_out[202:171], CIA_B[202:171]);
+	check("CIA write pulsed once", cia_writes[31:0], 32'd1);
+	check("CIA written before the re-seed", {31'd0, (ev_cia < ev_resume)}, 32'd1);
+
 	// Bit order is ss_map's, in both directions. [3] is ovl and [2] is gary's
 	// rom_readonly; swapping them puts the wrong thing at address zero after a
 	// restore and nothing says so until the machine runs.
@@ -252,7 +278,7 @@ initial begin
 	// A second request must run the whole sequence again -- a restore can
 	// follow a restore, and Task 8's second-restore case in ss_ctrl_tb depends
 	// on this side behaving the same way twice.
-	reg_writes = 0; resumes = 0; map_writes = 0;
+	reg_writes = 0; resumes = 0; map_writes = 0; cia_writes = 0;
 	@(negedge clk);
 	req = 1'b1;
 	wait (ack);
@@ -264,6 +290,7 @@ initial begin
 	check("second run wrote sixteen registers", reg_writes[31:0], 32'd16);
 	check("second run resumed once",            resumes[31:0],    32'd1);
 	check("second run wrote the map once",      map_writes[31:0], 32'd1);
+	check("second run wrote the CIAs once",     cia_writes[31:0], 32'd1);
 
 	// Reset in the middle of a run must drop everything, including busy: the
 	// CPU is released by reset, and a sequencer still walking into a reset
@@ -278,8 +305,8 @@ initial begin
 	@(negedge clk);
 	check("reset drops busy",       {31'd0, busy},       32'd0);
 	check("reset drops the enables",
-	      {25'd0, cpu_wr_en, cpu_pc_wr, cpu_sr_wr, cpu_usp_wr, cpu_vbr_wr,
-	       cpu_cacr_wr, map_we}, 32'd0);
+	      {24'd0, cpu_wr_en, cpu_pc_wr, cpu_sr_wr, cpu_usp_wr, cpu_vbr_wr,
+	       cpu_cacr_wr, map_we, cia_we}, 32'd0);
 	req = 1'b0;
 
 	if (errors) begin
