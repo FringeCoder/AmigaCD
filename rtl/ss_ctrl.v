@@ -264,7 +264,13 @@ module ss_ctrl
 	// poller: at ~113.5 MHz almost every state this module passes through lives
 	// and dies between two 50 ms polls.
 	output     [5:0]          dbg_state,
-	output     [23:0]         dbg_idx
+	output     [23:0]         dbg_idx,
+
+	// Fingerprint diagnostic, sticky since reset.
+	//   dbg_kick_warn     -- a restore ran with a fingerprint that did not
+	//                        match the file's; advisory while the scan is
+	//                        untrustworthy
+	output                    dbg_kick_warn
 );
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
@@ -547,6 +553,9 @@ reg        sh_half;
 reg [15:0] sh_low;
 reg [31:0] kick_crc;        // fingerprint of the ROM currently in the machine
 reg [31:0] file_kick_crc;   // fingerprint the state file was made under
+// Sticky since reset: a restore ran with a fingerprint that did not match
+// the file's. Reported, not acted on -- see S_L_KICK_CHK.
+reg        kick_warn;
 // Watchdog on one SDRAM word of the scan. See SCAN_TIMEOUT.
 reg [23:0] scan_wd;
 
@@ -654,6 +663,7 @@ wire        pay_held = (rd_pair == {1'b0, pay_win[23:1]});
 // be able to change what this module does, so they read registers rather than
 // adding any.
 assign dbg_state = state;
+assign dbg_kick_warn     = kick_warn;
 
 // Progress within whichever direction is running. A save walks the DDR3 window
 // by word_idx; a restore walks the payload by pay_idx. The two never advance
@@ -746,6 +756,7 @@ always @(posedge clk) begin
 		ser_word_in_valid<= 1'b0;
 		dma_start        <= 1'b0;
 		dma_write_mode   <= 1'b0;
+		kick_warn        <= 1'b0;
 		restore_busy     <= 1'b0;
 		rom_scan         <= 1'b0;
 		scan_acks        <= 8'd0;
@@ -1352,18 +1363,26 @@ always @(posedge clk) begin
 		// the freeze, and the machine resumes where it was stopped, exactly as
 		// it does at the end of a save.
 		S_L_KICK_CHK: begin
-			if (kick_crc == file_kick_crc) begin
-				// Last gate passed, and the machine is already stopped: the
-				// freeze went up before the fingerprint, because the scan
-				// itself is not safe to run against a live 68k. Go straight
-				// to the state vector.
-				ser_load_start <= 1'b1;
-				// Skip payload word 0: the fingerprint is metadata about the
-				// machine, already checked, and is not part of the state vector.
-				pay_idx        <= ST_FIRST_24;
-				state          <= S_L_ST_FETCH;
-			end
-			else load_reject(FAIL_KICK);
+			// ADVISORY, not a gate. The fingerprint cannot currently tell "wrong
+			// ROM" from "same ROM, scanned twice": two saves nine seconds apart
+			// on unchanged memory produced different values, so the check was
+			// refusing every restore. It is recorded and reported -- kick_warn
+			// rides out on the diagnostics -- and the restore proceeds.
+			//
+			// This is a deliberate loss of a real safety check, and it stays
+			// only until the scan is trustworthy again: with it advisory, a
+			// state made under a genuinely different Kickstart will load and
+			// the machine will do whatever that implies.
+			if (kick_crc != file_kick_crc) kick_warn <= 1'b1;
+
+			// The machine is already stopped -- the freeze went up before the
+			// fingerprint, because the scan is not safe to run against a live
+			// 68k -- so go straight to the state vector. Payload word 0 is
+			// skipped: the fingerprint is metadata about the machine, not part
+			// of the state vector.
+			ser_load_start <= 1'b1;
+			pay_idx        <= ST_FIRST_24;
+			state          <= S_L_ST_FETCH;
 		end
 
 		// The freeze the whole restore runs under. It is raised once, here,

@@ -115,6 +115,7 @@ wire cache_flush;
 // Diagnostic readback. Purely observational in the DUT; see the observer below.
 wire [5:0]  dbg_state;
 wire [23:0] dbg_idx;
+wire        dbg_kick_warn;
 
 // The three state codes the diagnostic checks name. Written out here rather
 // than imported from ss_ctrl.v on purpose: these numbers are a published
@@ -184,6 +185,7 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.ddr_read(ddr_read), .ddr_readdata(ddr_readdata),
 	.ddr_readdatavalid(ddr_readdatavalid), .ddr_waitrequest(ddr_waitrequest),
 	.dbg_state(dbg_state), .dbg_idx(dbg_idx),
+	.dbg_kick_warn(dbg_kick_warn),
 	.shadow_rd_addr(sh_rd_addr), .shadow_rd_data(sh_rd_data),
 	.shadow_ld_we(sh_ld_we), .shadow_ld_addr(sh_ld_addr),
 	.shadow_ld_data(sh_ld_data),
@@ -647,7 +649,7 @@ endtask
 // A restore that never completes would otherwise park run_load() on its
 // wait() forever with no output at all.
 initial begin
-	#500000;
+	#900000;
 	$display("FAIL watchdog: simulation did not finish");
 	$fatal(1);
 end
@@ -923,31 +925,43 @@ initial begin
 	// and the payload CRC still matches -- the FILE is untouched. What changed is
 	// the machine: its ROM now reads back different words, so the fingerprint the
 	// controller recomputes over the live ROM no longer matches the one stored in
-	// the payload. Nothing else in the format can catch this, which is the whole
-	// reason the fingerprint exists: without it the restore succeeds and the
-	// Amiga gurus with no explanation.
+	// the payload.
+	//
+	// The fingerprint is currently ADVISORY. On hardware it cannot tell "wrong
+	// ROM" from "same ROM, scanned twice" -- two saves nine seconds apart over
+	// unchanged memory produced different values -- so it was refusing every
+	// restore. Until the scan is trustworthy the mismatch is recorded and
+	// reported, and the restore runs.
+	//
+	// So this case now asserts the opposite of what it used to: the restore
+	// completes, and dbg_kick_warn says the ROM did not match. When the scan is
+	// fixed, this reverts to expecting FAIL_KICK (code 5) and the refusal.
 	restore_window();
 	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
 	reset_observers();
 	rom_alt = 1;
 	run_load();
-	check("wrong kickstart refused",   {28'd0, load_fail_code}, 32'd5);
-	check("wrong kickstart not ok",    {31'd0, load_ok},        32'd0);
-	check("wrong kickstart releases the machine", freeze_fall_count,     freeze_rise_count);
-	// The refusal is a no-op: the ROM scan reads SDRAM but writes nothing, and
-	// nothing of the state vector or chip RAM was applied on the way to saying no.
-	check("wrong kickstart chip untouched", {16'd0, chip_mem[0]}, 32'h0000BAD0);
+	check("wrong kickstart no longer refuses", {31'd0, load_fail},      32'd0);
+	check("wrong kickstart restores",          {31'd0, load_ok},        32'd1);
+	check("wrong kickstart is reported",       {31'd0, dbg_kick_warn},  32'd1);
+	check("wrong kickstart releases the machine", freeze_fall_count,    freeze_rise_count);
+	// It is no longer a refusal, so chip RAM IS written: the state loads. The
+	// poison value would mean the restore had quietly done nothing, which is
+	// the other way this could have been got wrong.
+	check("wrong kickstart still restores chip RAM",
+	      {16'd0, chip_mem[0]}, 32'h0000D000);
 	check("wrong kickstart writes no DDR3",     ddr_write_count,      32'd0);
 	check("wrong kickstart froze once",         freeze_rise_count,    32'd1);
 	// The scan post-mortem in dbg_idx[7:0], proven here rather than trusted on
 	// hardware. This refusal ran the scan to completion, so the port answered.
 	check("wrong kickstart counted acks",
 	      {31'd0, (dbg_idx[7:0] != 8'd0)},                            32'd1);
-	// This is the discrimination the instrumentation exists to make: a restore
-	// that reached the last gate and was refused there, versus one that ran to
-	// completion. Both leave the machine in S_IDLE with nothing else to look at.
+	// The gate is still visited -- it is where the comparison happens and where
+	// dbg_kick_warn is raised -- but it no longer ends the restore, so the
+	// release follows it. When the fingerprint is trustworthy again and the
+	// refusal comes back, the second check flips to 0.
 	check("diag saw the kickstart gate", {31'd0, dbg_seen[DBG_S_L_KICK_CHK]}, 32'd1);
-	check("diag saw no release",         {31'd0, dbg_seen[DBG_S_L_RELEASE]},  32'd0);
+	check("diag saw the release too",    {31'd0, dbg_seen[DBG_S_L_RELEASE]},  32'd1);
 
 	// Gate order: the payload CRC is a verdict on the file and costs the machine
 	// nothing, while the fingerprint costs a full ROM scan over the running
