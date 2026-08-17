@@ -170,8 +170,19 @@ begin
 		(a != 9'h03A) &&   // STRVBL
 		(a != 9'h03C) &&   // STRHOR
 		(a != 9'h03E) &&   // STRLONG
-		(a != 9'h08A) &&   // COPJMP1
-		(a != 9'h08C) &&   // COPJMP2
+		// The copper's addresses, from agnus_copper.v's own parameters:
+		// COPJMP1 = $088, COPJMP2 = $08A, COPINS = $08C. The first two restart
+		// the copper at COP1LC/COP2LC on any write. $088 was missing here --
+		// the comments said COPJMP1/COPJMP2 against $08A/$08C, which are
+		// COPJMP2 and COPINS, so the list was one register out and the real
+		// COPJMP1 was replayed into every restore. ss_regshadow_tb asserted
+		// the same wrong address and passed.
+		(a != 9'h088) &&   // COPJMP1
+		(a != 9'h08A) &&   // COPJMP2
+		// COPINS is the copper's own instruction register: the copper writes
+		// it, the CPU has no reason to, and a replay would hand the copper an
+		// instruction from the wrong moment.
+		(a != 9'h08C) &&   // COPINS
 		// The blitter's GO buttons. BLTSIZE is not a value the chipset holds:
 		// agnus_blitter.v:501 raises busy on ANY write to it, so it is a strobe
 		// that happens to carry a size. Every blit a game performs ends by

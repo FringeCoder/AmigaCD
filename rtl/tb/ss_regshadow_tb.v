@@ -236,8 +236,9 @@ initial begin
 	// Strobes. Writing one is an event. A replayed COPJMP1 restarts the copper
 	// at COP1LC in the middle of a restore, which is the kind of bug that
 	// surfaces as "the game glitches sometimes after loading".
-	wr(9'h08A, 16'h0000);   // COPJMP1
-	wr(9'h08C, 16'h0000);   // COPJMP2
+	wr(9'h088, 16'h0000);   // COPJMP1 -- agnus_copper.v:84
+	wr(9'h08A, 16'h0000);   // COPJMP2 -- agnus_copper.v:85
+	wr(9'h08C, 16'h0000);   // COPINS  -- agnus_copper.v:83
 	wr(9'h038, 16'h0000);   // STREQU
 	wr(9'h03C, 16'h0000);   // STRHOR
 	// The write-to-act registers that are not called strobes and behave like
@@ -259,7 +260,11 @@ initial begin
 	rd(9'h026); check("DSKDAT not shadowed",   {31'd0, rd_writable}, 32'd0);
 	rd(9'h0AA); check("AUD0DAT not shadowed",  {31'd0, rd_writable}, 32'd0);
 
-	rd(9'h08A); check("COPJMP1 not replayable", {31'd0, rd_writable}, 32'd0);
+	// Addressed by number as well as by name: these three were named one
+	// register out for a while, and the test agreed with the code.
+	rd(9'h088); check("COPJMP1 ($088) not replayable", {31'd0, rd_writable}, 32'd0);
+	rd(9'h08A); check("COPJMP2 ($08A) not replayable", {31'd0, rd_writable}, 32'd0);
+	rd(9'h08C); check("COPINS ($08C) not replayable",  {31'd0, rd_writable}, 32'd0);
 	rd(9'h08C); check("COPJMP2 not replayable", {31'd0, rd_writable}, 32'd0);
 	rd(9'h038); check("STREQU not replayable",  {31'd0, rd_writable}, 32'd0);
 	rd(9'h03C); check("STRHOR not replayable",  {31'd0, rd_writable}, 32'd0);
