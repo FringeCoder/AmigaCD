@@ -34,7 +34,11 @@ localparam STATE_WORDS = (STATE_W + 31) / 32;
 // SHADOW_ENTRIES is 256 in the real design; shrunk here because the mock DDR3
 // below is 64 words wide and a full section would not fit. Nothing about the
 // streaming depends on the count.
-localparam SHADOW_ENTRIES = 8;
+// 32, not 8. Indices 0-7 are register addresses $000-$00E, which are the read
+// window the shadow refuses -- so an 8-entry section is structurally all zero
+// and cannot test the packing at all. 32 reaches $020-$03E, which is writable,
+// and still fits the mock DDR3 below.
+localparam SHADOW_ENTRIES = 32;
 localparam SHADOW_WORDS   = SHADOW_ENTRIES / 2;
 localparam CORE_WORDS  = 1 + STATE_WORDS + SHADOW_WORDS + CHIP_WORDS / 2;
 
@@ -121,6 +125,13 @@ localparam [5:0] DBG_S_L_KICK_CHK = 6'd32;
 // two-cycle latency. The synthesised default is 65536.
 localparam [23:0] SCAN_TIMEOUT = 24'd64;
 
+reg   [7:0] sh_snoop_addr = 8'd0;
+reg  [15:0] sh_snoop_data = 16'd0;
+
+// What the bench expects the section to contain, so the payload checks and the
+// reference CRC agree with one source rather than two lists.
+reg  [15:0] exp_shadow [0:SHADOW_ENTRIES-1];
+
 wire  [7:0] sh_rd_addr;
 wire [15:0] sh_rd_data;
 wire        sh_ld_we;
@@ -174,10 +185,10 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 ss_regshadow shadow
 (
 	.clk(clk), .clk7_en(1'b1), .rst_n(rst_n),
-	// Address 0 is in the read window, which the shadow refuses, so the snoop
-	// records nothing here and the bench controls the contents through the
-	// load port alone.
-	.reg_address_in(8'd0), .data_in(16'd0),
+	// clk7_en is tied high, so a write happens on any cycle the address is one
+	// the shadow accepts. Parking the address at 0 -- the read window, which it
+	// refuses -- means no write; sh_wr() below drives a real one for a cycle.
+	.reg_address_in(sh_snoop_addr), .data_in(sh_snoop_data),
 	.rd_addr(sh_rd_addr), .rd_data(sh_rd_data),
 	.rd_writable(), .rd_setclear(),
 	.ld_we(sh_ld_we), .ld_addr(sh_ld_addr), .ld_data(sh_ld_data),
@@ -489,6 +500,19 @@ endfunction
 // loses its opening characters rather than its tail: "no restore work before
 // the freeze" was reported as "o restore work before the freeze" at 256 bits.
 // Silent, and it makes a log say something slightly different from the source.
+// One chipset register write into the shadow, and record what it should hold.
+task sh_wr(input [7:0] idx, input [15:0] val);
+begin
+	@(negedge clk);
+	sh_snoop_addr = idx;
+	sh_snoop_data = val;
+	@(negedge clk);
+	sh_snoop_addr = 8'd0;
+	sh_snoop_data = 16'd0;
+	exp_shadow[idx] = val;
+end
+endtask
+
 task check(input [511:0] name, input [31:0] actual, input [31:0] want);
 begin
 	if (actual !== want) begin
@@ -606,6 +630,17 @@ initial begin
 
 	// Blitter busy at first, so the save has to wait for a quiet instant.
 	blit_busy = 1;
+	// Real values in the shadow before the save. Without these the section is
+	// all zeros, and a read misaligned by a cycle -- which is exactly what
+	// registering the read port risked -- still produces zeros and still
+	// matches the reference CRC. The section has to carry values that differ
+	// per entry for the packing to be provable.
+	sh_wr(8'h10, 16'h1234);   // $020
+	sh_wr(8'h11, 16'h5678);   // $022
+	sh_wr(8'h12, 16'h9ABC);   // $024
+	sh_wr(8'h15, 16'hDEF0);   // $02A
+	sh_wr(8'h1B, 16'hA5A5);   // $036
+
 	@(negedge clk); save_req = 1;
 	@(negedge clk); @(negedge clk);
 	if (freeze !== 1'b0) begin
@@ -656,6 +691,21 @@ initial begin
 	// 32'h01D000D0. Written out this way, capture and restore cannot agree with
 	// each other on a swap that is wrong in both directions -- a matched pair
 	// of errors round-trips perfectly but fails here.
+	// The shadow section, packed two entries per word with the low entry in the
+	// low half. Checked per word against what was written, so a section that is
+	// shifted, byte-swapped or one entry out fails here rather than looking
+	// plausible.
+	check("shadow word 8 packs $020,$022",
+	      ddr_word(W_SHADOW + 8),  {16'h5678, 16'h1234});
+	check("shadow word 9 packs $024,$026",
+	      ddr_word(W_SHADOW + 9),  {16'h0000, 16'h9ABC});
+	check("shadow word 10 packs $028,$02A",
+	      ddr_word(W_SHADOW + 10), {16'hDEF0, 16'h0000});
+	check("shadow word 13 packs $034,$036",
+	      ddr_word(W_SHADOW + 13), {16'hA5A5, 16'h0000});
+	check("shadow word 0 is the read window, zero",
+	      ddr_word(W_SHADOW), 32'h00000000);
+
 	check("chip word 0 in 68k byte order", ddr_word(W_CHIP), 32'h01D000D0);
 	check("chip word 3 in 68k byte order", ddr_word(W_CHIP + 3), 32'h07D006D0);
 
@@ -674,7 +724,8 @@ initial begin
 	// words. It still has to be in the CRC: a design that streamed the section
 	// but left it out of the running value, or vice versa, would round-trip
 	// against itself and fail only here.
-	for (i = 0; i < SHADOW_WORDS; i = i + 1) crc_word_step(32'h00000000);
+	for (i = 0; i < SHADOW_WORDS; i = i + 1)
+		crc_word_step({exp_shadow[2*i + 1], exp_shadow[2*i]});
 	crc_word_step({bswap16(16'hD001), bswap16(16'hD000)});
 	crc_word_step({bswap16(16'hD003), bswap16(16'hD002)});
 	crc_word_step({bswap16(16'hD005), bswap16(16'hD004)});
