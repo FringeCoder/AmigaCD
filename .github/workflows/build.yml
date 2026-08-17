@@ -168,6 +168,16 @@ jobs:
       - name: Run chip RAM readout testbench
         run: vvp build/ss_dma_tb
 
+      # The freeze's two clk_sys-domain signals. The parking PHASE they choose
+      # is what stops a replay's register-decode ticks from walking the beam,
+      # and it is checked end to end against the real amiga_clk in the core
+      # repo's rtl/sim/ssmux bench; this one covers the sampling rule itself.
+      - name: Build freeze phase testbench
+        run: iverilog -g2005 -Wall -o build/ss_freeze_phase_tb rtl/ss_freeze_phase.v rtl/tb/ss_freeze_phase_tb.v
+
+      - name: Run freeze phase testbench
+        run: vvp build/ss_freeze_phase_tb
+
       # The chipset register shadow on its own: the snoop, the set/clear rule,
       # the exclusions, the load path and the replay ordering.
       - name: Build register shadow testbench
