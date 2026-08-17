@@ -120,6 +120,7 @@ reg         peek_req = 1'b0;
 reg  [24:1] peek_addr = 24'd0;
 wire [127:0] peek_data;
 wire         peek_valid;
+wire         peek_busy;
 
 // The three state codes the diagnostic checks name. Written out here rather
 // than imported from ss_ctrl.v on purpose: these numbers are a published
@@ -191,7 +192,7 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.dbg_state(dbg_state), .dbg_idx(dbg_idx),
 	.dbg_kick_warn(dbg_kick_warn),
 	.peek_req(peek_req), .peek_addr(peek_addr),
-	.peek_data(peek_data), .peek_valid(peek_valid),
+	.peek_data(peek_data), .peek_valid(peek_valid), .peek_busy(peek_busy),
 	.shadow_rd_addr(sh_rd_addr), .shadow_rd_data(sh_rd_data),
 	.shadow_ld_we(sh_ld_we), .shadow_ld_addr(sh_ld_addr),
 	.shadow_ld_data(sh_ld_data),
@@ -1108,6 +1109,7 @@ initial begin
 	check("peek longword 0", peek_data[127:96], 32'h00E001E0);
 	check("peek longword 3", peek_data[31:0],   32'h06E007E0);
 	check("peek left the controller idle", {26'd0, dbg_state}, {26'd0, DBG_S_IDLE});
+	check("peek released the CPU", {31'd0, peek_busy}, 32'd0);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);

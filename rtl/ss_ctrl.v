@@ -287,7 +287,18 @@ module ss_ctrl
 	input                     peek_req,      // one clk pulse, host domain synced
 	input      [24:1]         peek_addr,     // SDRAM WORD address, as kick_base is
 	output reg [127:0]        peek_data,     // four longwords, low address first
-	output reg                peek_valid     // sticky until the next request
+	output reg                peek_valid,    // sticky until the next request
+
+	// High for the length of a peek. Minimig.sv ORs it into cpu_wrapper's
+	// ss_arm, which parks the 68k: the SDRAM CPU port is the CPU's, and it
+	// does not answer a borrowed request while the CPU is still driving it.
+	// The first live peek timed out for exactly that reason -- the ROM
+	// fingerprint never saw it because it only ever runs inside the freeze.
+	//
+	// This parks the CPU and nothing else. The chipset keeps running, which is
+	// what a debugging read of memory wants: the machine carries on, minus a
+	// few microseconds of CPU time.
+	output reg                peek_busy
 );
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
@@ -786,6 +797,7 @@ always @(posedge clk) begin
 		kick_warn        <= 1'b0;
 		peek_data        <= 128'd0;
 		peek_valid       <= 1'b0;
+		peek_busy        <= 1'b0;
 		peek_words       <= 4'd0;
 		peek_low_held    <= 1'b0;
 		restore_busy     <= 1'b0;
@@ -925,6 +937,7 @@ always @(posedge clk) begin
 			// displace a real request. Taken only from here, so it cannot land
 			// inside one either.
 			else if (peek_req) begin
+				peek_busy     <= 1'b1;
 				peek_valid    <= 1'b0;
 				peek_cur      <= peek_addr;
 				peek_words    <= 4'd0;
@@ -954,8 +967,9 @@ always @(posedge clk) begin
 			// peek that finds no port simply reports nothing.
 			scan_wd <= scan_wd + 24'd1;
 			if (scan_wd > SCAN_TIMEOUT) begin
-				rom_scan <= 1'b0;
-				state    <= S_IDLE;
+				rom_scan  <= 1'b0;
+				peek_busy <= 1'b0;
+				state     <= S_IDLE;
 			end
 			else if (dma_word_valid) begin
 				scan_wd <= 24'd0;
@@ -972,6 +986,7 @@ always @(posedge clk) begin
 					peek_low_held <= 1'b0;
 					if (peek_words == 4'd6) begin
 						rom_scan   <= 1'b0;
+						peek_busy  <= 1'b0;
 						peek_valid <= 1'b1;
 						state      <= S_IDLE;
 					end
