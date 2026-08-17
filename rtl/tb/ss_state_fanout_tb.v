@@ -5,8 +5,8 @@
 // This is the half of a restore that puts the programmer's model back. If it
 // writes A3 where D3 belongs, or drops the re-seed, or lets the CPU go before
 // the last register lands, the machine comes back looking restored and behaving
-// like something else -- and the payload it came from is provably correct, so
-// every other bench in the suite still passes.
+// like something else -- and the payload it came from is fine, so every other
+// bench in the suite still passes.
 //
 // The vector is built here from a per-field pattern, one distinguishable value
 // per field, so a swap between any two fields shows up as a value in the wrong
