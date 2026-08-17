@@ -8981,8 +8981,23 @@ int menu_present()
 	return (menustate != MENU_NONE1) && (menustate != MENU_NONE2);
 }
 
-void Info(const char *message, int timeout, int width, int height, int frame)
+void Info(const char *message, int timeout, int width, int height, int frame, int priority)
 {
+	// A priority message owns the slot until it expires. Without this the video
+	// mode popup overwrites save state results -- reported from hardware, where
+	// the "Save state: saved" toast was replaced by a resolution readout before
+	// it could be read, and the restore's own result likewise.
+	static uint32_t info_priority_until = 0;
+
+	if (priority)
+	{
+		info_priority_until = GetTimer(timeout);
+	}
+	else if (info_priority_until && !CheckTimer(info_priority_until))
+	{
+		return;
+	}
+
 	// Diagnostic for the save state toast, which has never once appeared on
 	// hardware even though the log shows the core raising the request, the host
 	// reading it back and resolving it to a non-empty string, and this function

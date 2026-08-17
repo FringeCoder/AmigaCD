@@ -2693,7 +2693,9 @@ static void show_core_info(int info_n)
 			// and resolved it to a string that was empty or wrong. See
 			// support/minimig/minimig_ssdiag.cpp; a no-op off Minimig.
 			minimig_ss_diag_log("host show_core_info n=%d -> \"%s\"", info_n, str);
-			if (strlen(str)) Info(str);
+			// Priority: this is the outcome of something the user pressed, and
+			// the video mode popup would otherwise cover it.
+			if (strlen(str)) Info(str, 2000, 0, 0, 0, 1);
 			break;
 		}
 	}
