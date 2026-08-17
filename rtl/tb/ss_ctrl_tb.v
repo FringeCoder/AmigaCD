@@ -116,6 +116,10 @@ wire cache_flush;
 wire [5:0]  dbg_state;
 wire [23:0] dbg_idx;
 wire        dbg_kick_warn;
+reg         peek_req = 1'b0;
+reg  [24:1] peek_addr = 24'd0;
+wire [127:0] peek_data;
+wire         peek_valid;
 
 // The three state codes the diagnostic checks name. Written out here rather
 // than imported from ss_ctrl.v on purpose: these numbers are a published
@@ -186,6 +190,8 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.ddr_readdatavalid(ddr_readdatavalid), .ddr_waitrequest(ddr_waitrequest),
 	.dbg_state(dbg_state), .dbg_idx(dbg_idx),
 	.dbg_kick_warn(dbg_kick_warn),
+	.peek_req(peek_req), .peek_addr(peek_addr),
+	.peek_data(peek_data), .peek_valid(peek_valid),
 	.shadow_rd_addr(sh_rd_addr), .shadow_rd_data(sh_rd_data),
 	.shadow_ld_we(sh_ld_we), .shadow_ld_addr(sh_ld_addr),
 	.shadow_ld_data(sh_ld_data),
@@ -1075,6 +1081,33 @@ initial begin
 
 	check("cache invalidated inside the freeze", {31'd0, saw_flush_frozen},  32'd1);
 	check("cache flush not left asserted",      {31'd0, saw_flush_running}, 32'd0);
+
+	// ---------------------------------------------------------------- peek
+	//
+	// The debug window, against the same mock ROM the fingerprint reads. The
+	// mock serves 0xE000 + offset for kick addresses, so four longwords from
+	// KICK_BASE are a known sequence -- and they must come back in 68k byte
+	// order, the same order the chip RAM capture uses, or a peek and a save
+	// state would describe the same memory differently.
+	// Leave the machine as the peek expects to find it: the quiesce-timeout
+	// case above deliberately wedges the blitter and leaves save_req up, so
+	// without this the controller is sitting in S_WAIT and a peek -- which is
+	// only ever taken from S_IDLE -- would wait forever.
+	@(negedge clk);
+	save_req  = 0;
+	blit_busy = 0;
+	while (dbg_state != DBG_S_IDLE) @(negedge clk);
+
+	@(negedge clk);
+	peek_addr = KICK_BASE;
+	peek_req  = 1'b1;
+	@(negedge clk);
+	peek_req  = 1'b0;
+	wait (peek_valid);
+	@(negedge clk);
+	check("peek longword 0", peek_data[127:96], 32'h00E001E0);
+	check("peek longword 3", peek_data[31:0],   32'h06E007E0);
+	check("peek left the controller idle", {26'd0, dbg_state}, {26'd0, DBG_S_IDLE});
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);

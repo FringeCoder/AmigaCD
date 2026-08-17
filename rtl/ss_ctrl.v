@@ -270,7 +270,24 @@ module ss_ctrl
 	//   dbg_kick_warn     -- a restore ran with a fingerprint that did not
 	//                        match the file's; advisory while the scan is
 	//                        untrustworthy
-	output                    dbg_kick_warn
+	output                    dbg_kick_warn,
+
+	// ------------------------------------------------------------ live peek
+	//
+	// Read four longwords of SDRAM on demand and hand them to the host. A
+	// debugging window, not part of a save or a restore: it exists because
+	// "what is at this address right now" was, for a long time, a question
+	// that could only be answered by saving two megabytes and inferring.
+	//
+	// It borrows the SDRAM CPU port exactly as the ROM fingerprint does, and
+	// only from S_IDLE -- a peek can never interleave with a save or a
+	// restore, so it cannot disturb one. The CPU loses the port for the
+	// handful of microseconds eight word reads take; the fingerprint scan
+	// already takes it for a quarter of a million.
+	input                     peek_req,      // one clk pulse, host domain synced
+	input      [24:1]         peek_addr,     // SDRAM WORD address, as kick_base is
+	output reg [127:0]        peek_data,     // four longwords, low address first
+	output reg                peek_valid     // sticky until the next request
 );
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
@@ -388,6 +405,9 @@ localparam [5:0] S_SHADOW_Q    = 6'd35;
 localparam [5:0] S_L_SH_FETCH  = 6'd36;
 localparam [5:0] S_L_SH_LOAD   = 6'd37;
 localparam [5:0] S_L_REPLAY    = 6'd38;
+// Live peek. Two states: issue a request, collect its two words.
+localparam [5:0] S_PEEK_ISSUE  = 6'd41;
+localparam [5:0] S_PEEK_WAIT   = 6'd42;
 
 // Refusal reasons, as seen by the OSD.
 localparam [3:0] FAIL_MAGIC   = 4'd1;
@@ -556,6 +576,13 @@ reg [31:0] file_kick_crc;   // fingerprint the state file was made under
 // Sticky since reset: a restore ran with a fingerprint that did not match
 // the file's. Reported, not acted on -- see S_L_KICK_CHK.
 reg        kick_warn;
+
+// Live peek bookkeeping. peek_words counts the 16-bit words collected, so
+// eight of them fill peek_data's four longwords.
+reg [24:1] peek_cur;
+reg  [3:0] peek_words;
+reg [15:0] peek_low;
+reg        peek_low_held;
 // Watchdog on one SDRAM word of the scan. See SCAN_TIMEOUT.
 reg [23:0] scan_wd;
 
@@ -757,6 +784,10 @@ always @(posedge clk) begin
 		dma_start        <= 1'b0;
 		dma_write_mode   <= 1'b0;
 		kick_warn        <= 1'b0;
+		peek_data        <= 128'd0;
+		peek_valid       <= 1'b0;
+		peek_words       <= 4'd0;
+		peek_low_held    <= 1'b0;
 		restore_busy     <= 1'b0;
 		rom_scan         <= 1'b0;
 		scan_acks        <= 8'd0;
@@ -889,6 +920,67 @@ always @(posedge clk) begin
 				load_fail_code <= 4'd0;
 				restore_busy   <= 1'b1;
 				state          <= S_L_FREEZE;
+			end
+			// Lowest priority of the three: a debug read must never delay or
+			// displace a real request. Taken only from here, so it cannot land
+			// inside one either.
+			else if (peek_req) begin
+				peek_valid    <= 1'b0;
+				peek_cur      <= peek_addr;
+				peek_words    <= 4'd0;
+				peek_low_held <= 1'b0;
+				rom_scan      <= 1'b1;   // borrow the SDRAM CPU port
+				state         <= S_PEEK_ISSUE;
+			end
+		end
+
+		// ------------------------------------------------------------- peek
+		//
+		// Eight 16-bit words, two per ss_dma request, assembled into four
+		// longwords in 68k order -- the same packing the chip RAM capture
+		// uses, so a peek and a save state describe the same memory the same
+		// way. That is the whole point: they are meant to be compared.
+		S_PEEK_ISSUE: begin
+			dma_start     <= 1'b1;
+			dma_base      <= peek_cur;
+			peek_low_held <= 1'b0;
+			scan_wd       <= 24'd0;
+			state         <= S_PEEK_WAIT;
+		end
+
+		S_PEEK_WAIT: begin
+			// Bounded like the fingerprint's wait, and for the same reason:
+			// nothing has been written, so giving up is a clean rollback. A
+			// peek that finds no port simply reports nothing.
+			scan_wd <= scan_wd + 24'd1;
+			if (scan_wd > SCAN_TIMEOUT) begin
+				rom_scan <= 1'b0;
+				state    <= S_IDLE;
+			end
+			else if (dma_word_valid) begin
+				scan_wd <= 24'd0;
+				if (!peek_low_held) begin
+					peek_low      <= dma_word_out;
+					peek_low_held <= 1'b1;
+				end
+				else begin
+					// 68k order: the lower address word contributes the high
+					// byte at the lower offset, matching S_CHIP_CAP's packing.
+					peek_data <= {peek_data[95:0],
+					              peek_low[7:0], peek_low[15:8],
+					              dma_word_out[7:0], dma_word_out[15:8]};
+					peek_low_held <= 1'b0;
+					if (peek_words == 4'd6) begin
+						rom_scan   <= 1'b0;
+						peek_valid <= 1'b1;
+						state      <= S_IDLE;
+					end
+					else begin
+						peek_words <= peek_words + 4'd2;
+						peek_cur   <= peek_cur + 24'd2;
+						state      <= S_PEEK_ISSUE;
+					end
+				end
 			end
 		end
 

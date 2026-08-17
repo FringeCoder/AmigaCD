@@ -49,6 +49,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -59,6 +60,18 @@
 
 #define SS_DIAG_LOG        "/tmp/ss_dbg.log"
 #define SS_DIAG_ADDR       0xF600
+
+// Live memory peek, same UIO class with bit 5 set. The request rides in the
+// 32-bit address: class word carries address bits [24:17] in its spare bits,
+// the second word carries [16:1]. Ask in one transaction, read the answer in
+// the next -- the core needs a few microseconds to borrow the SDRAM port.
+//
+// Driven by a file so it can be used from a shell: write a hex WORD address
+// into /tmp/ss_peek and the next poll reads four longwords from there into
+// the log. Chip RAM byte address B is word address B/2.
+#define SS_PEEK_BIT        0x0020
+#define SS_PEEK_TRIGGER    "/tmp/ss_peek"
+#define SS_PEEK_WORDS      13
 #define SS_DIAG_SIG        0x55AA
 #define SS_DIAG_PAYLOAD    8
 // Two words of slack past the signature's expected position. The alignment of
@@ -182,6 +195,69 @@ static void ss_diag_read(uint16_t *w)
 	DisableIO();
 }
 
+// One peek transaction. addr is a 24-bit SDRAM WORD address.
+static void ss_peek_request(uint32_t addr)
+{
+	uint32_t hi = (addr >> 17) & 0xFF;
+	uint16_t cls = (uint16_t)(SS_DIAG_ADDR | SS_PEEK_BIT
+	                          | ((hi & 0xE0) << 1)   // -> io_din[8:6]
+	                          | (hi & 0x1F));        // -> io_din[4:0]
+	EnableIO();
+	spi8(UIO_DMA_READ);
+	spi_w(cls);
+	spi_w((uint16_t)(addr & 0xFFFF));
+	DisableIO();
+}
+
+static void ss_peek_read(uint16_t *w)
+{
+	EnableIO();
+	spi8(UIO_DMA_READ);
+	spi_w((uint16_t)(SS_DIAG_ADDR | SS_PEEK_BIT));
+	spi_w(0);
+	for (int i = 0; i < SS_PEEK_WORDS; i++) w[i] = (uint16_t)spi_w(0);
+	DisableIO();
+}
+
+// Poll the trigger file. Two-step so the core has time to fetch: the address
+// is requested on one call and read back on the next.
+static void ss_peek_service(void)
+{
+	static uint32_t pending = 0;
+	static int      armed   = 0;
+
+	if (armed) {
+		uint16_t w[SS_PEEK_WORDS] = {};
+		ss_peek_read(w);
+		armed = 0;
+		if (w[0] != 0x5A5A) {
+			ss_diag("peek $%06X: core has no peek window (sig %04X)", pending, w[0]);
+			return;
+		}
+		if (!(w[12] & 1)) {
+			ss_diag("peek $%06X: not valid yet", pending);
+			return;
+		}
+		// Words 1..8 are four longwords, low address first, 68k byte order --
+		// the same order the chip RAM section of a save state uses, so the two
+		// can be compared directly.
+		ss_diag("peek $%06X: %04X%04X %04X%04X %04X%04X %04X%04X",
+		        pending, w[8], w[7], w[6], w[5], w[4], w[3], w[2], w[1]);
+		return;
+	}
+
+	FILE *f = fopen(SS_PEEK_TRIGGER, "r");
+	if (!f) return;
+	char buf[32] = {};
+	if (fgets(buf, sizeof(buf), f)) {
+		pending = (uint32_t)strtoul(buf, NULL, 0) & 0xFFFFFF;
+		ss_peek_request(pending);
+		armed = 1;
+	}
+	fclose(f);
+	remove(SS_PEEK_TRIGGER);
+}
+
 void minimig_ss_diag_poll(void)
 {
 	static unsigned long timer = 0;
@@ -193,6 +269,8 @@ void minimig_ss_diag_poll(void)
 	if (!is_minimig() || give_up) return;
 	if (timer && !CheckTimer(timer)) return;
 	timer = GetTimer(SS_DIAG_PERIOD_MS);
+
+	ss_peek_service();
 
 	uint16_t raw[SS_DIAG_WORDS];
 	ss_diag_read(raw);
