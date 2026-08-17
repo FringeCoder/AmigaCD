@@ -471,7 +471,23 @@ end
 // from the diagnostic ports alone.
 reg [63:0] dbg_seen = 64'd0;
 
+// Every replay write the shadow emits, by address. The save side above proves
+// the section is PACKED correctly; this is what proves it is UNPACKED
+// correctly, which is a separate claim -- two entries share a payload word,
+// and a restore that took the halves the other way round would reload every
+// register in the machine with its neighbour's value and still pass every
+// check the save side makes. The module bench cannot see it either: it drives
+// ld_we itself rather than receiving a section ss_ctrl unpacked.
+reg [15:0] seen_replay [0:255];
+reg [255:0] seen_replay_valid;
+integer     ri;
+
 always @(posedge clk) dbg_seen[dbg_state] <= 1'b1;
+
+always @(posedge clk) if (sh_replay_we) begin
+	seen_replay[sh_replay_addr]       <= sh_replay_data;
+	seen_replay_valid[sh_replay_addr] <= 1'b1;
+end
 
 task reset_observers;
 begin
@@ -483,6 +499,8 @@ begin
 	chip_wr_at_release  = 0;
 	state_we_at_release = 0;
 	dbg_seen            = 64'd0;
+	seen_replay_valid   = 256'd0;
+	for (ri = 0; ri < 256; ri = ri + 1) seen_replay[ri] = 16'hFFFF;
 end
 endtask
 
@@ -788,6 +806,24 @@ initial begin
 	// state_in above.
 	check("restored state low",  state_out[31:0],  32'h89ABCDEF);
 	check("restored state high", state_out[63:32], 32'h01234567);
+
+	// The chipset register shadow, back out of the file and into the machine.
+	// These are the five entries written before the save, at the addresses
+	// they were written to: the section survived being packed two-per-word,
+	// streamed, CRC'd, read back and unpacked, and the replay drove it at the
+	// right addresses. $026 was never written and must come back zero -- a
+	// section shifted by one entry would otherwise land $024's value here and
+	// every check above it would still pass.
+	check("replayed $020", {16'd0, seen_replay[8'h10]}, 32'h00001234);
+	check("replayed $022", {16'd0, seen_replay[8'h11]}, 32'h00005678);
+	check("replayed $024", {16'd0, seen_replay[8'h12]}, 32'h00009ABC);
+	check("replayed $026 is still zero",
+	      {16'd0, seen_replay[8'h13]}, 32'h00000000);
+	check("replayed $02A", {16'd0, seen_replay[8'h15]}, 32'h0000DEF0);
+	check("replayed $036", {16'd0, seen_replay[8'h1B]}, 32'h0000A5A5);
+	check("every plain entry was replayed",
+	      {31'd0, seen_replay_valid[8'h10] & seen_replay_valid[8'h13] &
+	              seen_replay_valid[8'h1B] & seen_replay_valid[8'hFF]}, 32'd1);
 
 	// Chip RAM back in SDRAM, in SDRAM's own word order -- the inverse of the
 	// 68k-order file contract asserted above, pinned to literals for the same
