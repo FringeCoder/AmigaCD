@@ -122,6 +122,10 @@ wire [127:0] peek_data;
 wire         peek_valid;
 wire         peek_busy;
 wire         peek_scan;
+reg  [31:0]  cpu_pc = 32'h00C0FFEE;
+wire [127:0] pc_snapshot;
+wire  [63:0] kick_pair;
+wire         dbg_kick_unstable;
 
 // The three state codes the diagnostic checks name. Written out here rather
 // than imported from ss_ctrl.v on purpose: these numbers are a published
@@ -195,6 +199,8 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.peek_req(peek_req), .peek_addr(peek_addr),
 	.peek_data(peek_data), .peek_valid(peek_valid), .peek_busy(peek_busy),
 	.peek_scan(peek_scan),
+	.cpu_pc(cpu_pc), .pc_snapshot(pc_snapshot), .kick_pair(kick_pair),
+	.dbg_kick_unstable(dbg_kick_unstable),
 	.shadow_rd_addr(sh_rd_addr), .shadow_rd_data(sh_rd_data),
 	.shadow_ld_we(sh_ld_we), .shadow_ld_addr(sh_ld_addr),
 	.shadow_ld_data(sh_ld_data),
@@ -1116,6 +1122,18 @@ initial begin
 	// rom_scan belongs to the fingerprint alone now; a peek must not have
 	// touched it, which is what keeps its timing where it was.
 	check("peek left rom_scan alone", {31'd0, rom_scan}, 32'd0);
+
+	// The fingerprint self-test: this mock returns the same ROM twice, so the
+	// two scans must agree. A mismatch here would mean the bench's own read
+	// path is nondeterministic, which is worth knowing before trusting the bit
+	// on hardware.
+	check("two scans of the same ROM agreed", {31'd0, dbg_kick_unstable}, 32'd0);
+
+	// The pair the last restore compared, published for userspace. The live
+	// half is the fingerprint of the mock's alternate ROM -- rom_alt was left
+	// on by the case above -- and the file half is what the save wrote.
+	check("kick_pair carries the file's fingerprint",
+	      kick_pair[63:32], ddr_word(W_KICK));
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);

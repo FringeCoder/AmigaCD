@@ -271,6 +271,8 @@ module ss_ctrl
 	//                        match the file's; advisory while the scan is
 	//                        untrustworthy
 	output                    dbg_kick_warn,
+	// Two scans of the same frozen memory disagreed: the read path, not the ROM.
+	output                    dbg_kick_unstable,
 
 	// ------------------------------------------------------------ live peek
 	//
@@ -305,7 +307,23 @@ module ss_ctrl
 	// fail setup by 0.136 ns -- the failing paths ended at rom_scan and came
 	// from the CRC and the payload index, i.e. the save path's own logic.
 	// Minimig.sv ORs the two into the port mux instead, which costs nothing.
-	output reg                peek_scan
+	output reg                peek_scan,
+
+	// ---------------------------------------------------- restore post-mortem
+	//
+	// Four samples of the CPU's PC taken after the freeze drops, and the two
+	// fingerprints the last restore compared. Both exist for the same reason
+	// the peek does: a restore that reports success and then resets the machine
+	// gives userspace nothing to look at, and every explanation so far has been
+	// inference from a two-megabyte file.
+	//
+	// The PC is the CPU's own, exported for the save path already. If it sits
+	// at the restored value and advances, the CPU is fine and the fault is
+	// elsewhere; if it jumps to ROM, the machine took a reset and we can stop
+	// looking at the chipset.
+	input      [31:0]         cpu_pc,
+	output     [127:0]        pc_snapshot,   // four samples, earliest first
+	output      [63:0]        kick_pair      // {file's fingerprint, live one}
 );
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
@@ -426,6 +444,16 @@ localparam [5:0] S_L_REPLAY    = 6'd38;
 // Live peek. Two states: issue a request, collect its two words.
 localparam [5:0] S_PEEK_ISSUE  = 6'd41;
 localparam [5:0] S_PEEK_WAIT   = 6'd42;
+// The fingerprint self-test: scan a second time inside the same freeze and
+// compare. Nothing can write SDRAM between the two -- the machine is stopped --
+// so a disagreement is the READ PATH and not the memory. Two saves nine seconds
+// apart produced different fingerprints on hardware, which is what this settles.
+//
+// 43 and 44 because 39/40 belong to S_SHADOW_LOW/S_SHADOW_HI. The first attempt
+// at this used those numbers and silently became them, which read as the save
+// path hanging.
+localparam [5:0] S_KICK_VERIFY = 6'd43;
+localparam [5:0] S_KICK_CMP    = 6'd44;
 
 // Refusal reasons, as seen by the OSD.
 localparam [3:0] FAIL_MAGIC   = 4'd1;
@@ -594,9 +622,22 @@ reg [31:0] file_kick_crc;   // fingerprint the state file was made under
 // Sticky since reset: a restore ran with a fingerprint that did not match
 // the file's. Reported, not acted on -- see S_L_KICK_CHK.
 reg        kick_warn;
+// Set when two scans of the same frozen memory disagreed. Sticky: one unstable
+// read is the whole finding.
+reg        kick_unstable;
+reg [31:0] kick_crc_p1;
 
 // Live peek bookkeeping. peek_words counts the 16-bit words collected, so
 // eight of them fill peek_data's four longwords.
+// Post-restore PC sampling. Armed when the freeze drops, four samples spaced
+// by PC_SAMPLE_GAP clocks so they cover roughly the first millisecond -- long
+// enough for a machine that is going to reset to have done it.
+localparam [23:0] PC_SAMPLE_GAP = 24'd16384;   // ~144 us at 113.5 MHz
+reg [31:0] pc_snap0, pc_snap1, pc_snap2, pc_snap3;
+reg  [1:0] pc_idx;
+reg [23:0] pc_timer;
+reg        pc_arm;
+
 reg [24:1] peek_cur;
 reg  [3:0] peek_words;
 reg [15:0] peek_low;
@@ -709,6 +750,41 @@ wire        pay_held = (rd_pair == {1'b0, pay_win[23:1]});
 // adding any.
 assign dbg_state = state;
 assign dbg_kick_warn     = kick_warn;
+assign dbg_kick_unstable = kick_unstable;
+
+// Deliberately a block of its own. Everything it reads is already registered
+// and nothing else reads what it writes, so it cannot lengthen a path that
+// matters -- which is the mistake that cost a fit when the peek was first
+// wired into rom_scan.
+always @(posedge clk) begin
+	if (!rst_n) begin
+		pc_arm   <= 1'b0;
+		pc_idx   <= 2'd0;
+		pc_timer <= 24'd0;
+	end
+	else if (state == S_L_RELEASE) begin
+		pc_arm   <= 1'b1;
+		pc_idx   <= 2'd0;
+		pc_timer <= 24'd0;
+	end
+	else if (pc_arm) begin
+		if (pc_timer == PC_SAMPLE_GAP) begin
+			pc_timer <= 24'd0;
+			case (pc_idx)
+			2'd0: pc_snap0 <= cpu_pc;
+			2'd1: pc_snap1 <= cpu_pc;
+			2'd2: pc_snap2 <= cpu_pc;
+			2'd3: pc_snap3 <= cpu_pc;
+			endcase
+			if (pc_idx == 2'd3) pc_arm <= 1'b0;
+			else                pc_idx <= pc_idx + 2'd1;
+		end
+		else pc_timer <= pc_timer + 24'd1;
+	end
+end
+
+assign pc_snapshot = {pc_snap3, pc_snap2, pc_snap1, pc_snap0};
+assign kick_pair   = {file_kick_crc, kick_crc};
 
 // Progress within whichever direction is running. A save walks the DDR3 window
 // by word_idx; a restore walks the payload by pay_idx. The two never advance
@@ -802,6 +878,7 @@ always @(posedge clk) begin
 		dma_start        <= 1'b0;
 		dma_write_mode   <= 1'b0;
 		kick_warn        <= 1'b0;
+		kick_unstable    <= 1'b0;
 		peek_data        <= 128'd0;
 		peek_valid       <= 1'b0;
 		peek_busy        <= 1'b0;
@@ -1020,7 +1097,7 @@ always @(posedge clk) begin
 				scan_acks  <= 8'd0;
 				kick_addr  <= kick_base;
 				kick_pairs <= 24'd0;
-				kick_ret   <= S_PAY_KICK;
+				kick_ret   <= S_KICK_VERIFY;
 				state      <= S_KICK_ISSUE;
 			end
 		end
@@ -1103,6 +1180,26 @@ always @(posedge clk) begin
 					state      <= S_KICK_ISSUE;
 				end
 			end
+		end
+
+		// Pass 1 is in kick_crc. Stash it and run the whole scan again from the
+		// same base, still frozen.
+		S_KICK_VERIFY: begin
+			kick_crc_p1 <= kick_crc;
+			crc_init    <= 1'b1;
+			rom_scan    <= 1'b1;
+			scan_acks   <= 8'd0;
+			kick_addr   <= kick_base;
+			kick_pairs  <= 24'd0;
+			kick_ret    <= S_KICK_CMP;
+			state       <= S_KICK_ISSUE;
+		end
+
+		// The payload carries pass 2, which is the one a restore will be
+		// compared against.
+		S_KICK_CMP: begin
+			if (kick_crc != kick_crc_p1) kick_unstable <= 1'b1;
+			state <= S_PAY_KICK;
 		end
 
 		// Save: the fingerprint is payload word 0, and it is the first word fed

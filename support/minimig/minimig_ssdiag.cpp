@@ -72,7 +72,8 @@
 #define SS_PEEK_BIT        0x0020
 #define SS_PEEK_ARM        0x0010   // io_din[4]: fetch. Without it, read only.
 #define SS_PEEK_TRIGGER    "/tmp/ss_peek"
-#define SS_PEEK_WORDS      13
+// 13 peek words, then 8 of PC samples and 4 of fingerprints.
+#define SS_PEEK_WORDS      25
 #define SS_DIAG_SIG        0x55AA
 #define SS_DIAG_PAYLOAD    8
 // Two words of slack past the signature's expected position. The alignment of
@@ -246,6 +247,16 @@ static void ss_peek_service(void)
 		// can be compared directly.
 		ss_diag("peek $%06X: %04X%04X %04X%04X %04X%04X %04X%04X",
 		        pending, w[8], w[7], w[6], w[5], w[4], w[3], w[2], w[1]);
+
+		// The restore post-mortem rides behind the peek data. Logged with it
+		// because it is read in the same breath and means nothing on its own:
+		// four PC samples spaced ~144 us apart from the moment the freeze
+		// dropped, then the two fingerprints the last restore compared.
+		ss_diag("  after restore: PC %04X%04X %04X%04X %04X%04X %04X%04X",
+		        w[14], w[13], w[16], w[15], w[18], w[17], w[20], w[19]);
+		ss_diag("  kickstart: live %04X%04X  file %04X%04X%s",
+		        w[22], w[21], w[24], w[23],
+		        (w[22] == w[24] && w[21] == w[23]) ? "  (match)" : "  (DIFFER)");
 		return;
 	}
 
