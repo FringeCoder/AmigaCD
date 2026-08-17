@@ -180,10 +180,10 @@ jobs:
 
       # The restore's register-write sequencer: the sixteen CPU registers in
       # index order, the five singles, the map bits, and the re-seed last with
-      # the CPU still parked. -g2012 for $bits, -I. so `include "rtl/..." works
+      # the CPU still parked. -g2012 for the .sv, -I. so `include "rtl/..." works
       # from the repo root the way it does for Quartus.
       - name: Build state fanout testbench
-        run: iverilog -g2012 -Wall -I. -o build/ss_state_fanout_tb rtl/ss_state_fanout.v rtl/tb/ss_state_fanout_tb.v
+        run: iverilog -g2012 -Wall -I. -o build/ss_state_fanout_tb rtl/ss_state_fanout.sv rtl/tb/ss_state_fanout_tb.v
 
       - name: Run state fanout testbench
         run: vvp build/ss_state_fanout_tb

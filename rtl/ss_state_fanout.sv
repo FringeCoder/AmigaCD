@@ -118,6 +118,13 @@ assign intreq_out = ss_intreq;
 // plausible-looking machine that is wrong everywhere. An unresolvable module
 // instance is a hard Quartus error, which is what this wants to be.
 //
+// SystemVerilog, hence the .sv: Quartus 17.0 rejects $bits outright in a
+// Verilog-2001 file ("system function \"$bits\" is not supported for
+// synthesis"), and accepts it in a .sv one. The guard was written inside
+// Minimig.sv, which is .sv, so moving this module to a .v file broke a fit
+// that had never been run against it -- the extension was carrying the
+// feature.
+//
 // Synthesis only. Icarus evaluates $bits() of a concatenation of NETS as 0
 // at elaboration -- measured, not assumed -- so the check would fire on
 // every simulation build and no testbench could compile this module at
