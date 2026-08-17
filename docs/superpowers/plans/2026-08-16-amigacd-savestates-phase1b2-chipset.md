@@ -401,3 +401,34 @@ on `is_minimig()`, so a corrupt window cannot replace a good state file.
 Also from the audit, not a defect: the freeze sampler and the replay tick were
 written twice, once in `Minimig.sv` and once in the ssmux bench. They are now
 one module, `ss_freeze_phase`, that both instantiate.
+
+## The CIAs, done (2026-08-17)
+
+Approach A as planned, with one deviation from the payload sketch above: the two
+CIA words go **into the state vector**, not into a separate CIA block. The
+vector is already a streamed bit field of arbitrary width with one ordered list
+that both directions expand from, and `ss_ctrl` derives `STATE_WORDS` and
+`CORE_WORDS` from `SS_STATE_W` on its own. A separate section would have needed
+its own fetch/load states, its own packing order and its own place in the CRC,
+all to carry two fixed-width words. `SS_STATE_W` goes 647 -> 1041, which is 33
+payload words for the vector.
+
+What is carried, per CIA: both timers' counters, latch bytes and control
+registers; TOD with its alarm and its read latch; the interrupt mask and pending
+flags; the port data and direction registers; SDR. 191 bits for CIA A, 203 for
+CIA B -- CIA A drives only four port A bits and has no port B output register.
+
+The read latch is in there deliberately. Reading the TOD high byte freezes it
+and reading the low byte releases it, so a machine saved between those two reads
+is mid-sequence; restoring the counter without the latch would hand the program
+a time that jumps.
+
+Every write port is taken **outside** the `clk7_en` gate, the same way gary's
+`ss_rom_readonly` restore is. A restore runs with the Amiga's timebase stopped,
+so a load that waited for `clk7_en` would wait forever -- the same fault that
+made the chipset replay write nothing at all, found earlier this session.
+
+Not carried, and deliberately: `ser_tx_cnt`/`ser_tx_run` in CIA A (a serial
+transmission in flight), the input synchronisers, and the delayed-tick edge
+detectors. These are one or two ticks of history rather than programmer-visible
+state, and the keyboard protocol re-synchronises.
