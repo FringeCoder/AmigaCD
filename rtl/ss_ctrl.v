@@ -511,7 +511,12 @@ ss_quiesce quiesce
 	// SDRAM CPU port answered nothing until the machine itself was stopped,
 	// which is the condition every other user of this port has always had.
 	.req(save_busy || restore_busy || peek_busy),
-	.frame_limit(save_busy ? SAVE_FRAMES : LOAD_FRAMES),
+	// A peek gets the save's budget, not the restore's. `quiet` requires audio
+	// DMA to be idle, and a game with continuous music only offers gaps every
+	// so often: a save waits up to 120 frames and finds one, a restore waits 3
+	// because by then the machine is already stopped. A peek that inherited
+	// the restore's 3 frames gave up every single time on hardware.
+	.frame_limit((save_busy || peek_busy) ? SAVE_FRAMES : LOAD_FRAMES),
 	.blit_busy(blit_busy), .disk_busy(disk_busy), .audio_busy(audio_busy),
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),
 	.freeze(freeze), .quiesced(quiesced), .timeout(timeout)
