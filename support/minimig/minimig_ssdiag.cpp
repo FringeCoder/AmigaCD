@@ -200,7 +200,14 @@ static void ss_diag_read(uint16_t *w)
 // One peek transaction. addr is a 24-bit SDRAM WORD address.
 static void ss_peek_request(uint32_t addr)
 {
-	uint32_t hi = (addr >> 17) & 0x7F;
+	// hps_ext.v:257 loads ss_peek_addr[16:1] from the low word, so that word
+	// carries address bits 15:0 and the class-word field has to continue at
+	// bit 16 -- not 17. Shifting by 17 dropped bit 16 and shifted every higher
+	// bit down one, so a peek of $039CD8 read $019CD8 and quietly returned the
+	// wrong memory. Only addresses under $10000 were unaffected, which is why
+	// the first checks against a save file agreed and the ones at a real PC
+	// did not.
+	uint32_t hi = (addr >> 16) & 0x7F;
 	uint16_t cls = (uint16_t)(SS_DIAG_ADDR | SS_PEEK_BIT | SS_PEEK_ARM
 	                          | ((hi & 0x70) << 2)   // -> io_din[8:6]
 	                          | (hi & 0x0F));        // -> io_din[3:0]
