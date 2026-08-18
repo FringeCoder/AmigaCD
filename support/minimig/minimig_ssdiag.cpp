@@ -254,7 +254,12 @@ static void ss_peek_service(void)
 		        w[19], w[18], w[21], w[20],
 		        (w[19] == w[21] && w[18] == w[20]) ? "  (match)" : "  (DIFFER)");
 
-		if (!(w[12] & 1)) {
+		// byte_cnt 12 is the valid flag (hps_ext.v:396), so it is w[9] -- NOT
+		// w[12], which is byte_cnt 15, the high half of a PC sample. That word
+		// is even for any PC in chip RAM, so the test read "invalid" every
+		// time and no peek ever reported a byte of memory. The same off-by-
+		// three was fixed in the field prints above and missed here.
+		if (!(w[9] & 1)) {
 			ss_diag("peek $%06X: not valid yet", pending);
 			return;
 		}
