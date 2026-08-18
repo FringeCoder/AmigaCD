@@ -110,7 +110,7 @@
 // The restore-side scan used to run with the machine still going, and the
 // ss_freeze term did not cover it. That was safe as far as the CPU went --
 // cpu_wrapper's ss_arm (Minimig.sv ties it to save_busy | load_busy | fan-out
-// busy) parks the 68k at its next no-memaccess boundary, milliseconds before
+// busy) parks the 68k at its next instruction boundary, milliseconds before
 // rom_scan can rise, so the CPU is not on its port to be robbed of it. What it
 // was not safe for is everything ss_arm does NOT stop. Parking the CPU is not
 // freezing the Amiga: the chipset runs on. See S_IDLE's load branch for what
