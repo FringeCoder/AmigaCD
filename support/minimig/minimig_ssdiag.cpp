@@ -238,6 +238,18 @@ static void ss_peek_service(void)
 			ss_diag("peek $%06X: core has no peek window (sig %04X)", pending, w[0]);
 			return;
 		}
+
+		// The restore post-mortem shares this window and does NOT depend on the
+		// peek succeeding -- it is filled by the last restore, not by this
+		// request. Logged before the validity check for exactly that reason:
+		// with it after, a peek that timed out took the post-mortem with it,
+		// which is what happened on the first machine that needed it.
+		ss_diag("  after restore: PC %04X%04X %04X%04X %04X%04X %04X%04X",
+		        w[14], w[13], w[16], w[15], w[18], w[17], w[20], w[19]);
+		ss_diag("  kickstart: live %04X%04X  file %04X%04X%s",
+		        w[22], w[21], w[24], w[23],
+		        (w[22] == w[24] && w[21] == w[23]) ? "  (match)" : "  (DIFFER)");
+
 		if (!(w[12] & 1)) {
 			ss_diag("peek $%06X: not valid yet", pending);
 			return;
@@ -248,15 +260,6 @@ static void ss_peek_service(void)
 		ss_diag("peek $%06X: %04X%04X %04X%04X %04X%04X %04X%04X",
 		        pending, w[8], w[7], w[6], w[5], w[4], w[3], w[2], w[1]);
 
-		// The restore post-mortem rides behind the peek data. Logged with it
-		// because it is read in the same breath and means nothing on its own:
-		// four PC samples spaced ~144 us apart from the moment the freeze
-		// dropped, then the two fingerprints the last restore compared.
-		ss_diag("  after restore: PC %04X%04X %04X%04X %04X%04X %04X%04X",
-		        w[14], w[13], w[16], w[15], w[18], w[17], w[20], w[19]);
-		ss_diag("  kickstart: live %04X%04X  file %04X%04X%s",
-		        w[22], w[21], w[24], w[23],
-		        (w[22] == w[24] && w[21] == w[23]) ? "  (match)" : "  (DIFFER)");
 		return;
 	}
 
