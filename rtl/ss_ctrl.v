@@ -1082,14 +1082,20 @@ always @(posedge clk) begin
 		// The machine has to be stopped before the port will answer. Bounded:
 		// a peek that cannot get the machine to hold still reports nothing
 		// rather than leaving it frozen.
+		// No SCAN_TIMEOUT here, deliberately. ss_quiesce waits for the blitter,
+		// disk and audio to fall quiet and counts FRAMES while it does -- tens
+		// of milliseconds. Bounding this wait with the 577 us word-read
+		// watchdog meant a peek gave up long before the machine could possibly
+		// have stopped, which is exactly what it did on hardware: state 45,
+		// every time. ss_quiesce's own frame-counted timeout is the right
+		// bound and the only one needed.
 		S_PEEK_FREEZE: begin
-			scan_wd <= scan_wd + 24'd1;
 			if (quiesced) begin
 				peek_scan <= 1'b1;   // borrow the SDRAM CPU port
 				scan_wd   <= 24'd0;
 				state     <= S_PEEK_ISSUE;
 			end
-			else if (timeout || scan_wd > SCAN_TIMEOUT) begin
+			else if (timeout) begin
 				peek_busy    <= 1'b0;
 				peek_timeout <= 1'b1;
 				state        <= S_IDLE;
