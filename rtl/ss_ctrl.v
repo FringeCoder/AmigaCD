@@ -323,7 +323,11 @@ module ss_ctrl
 	// looking at the chipset.
 	input      [31:0]         cpu_pc,
 	output     [127:0]        pc_snapshot,   // four samples, earliest first
-	output      [63:0]        kick_pair      // {file's fingerprint, live one}
+	output      [63:0]        kick_pair,     // {file's fingerprint, live one}
+	// How a peek ended: acks seen, and whether it gave up. Without these a
+	// failed peek is indistinguishable from one that was never asked for.
+	output      [7:0]         peek_acks,
+	output reg                peek_timeout
 );
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
@@ -454,6 +458,8 @@ localparam [5:0] S_PEEK_WAIT   = 6'd42;
 // path hanging.
 localparam [5:0] S_KICK_VERIFY = 6'd43;
 localparam [5:0] S_KICK_CMP    = 6'd44;
+// A peek waits for the freeze before it reads.
+localparam [5:0] S_PEEK_FREEZE = 6'd45;
 
 // Refusal reasons, as seen by the OSD.
 localparam [3:0] FAIL_MAGIC   = 4'd1;
@@ -501,7 +507,10 @@ reg restore_busy;
 ss_quiesce quiesce
 (
 	.clk(clk), .rst_n(rst_n),
-	.req(save_busy || restore_busy),
+	// A peek joins them. Parking the CPU was not enough on hardware: the
+	// SDRAM CPU port answered nothing until the machine itself was stopped,
+	// which is the condition every other user of this port has always had.
+	.req(save_busy || restore_busy || peek_busy),
 	.frame_limit(save_busy ? SAVE_FRAMES : LOAD_FRAMES),
 	.blit_busy(blit_busy), .disk_busy(disk_busy), .audio_busy(audio_busy),
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),
@@ -629,15 +638,42 @@ reg [31:0] kick_crc_p1;
 
 // Live peek bookkeeping. peek_words counts the 16-bit words collected, so
 // eight of them fill peek_data's four longwords.
-// Post-restore PC sampling. Armed when the freeze drops, four samples spaced
-// by PC_SAMPLE_GAP clocks so they cover roughly the first millisecond -- long
-// enough for a machine that is going to reset to have done it.
-localparam [23:0] PC_SAMPLE_GAP = 24'd16384;   // ~144 us at 113.5 MHz
+// Post-restore PC sampling. Armed when the freeze drops.
+//
+// The gaps are NOT uniform, and that is the point. Four samples 144 us apart
+// all read $00F8367C on hardware -- Kickstart ROM, identical every time -- for
+// a state whose restored PC was $000739BA. That says the machine ends up in
+// ROM but not whether it ever left it: 144 us is thousands of instructions.
+//
+// Spread logarithmically instead, so the first sample lands before the CPU has
+// executed anything:
+//
+//   0:    ~4 clocks   (~35 ns)   -- what the CPU holds as it is released
+//   1:   ~68 clocks   (~0.6 us)  -- the first instruction or two
+//   2: ~1092 clocks   (~9.6 us)  -- a few hundred instructions
+//   3: ~17k clocks    (~154 us)  -- where the old window started
+//
+// Sample 0 equal to the restored PC means the write landed and the CPU faulted
+// afterwards; sample 0 already in ROM means it never resumed there at all.
+// Those need different fixes, which is why one uniform window could not
+// separate them.
 reg [31:0] pc_snap0, pc_snap1, pc_snap2, pc_snap3;
 reg  [1:0] pc_idx;
 reg [23:0] pc_timer;
 reg        pc_arm;
 
+// The gap before each sample, by index.
+reg [23:0] pc_gap;
+always @(*) begin
+	case (pc_idx)
+	2'd0: pc_gap = 24'd4;
+	2'd1: pc_gap = 24'd64;
+	2'd2: pc_gap = 24'd1024;
+	default: pc_gap = 24'd16384;
+	endcase
+end
+
+reg  [7:0] peek_ack_cnt;
 reg [24:1] peek_cur;
 reg  [3:0] peek_words;
 reg [15:0] peek_low;
@@ -768,7 +804,7 @@ always @(posedge clk) begin
 		pc_timer <= 24'd0;
 	end
 	else if (pc_arm) begin
-		if (pc_timer == PC_SAMPLE_GAP) begin
+		if (pc_timer == pc_gap) begin
 			pc_timer <= 24'd0;
 			case (pc_idx)
 			2'd0: pc_snap0 <= cpu_pc;
@@ -785,6 +821,7 @@ end
 
 assign pc_snapshot = {pc_snap3, pc_snap2, pc_snap1, pc_snap0};
 assign kick_pair   = {file_kick_crc, kick_crc};
+assign peek_acks   = peek_ack_cnt;
 
 // Progress within whichever direction is running. A save walks the DDR3 window
 // by word_idx; a restore walks the payload by pay_idx. The two never advance
@@ -883,6 +920,8 @@ always @(posedge clk) begin
 		peek_valid       <= 1'b0;
 		peek_busy        <= 1'b0;
 		peek_scan        <= 1'b0;
+		peek_timeout     <= 1'b0;
+		peek_ack_cnt     <= 8'd0;
 		peek_words       <= 4'd0;
 		peek_low_held    <= 1'b0;
 		restore_busy     <= 1'b0;
@@ -1024,11 +1063,13 @@ always @(posedge clk) begin
 			else if (peek_req) begin
 				peek_busy     <= 1'b1;
 				peek_valid    <= 1'b0;
+				peek_timeout  <= 1'b0;
+				peek_ack_cnt  <= 8'd0;
+				scan_wd       <= 24'd0;
 				peek_cur      <= peek_addr;
 				peek_words    <= 4'd0;
 				peek_low_held <= 1'b0;
-				peek_scan     <= 1'b1;   // borrow the SDRAM CPU port
-				state         <= S_PEEK_ISSUE;
+				state         <= S_PEEK_FREEZE;
 			end
 		end
 
@@ -1038,6 +1079,23 @@ always @(posedge clk) begin
 		// longwords in 68k order -- the same packing the chip RAM capture
 		// uses, so a peek and a save state describe the same memory the same
 		// way. That is the whole point: they are meant to be compared.
+		// The machine has to be stopped before the port will answer. Bounded:
+		// a peek that cannot get the machine to hold still reports nothing
+		// rather than leaving it frozen.
+		S_PEEK_FREEZE: begin
+			scan_wd <= scan_wd + 24'd1;
+			if (quiesced) begin
+				peek_scan <= 1'b1;   // borrow the SDRAM CPU port
+				scan_wd   <= 24'd0;
+				state     <= S_PEEK_ISSUE;
+			end
+			else if (timeout || scan_wd > SCAN_TIMEOUT) begin
+				peek_busy    <= 1'b0;
+				peek_timeout <= 1'b1;
+				state        <= S_IDLE;
+			end
+		end
+
 		S_PEEK_ISSUE: begin
 			dma_start     <= 1'b1;
 			dma_base      <= peek_cur;
@@ -1051,10 +1109,13 @@ always @(posedge clk) begin
 			// nothing has been written, so giving up is a clean rollback. A
 			// peek that finds no port simply reports nothing.
 			scan_wd <= scan_wd + 24'd1;
+			if (sd_ready && peek_ack_cnt != 8'hFF) peek_ack_cnt <= peek_ack_cnt + 8'd1;
+
 			if (scan_wd > SCAN_TIMEOUT) begin
-				peek_scan <= 1'b0;
-				peek_busy <= 1'b0;
-				state     <= S_IDLE;
+				peek_scan    <= 1'b0;
+				peek_busy    <= 1'b0;
+				peek_timeout <= 1'b1;
+				state        <= S_IDLE;
 			end
 			else if (dma_word_valid) begin
 				scan_wd <= 24'd0;
