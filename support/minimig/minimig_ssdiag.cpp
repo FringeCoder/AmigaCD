@@ -244,11 +244,15 @@ static void ss_peek_service(void)
 		// request. Logged before the validity check for exactly that reason:
 		// with it after, a peek that timed out took the post-mortem with it,
 		// which is what happened on the first machine that needed it.
+		// w[0] is the word at byte_cnt 3, so byte_cnt N is w[N-3]. The PC
+		// samples start at byte_cnt 13 and the fingerprints at 21. Getting this
+		// wrong shifted every field by three and printed a fingerprint mismatch
+		// that did not exist.
 		ss_diag("  after restore: PC %04X%04X %04X%04X %04X%04X %04X%04X",
-		        w[14], w[13], w[16], w[15], w[18], w[17], w[20], w[19]);
+		        w[11], w[10], w[13], w[12], w[15], w[14], w[17], w[16]);
 		ss_diag("  kickstart: live %04X%04X  file %04X%04X%s",
-		        w[22], w[21], w[24], w[23],
-		        (w[22] == w[24] && w[21] == w[23]) ? "  (match)" : "  (DIFFER)");
+		        w[19], w[18], w[21], w[20],
+		        (w[19] == w[21] && w[18] == w[20]) ? "  (match)" : "  (DIFFER)");
 
 		if (!(w[12] & 1)) {
 			ss_diag("peek $%06X: not valid yet", pending);
