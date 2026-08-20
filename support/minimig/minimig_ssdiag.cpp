@@ -73,7 +73,7 @@
 #define SS_PEEK_ARM        0x0010   // io_din[4]: fetch. Without it, read only.
 #define SS_PEEK_TRIGGER    "/tmp/ss_peek"
 // 13 peek words, then 8 of PC samples and 4 of fingerprints.
-#define SS_PEEK_WORDS      26   // byte_cnt 3..28
+#define SS_PEEK_WORDS      28   // byte_cnt 3..30
 #define SS_DIAG_SIG        0x55AA
 #define SS_DIAG_PAYLOAD    8
 // Two words of slack past the signature's expected position. The alignment of
@@ -282,6 +282,8 @@ static void ss_peek_service(void)
 		        (w[25] & 2) ? "sys_reset " : "",
 		        (w[25] & 4) ? "CPU-RESET-instruction " : "",
 		        (w[25] & 7) ? "" : "(none)");
+		if (w[25] & 4)
+			ss_diag("  RESET instruction executed at PC $%04X%04X", w[27], w[26]);
 
 		if (!(w[9] & 1)) {
 			ss_diag("peek $%06X: not valid yet", pending);
