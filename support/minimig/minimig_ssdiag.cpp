@@ -73,7 +73,7 @@
 #define SS_PEEK_ARM        0x0010   // io_din[4]: fetch. Without it, read only.
 #define SS_PEEK_TRIGGER    "/tmp/ss_peek"
 // 13 peek words, then 8 of PC samples and 4 of fingerprints.
-#define SS_PEEK_WORDS      33   // byte_cnt 3..35
+#define SS_PEEK_WORDS      36   // byte_cnt 3..38
 #define SS_DIAG_SIG        0x55AA
 #define SS_DIAG_PAYLOAD    8
 // Two words of slack past the signature's expected position. The alignment of
@@ -309,6 +309,11 @@ static void ss_peek_service(void)
 			        w[28], what, w[30], w[29], w[32]);
 			ss_diag("  before the reset: %u interrupts, %u frames",
 			        (unsigned)(w[31] & 0xFF), (unsigned)(w[24] & 0xFF));
+			// Live VBR against what the state vector recorded. This game
+			// contains movec-to-VBR code and its level-3 vector at physical
+			// $6C points mid-routine into ROM, which a running machine could
+			// not survive if it were really using it.
+			ss_diag("  live: VBR $%04X%04X  SR %04X", w[34], w[33], w[35]);
 		}
 
 		if (!(w[9] & 1)) {
