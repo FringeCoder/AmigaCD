@@ -266,6 +266,14 @@ static void ss_peek_service(void)
 		// is even for any PC in chip RAM, so the test read "invalid" every
 		// time and no peek ever reported a byte of memory. The same off-by-
 		// three was fixed in the field prints above and missed here.
+		// Live chipset state, byte_cnt 25-27 -> w[22..24]. Read every time the
+		// window is, because the question after a restore that resumes into a
+		// frame-wait loop is not what the file held but what the machine holds
+		// now: whether Paula's enable mask survived the replay, and whether
+		// vertical blanks are still happening at all.
+		ss_diag("  live: INTENA %04X  INTREQ %04X  frames %u",
+		        w[22], w[23], (unsigned)(w[24] & 0xFF));
+
 		if (!(w[9] & 1)) {
 			ss_diag("peek $%06X: not valid yet", pending);
 			return;
