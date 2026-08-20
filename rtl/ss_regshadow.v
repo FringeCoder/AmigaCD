@@ -202,6 +202,17 @@ begin
 		(a != 9'h05C) &&   // BLTSIZV (ECS)
 		(a != 9'h05E) &&   // BLTSIZH (ECS)
 		// SERDAT starts a serial transmission on write, same reasoning.
+		// The beam counters. agnus_beamcounter.v loads vpos[10:8] and
+		// long_frame from a VPOSW write and vpos[7:0] and hpos[8:1] from a
+		// VHPOSW write, so replaying either MOVES THE RASTER -- mid-restore,
+		// at an arbitrary point in the frame. Worse, almost no game writes
+		// them, so the shadow entry is the initial 0 and the replay jumps the
+		// beam to line 0 and forces a short frame. They are position, not
+		// configuration: whatever the beam was doing at the save is gone by
+		// the time the machine is running again, and the chipset re-derives it
+		// every line. WinUAE does not restore them into the counters either.
+		(a != 9'h02A) &&   // VPOSW
+		(a != 9'h02C) &&   // VHPOSW
 		(a != 9'h030) &&   // SERDAT
 		// DSKLEN arms disk DMA. paula_floppy.v:689 is
 		//     dmaen <= data_in[15] & dsklen[15]

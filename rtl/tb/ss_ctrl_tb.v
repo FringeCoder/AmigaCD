@@ -125,6 +125,8 @@ wire         peek_scan;
 reg  [31:0]  cpu_pc = 32'h00C0FFEE;
 wire [127:0] pc_snapshot;
 wire  [63:0] kick_pair;
+wire   [7:0] peek_acks;
+wire         peek_timeout;
 wire         dbg_kick_unstable;
 
 // The three state codes the diagnostic checks name. Written out here rather
@@ -200,6 +202,7 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.peek_data(peek_data), .peek_valid(peek_valid), .peek_busy(peek_busy),
 	.peek_scan(peek_scan),
 	.cpu_pc(cpu_pc), .pc_snapshot(pc_snapshot), .kick_pair(kick_pair),
+	.peek_acks(peek_acks), .peek_timeout(peek_timeout),
 	.dbg_kick_unstable(dbg_kick_unstable),
 	.shadow_rd_addr(sh_rd_addr), .shadow_rd_data(sh_rd_data),
 	.shadow_ld_we(sh_ld_we), .shadow_ld_addr(sh_ld_addr),
@@ -555,9 +558,34 @@ begin
 	@(negedge clk);
 	sh_snoop_addr = 8'd0;
 	sh_snoop_data = 16'd0;
-	exp_shadow[idx] = val;
+	// Excluded addresses are refused by the shadow, so the payload keeps a
+	// zero for them however often they are written. Mirroring the exclusion
+	// here rather than at each call site keeps the CRC reference honest: it is
+	// computed from this array, so an entry recorded that the design does not
+	// actually store would make the reference agree with the wrong payload.
+	if (!sh_excluded(idx)) exp_shadow[idx] = val;
 end
 endtask
+
+// The addresses ss_regshadow's writable() refuses, as 8-bit entry indices
+// (address >> 1). Kept in step with that function by the checks in
+// ss_regshadow_tb, which assert each one against the design directly.
+function sh_excluded(input [7:0] idx);
+begin
+	sh_excluded = (idx == 8'h4E) ||                   // $09C INTREQ
+	              (idx == 8'h1C) || (idx == 8'h1D) || // $038 $03A strobes
+	              (idx == 8'h1E) || (idx == 8'h1F) || // $03C $03E strobes
+	              (idx == 8'h44) || (idx == 8'h45) || // $088 $08A COPJMP
+	              (idx == 8'h46) ||                   // $08C COPINS
+	              (idx == 8'h2C) || (idx == 8'h2E) || // $058 BLTSIZE, $05C
+	              (idx == 8'h2F) ||                   // $05E BLTSIZH
+	              (idx == 8'h15) || (idx == 8'h16) || // $02A VPOSW, $02C VHPOSW
+	              (idx == 8'h18) ||                   // $030 SERDAT
+	              (idx == 8'h12) || (idx == 8'h13) || // $024 DSKLEN, $026 DSKDAT
+	              (idx == 8'h55) || (idx == 8'h5D) || // $0AA $0BA AUDxDAT
+	              (idx == 8'h65) || (idx == 8'h6D);   // $0CA $0DA AUDxDAT
+end
+endfunction
 
 task check(input [511:0] name, input [31:0] actual, input [31:0] want);
 begin
@@ -686,7 +714,9 @@ initial begin
 	// $028, not $024: DSKLEN lives at $024 and is no longer shadowed, since
 	// replaying it can arm a disk DMA. $028 is a plain register.
 	sh_wr(8'h14, 16'h9ABC);   // $028
-	sh_wr(8'h15, 16'hDEF0);   // $02A
+	// $02A is VPOSW and is excluded now -- replaying it moves the raster. It
+	// is still WRITTEN here so the payload can prove the entry stays zero.
+	sh_wr(8'h15, 16'hDEF0);   // $02A -- excluded, must not survive
 	sh_wr(8'h1B, 16'hA5A5);   // $036
 
 	@(negedge clk); save_req = 1;
@@ -747,8 +777,8 @@ initial begin
 	      ddr_word(W_SHADOW + 8),  {16'h5678, 16'h1234});
 	check("shadow word 9 packs $024,$026, both excluded and so zero",
 	      ddr_word(W_SHADOW + 9),  32'h00000000);
-	check("shadow word 10 packs $028,$02A",
-	      ddr_word(W_SHADOW + 10), {16'hDEF0, 16'h9ABC});
+	check("shadow word 10 packs $028 and an excluded $02A",
+	      ddr_word(W_SHADOW + 10), {16'h0000, 16'h9ABC});
 	check("shadow word 13 packs $034,$036",
 	      ddr_word(W_SHADOW + 13), {16'hA5A5, 16'h0000});
 	check("shadow word 0 is the read window, zero",
@@ -841,7 +871,11 @@ initial begin
 	// $024 and $026 are both excluded now and never appear at all.
 	check("replayed $02E is still zero",
 	      {16'd0, seen_replay[8'h17]}, 32'h00000000);
-	check("replayed $02A", {16'd0, seen_replay[8'h15]}, 32'h0000DEF0);
+	// VPOSW: written above, and must reach neither the payload nor the bus.
+	// agnus_beamcounter.v loads vpos and long_frame from it, so a replay
+	// jumps the beam mid-restore.
+	check("$02A (VPOSW) never replayed",
+	      {31'd0, seen_replay_valid[8'h15]}, 32'd0);
 	check("replayed $036", {16'd0, seen_replay[8'h1B]}, 32'h0000A5A5);
 	check("every plain entry was replayed",
 	      {31'd0, seen_replay_valid[8'h10] & seen_replay_valid[8'h14] &
@@ -1118,6 +1152,10 @@ initial begin
 	check("peek longword 3", peek_data[31:0],   32'h06E007E0);
 	check("peek left the controller idle", {26'd0, dbg_state}, {26'd0, DBG_S_IDLE});
 	check("peek released the CPU", {31'd0, peek_busy}, 32'd0);
+	check("peek did not time out",  {31'd0, peek_timeout}, 32'd0);
+	// Eight word reads, so eight acks: proof the port answered rather than the
+	// data happening to look right.
+	check("peek counted its acks",  {24'd0, peek_acks}, 32'd8);
 	check("peek released the port", {31'd0, peek_scan}, 32'd0);
 	// rom_scan belongs to the fingerprint alone now; a peek must not have
 	// touched it, which is what keeps its timing where it was.

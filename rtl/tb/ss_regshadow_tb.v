@@ -254,6 +254,15 @@ initial begin
 	wr(9'h024, 16'h8100);   // DSKLEN  -- arms disk DMA on the second write
 	wr(9'h026, 16'hFFFF);   // DSKDAT  -- writes into the disk buffer
 	wr(9'h0AA, 16'h1234);   // AUD0DAT -- a sample event for the channel
+	// The beam counters. agnus_beamcounter.v loads vpos and long_frame from a
+	// VPOSW write and vpos/hpos from a VHPOSW write, so a replay moves the
+	// raster in the middle of a restore. Nearly no game writes them, which
+	// makes it worse rather than better: the entry is still 0, so the replay
+	// jumps the beam to line 0 and forces a short frame.
+	wr(9'h02A, 16'h8000);   // VPOSW
+	wr(9'h02C, 16'h1234);   // VHPOSW
+	rd(9'h02A); check("VPOSW not replayable",  {31'd0, rd_writable}, 32'd0);
+	rd(9'h02C); check("VHPOSW not replayable", {31'd0, rd_writable}, 32'd0);
 	rd(9'h058); check("BLTSIZE not shadowed",  {31'd0, rd_writable}, 32'd0);
 	rd(9'h05C); check("BLTSIZV not shadowed",  {31'd0, rd_writable}, 32'd0);
 	rd(9'h05E); check("BLTSIZH not shadowed",  {31'd0, rd_writable}, 32'd0);
