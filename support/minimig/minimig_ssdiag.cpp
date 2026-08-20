@@ -73,7 +73,7 @@
 #define SS_PEEK_ARM        0x0010   // io_din[4]: fetch. Without it, read only.
 #define SS_PEEK_TRIGGER    "/tmp/ss_peek"
 // 13 peek words, then 8 of PC samples and 4 of fingerprints.
-#define SS_PEEK_WORDS      43   // byte_cnt 3..45
+#define SS_PEEK_WORDS      47   // byte_cnt 3..49
 #define SS_DIAG_SIG        0x55AA
 #define SS_DIAG_PAYLOAD    8
 // Two words of slack past the signature's expected position. The alignment of
@@ -330,6 +330,13 @@ static void ss_peek_service(void)
 			// introduces it.
 			ss_diag("  since power-on: %u level-3 interrupts, %u interrupts total",
 			        w[41], w[42]);
+			// The most recent NORMAL level-3 dispatch. If this matches the
+			// entry recorded after a restore, the same handler runs both times
+			// and the restore differs only in the register context it hands
+			// it. If it differs, the vector the CPU fetches is not the one in
+			// the memory we peek.
+			ss_diag("  last level-3: from PC $%04X%04X -> entry $%04X%04X",
+			        w[46], w[45], w[44], w[43]);
 		}
 
 		if (!(w[9] & 1)) {
