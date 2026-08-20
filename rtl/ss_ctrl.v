@@ -1828,6 +1828,7 @@ always @(posedge clk) begin
 					chip_wr_half <= 1'b1;
 				end
 				else begin
+					chip_wr_half <= 1'b0;
 					chip_addr <= chip_addr + 24'd2;
 					state     <= S_L_CH_FETCH;
 				end
