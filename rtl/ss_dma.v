@@ -84,14 +84,34 @@ assign sd_cache_inhibit = busy;
 //   XFER_IDLE - no transfer in progress, sd_cs held low.
 //   XFER_REQ  - sd_cs asserted for the current address, waiting for
 //               sd_ready.
-//   XFER_GAP  - sd_cs deasserted for exactly one cycle so the real cache
-//               can see !cpu_cs and return to CPU_SM_IDLE before the next
-//               address is presented.
-localparam [1:0] XFER_IDLE = 2'd0;
-localparam [1:0] XFER_REQ  = 2'd1;
-localparam [1:0] XFER_GAP  = 2'd2;
+//   XFER_GAP  - sd_cs deasserted, waiting for the cache to drop sd_ready
+//               before the next address is presented.
+//
+// The gap WAITS for !sd_ready rather than counting a cycle, and that is the
+// whole point of it. cpu_cache_new holds cpu_ack asserted until it sees
+// !cpu_cs (cpu_cache_new.v:490) and only then returns to CPU_SM_IDLE. A gap of
+// exactly one cycle re-asserted chip select while ack could still be high, so
+// the next XFER_REQ saw a stale ready and latched the PREVIOUS word -- the
+// second read of every two-word transfer returning data from the wrong
+// address.
+//
+// It only showed up on some regions, which is what made it look like an
+// address-decode fault rather than a race: a line the CPU has cached (all of
+// Kickstart, which runs constantly) acks in a cycle or two and lands inside
+// the window, while a sequential chip RAM dump mostly misses and takes long
+// enough to settle. Measured against the ROM file on hardware: reads of
+// $F80000 came back with words 1 and 3 of each 8-byte group exchanged, while
+// an overlap test on chip RAM was clean.
+//
+// XFER_START does the same wait before the FIRST request, because ss_ctrl
+// issues transfers back to back and the tail of the previous one races the
+// head of the next in exactly the same way.
+localparam [2:0] XFER_IDLE  = 3'd0;
+localparam [2:0] XFER_REQ   = 3'd1;
+localparam [2:0] XFER_GAP   = 3'd2;
+localparam [2:0] XFER_START = 3'd3;
 
-reg [1:0]  xfer_state;
+reg [2:0]  xfer_state;
 reg [23:0] remaining;
 reg        busy;
 
@@ -115,9 +135,11 @@ always @(posedge clk) begin
 			sd_addr    <= base_addr;
 			remaining  <= word_count;
 			busy       <= (word_count != 24'd0);
-			sd_cs      <= (word_count != 24'd0);
+			// Chip select waits for XFER_START to see the port quiet; see the
+			// state list above.
+			sd_cs      <= 1'b0;
 			done       <= (word_count == 24'd0);
-			xfer_state <= (word_count != 24'd0) ? XFER_REQ : XFER_IDLE;
+			xfer_state <= (word_count != 24'd0) ? XFER_START : XFER_IDLE;
 		end
 		else begin
 			case (xfer_state)
@@ -142,9 +164,18 @@ always @(posedge clk) begin
 				end
 
 				XFER_GAP: begin
-					sd_addr    <= sd_addr + 24'd1;
-					sd_cs      <= 1'b1;
-					xfer_state <= XFER_REQ;
+					if (!sd_ready) begin
+						sd_addr    <= sd_addr + 24'd1;
+						sd_cs      <= 1'b1;
+						xfer_state <= XFER_REQ;
+					end
+				end
+
+				XFER_START: begin
+					if (!sd_ready) begin
+						sd_cs      <= 1'b1;
+						xfer_state <= XFER_REQ;
+					end
 				end
 
 				default: begin // XFER_IDLE

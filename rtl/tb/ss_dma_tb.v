@@ -39,6 +39,8 @@ wire        sd_lds_n;
 wire        sd_cache_inhibit;
 reg  [15:0] sd_rd = 0;
 reg         sd_ready = 0;
+integer     rel_hold = 0;   // cycles sd_ready lingers after sd_cs drops
+integer     rel_cnt  = 0;
 
 wire        word_valid;
 wire [15:0] word_out;
@@ -155,13 +157,24 @@ always @(posedge clk) begin
 	else if (start) begin
 		word_idx <= 0;
 		wait_cnt <= 0;
+		rel_cnt  <= 0;
 		sd_ready <= 1'b0;
 	end
 	else if (!sd_cs) begin
-		sd_ready <= 1'b0;
-		wait_cnt <= 0;
+		// The real cache does not drop its ack the instant chip select goes
+		// away: cpu_cache_new sits in CPU_SM_WAIT until it SEES !cpu_cs and
+		// only then returns to idle, and sdram_ctrl's ramready and the port
+		// mux add more. rel_hold models that lag. With it at 0 this is the
+		// original mock; raising it is what exposes a requester that assumes
+		// a fixed-length gap is enough.
+		rel_cnt <= rel_cnt + 1;
+		if (rel_cnt >= rel_hold) begin
+			sd_ready <= 1'b0;
+			wait_cnt <= 0;
+		end
 	end
 	else if (!sd_ready) begin
+		rel_cnt <= 0;
 		if (wait_cnt >= lat_plan[word_idx]) begin
 			committed_addr <= sd_addr;
 			sd_rd          <= 16'hC000 + {8'd0, sd_addr[8:1]};
@@ -286,6 +299,20 @@ initial begin
 	for (i = 0; i < 5; i = i + 1)
 		check("min-turnaround word contents", got[i], 16'hC000 + 16'h0030 + i);
 	check("min-turnaround cs drops once per word", cs_drop_count, 5);
+
+	// A cache that is slow to release its ack. Every word must still come from
+	// its own address: on hardware this is what went wrong, and it went wrong
+	// selectively -- a line already in the CPU's cache acks almost instantly
+	// and lands inside the window, so reads of Kickstart came back with words
+	// 1 and 3 of each 8-byte group exchanged while chip RAM was clean.
+	for (rel_hold = 1; rel_hold <= 3; rel_hold = rel_hold + 1) begin
+		run_transfer(24'h000040, 24'd6);
+		check("slow-release transfer count", got_count, 6);
+		for (i = 0; i < 6; i = i + 1)
+			check("slow-release word contents", got[i], 16'hC000 + 16'h0040 + i);
+		check("slow-release cs drops once per word", cs_drop_count, 6);
+	end
+	rel_hold = 0;
 
 	// -- Transfer 4: mixed per-word latency, to confirm words are entirely
 	// independent under the per-word handshake (no interaction between one
