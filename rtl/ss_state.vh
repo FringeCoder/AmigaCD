@@ -60,8 +60,9 @@
 	ss_intreq, \
 	ss_cia_a, ss_cia_b, ss_akiko }
 
-// Akiko, by value. 522 bits: five 32-bit registers, PBX, ten byte-wide
-// registers, two flags, and the 32-byte C2P buffer with its two pointers.
+// Akiko, by value. 1052 bits: five 32-bit registers, PBX, ten byte-wide
+// registers, two flags, the two 32-byte drive command buffers with their
+// lengths, and the 32-byte C2P buffer with its two pointers.
 // akiko.v carries the field order and is the only place it is written out;
 // this is only the total, because three files need it in a port declaration
 // and a number repeated in three files is a number that will disagree in two
@@ -76,7 +77,7 @@
 // deliberately absent. akiko.v's ss_idle is what makes that sound: the freeze
 // does not happen until every engine is idle and nothing is staged. See the
 // port comment there.
-`define SS_AKIKO_W 522
+`define SS_AKIKO_W 1052
 
 // INTREQ, the one chipset register that must be carried by VALUE.
 //
@@ -95,7 +96,7 @@
 // and it changes with this.
 
 // 16 registers + PC + USP + VBR (32 each) + SR (16) + CACR (4) + 4 map bits
-// + INTREQ (15) + CIA A (191) + CIA B (203) + Akiko (522)
+// + INTREQ (15) + CIA A (191) + CIA B (203) + Akiko (1052)
 // The CIAs, by value: 191 bits for CIA A and 203 for CIA B. Both sit on the
 // CPU bus, invisible to the chipset register shadow, and cannot be read back
 // through their own registers without side effects -- reading ICR clears the

@@ -30,7 +30,7 @@ reg clk   = 1'b0;
 reg rst_n = 1'b0;
 always #5 clk = ~clk;
 
-localparam integer STATE_W = 1041 + 522;   // + Akiko
+localparam integer STATE_W = 1041 + 1052;   // + Akiko
 
 // The vector, in SS_STATE_LIST order. The list is a concatenation, so the
 // FIRST name in it occupies the HIGH bits -- which is why this is assembled by
@@ -57,13 +57,15 @@ localparam [190:0] CIA_A = {75'h7B_1234_5678_9ABC_DEF0, 39'h55_AAAA_5555,
                             39'h2A_5555_AAAA, 10'h3C1, 8'hC3, 8'h0F, 8'hF0, 4'h9};
 localparam [202:0] CIA_B = {75'h1D_0F0F_0F0F_F0F0_F0F0, 39'h11_2233_4455,
                             39'h66_7788_99AA, 10'h1E2, 8'h3C, 8'hAA, 8'h55, 8'hCC, 8'h81};
-// Akiko, 522 bits. Distinct top and bottom ends for the same reason as the
+// Akiko, 1052 bits. Distinct top and bottom ends for the same reason as the
 // CIAs: this is the LAST field in the vector, so it is the one a width error
 // anywhere above it truncates first.
-localparam [521:0] AKIKO = {
-	10'h2A5,
+localparam [1051:0] AKIKO = {
+	28'h2A5_A5C3,
 	256'hFEDCBA9876543210FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210,
-	256'h0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF};
+	256'h0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF,
+	256'h1111222233334444555566667777888899990000AAAABBBBCCCCDDDDEEEEFFFF,
+	256'hF0F0F0F00F0F0F0FCCCC33335555AAAA0123456776543210DEADBEEFCAFEBABE};
 
 wire [STATE_W-1:0] state = {
 	D0, D1, D2, D3, D4, D5, D6, D7,
@@ -100,7 +102,7 @@ wire [14:0] intreq_out;
 wire [190:0] cia_a_out;
 wire [202:0] cia_b_out;
 wire         cia_we;
-wire [521:0] akiko_out;
+wire [1051:0] akiko_out;
 wire         akiko_we;
 wire        busy;
 
@@ -259,7 +261,7 @@ initial begin
 	// error anywhere above it truncates. Both ends are checked for that
 	// reason, not for symmetry with the CIAs.
 	check("Akiko word off the vector, low half",  akiko_out[31:0],    AKIKO[31:0]);
-	check("Akiko word off the vector, high half", akiko_out[521:490], AKIKO[521:490]);
+	check("Akiko word off the vector, high half", akiko_out[1051:1020], AKIKO[1051:1020]);
 	check("Akiko write pulsed once", akiko_writes[31:0], 32'd1);
 	check("CIA written before the re-seed", {31'd0, (ev_cia < ev_resume)}, 32'd1);
 
