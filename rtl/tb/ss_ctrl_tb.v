@@ -28,6 +28,14 @@ localparam CHIP_WORDS = 8;
 localparam KICK_WORDS = 8;
 localparam [23:0] KICK_BASE = 24'h000080;
 
+// Slow RAM. Another region distinct from both chip RAM (words 0-7) and the
+// Kickstart (words $80-$87), and served from its own value series below, so a
+// sweep that walked the wrong base reads the wrong numbers rather than
+// plausible ones. Four words: enough for the handover from the chip sweep to
+// happen and be checked, which is the only new thing in the design.
+localparam SLOW_WORDS = 4;
+localparam [23:0] SLOW_BASE = 24'h000040;
+
 localparam STATE_WORDS = (STATE_W + 31) / 32;
 
 // Payload: Kickstart CRC, state vector, chipset register shadow, chip RAM.
@@ -45,7 +53,7 @@ localparam SHADOW_WORDS   = SHADOW_ENTRIES / 2;
 // is not a parameter -- the table is 256 deep in the hardware.
 localparam CLUT_WORDS  = 256;
 localparam CORE_WORDS  = 1 + STATE_WORDS + SHADOW_WORDS + CLUT_WORDS
-                         + CHIP_WORDS / 2;
+                         + CHIP_WORDS / 2 + SLOW_WORDS / 2;
 
 // Where each payload section starts in the DDR3 window, as word indices. The
 // header is eight words, then the fingerprint, the state vector, the chipset
@@ -57,6 +65,7 @@ localparam W_STATE  = W_KICK + 1;
 localparam W_SHADOW = W_STATE + STATE_WORDS;
 localparam W_CLUT   = W_SHADOW + SHADOW_WORDS;
 localparam W_CHIP   = W_CLUT + CLUT_WORDS;
+localparam W_SLOW   = W_CHIP + CHIP_WORDS / 2;
 
 reg  clk = 0;
 reg  rst_n = 0;
@@ -107,6 +116,7 @@ integer si;
 // chip RAM back leaves the poison visible rather than the value it was
 // supposed to write.
 reg [15:0] chip_mem [0:CHIP_WORDS-1];
+reg [15:0] slow_mem [0:SLOW_WORDS-1];
 
 // Mock DDR3: a flat memory of 64-bit words, addressed by ddr_address.
 // 512 beats. The payload outgrew a 64-beat window when the colour table was
@@ -200,6 +210,7 @@ wire [15:0] sh_replay_data;
 // below still reach their timeout without pulsing 120 frames apiece. LOAD_FRAMES
 // is already 3 in the real design and is left alone.
 ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
+          .SLOW_BASE(SLOW_BASE), .SLOW_WORDS(SLOW_WORDS[23:0]),
           .SCAN_TIMEOUT(SCAN_TIMEOUT), .SAVE_FRAMES(8'd3),
           .SHADOW_ENTRIES(SHADOW_ENTRIES[8:0])) dut
 (
@@ -295,6 +306,8 @@ reg sd_stall = 0;
 wire [23:0] sd_word  = sd_addr;
 wire        in_kick  = (sd_word >= KICK_BASE) && (sd_word < KICK_BASE + KICK_WORDS);
 wire [15:0] kick_off = sd_word[15:0] - KICK_BASE[15:0];
+wire        in_slow  = (sd_word >= SLOW_BASE) && (sd_word < SLOW_BASE + SLOW_WORDS);
+wire [15:0] slow_off = sd_word[15:0] - SLOW_BASE[15:0];
 
 always @(posedge clk) begin
 	sd_ready <= 1'b0;
@@ -302,12 +315,16 @@ always @(posedge clk) begin
 		latency = latency + 1;
 		if (latency >= 2) begin
 			sd_rd    <= in_kick ? ((rom_alt ? 16'hE100 : 16'hE000) + kick_off)
+			          : in_slow ? (16'hC000 + slow_off)
 			                    : (16'hD000 + {8'd0, sd_addr[8:1]});
 			sd_ready <= 1'b1;
 			latency  = 0;
 			if (sd_state == 2'd3) begin
-				chip_mem[sd_addr[3:1]] = sd_wr;
-				chip_wr_count = chip_wr_count + 1;
+				if (in_slow) slow_mem[slow_off[1:0]] = sd_wr;
+				else begin
+					chip_mem[sd_addr[3:1]] = sd_wr;
+					chip_wr_count = chip_wr_count + 1;
+				end
 			end
 		end
 	end
@@ -427,7 +444,8 @@ always @(posedge clk) if (rom_scan && !freeze) scan_unfrozen <= 1'b1;
 // The save direction's read path was proven correct against a reference CRC.
 // That says nothing about this path, which until now nothing checked at all.
 // sd_state 3 is "write data", the same encoding the mock captures on.
-wire wr_in_chip = (sd_addr >= 24'h000000) && (sd_addr < CHIP_WORDS);
+wire wr_in_chip = ((sd_addr >= 24'h000000) && (sd_addr < CHIP_WORDS))
+                || in_slow;
 
 reg wrote_outside_chip = 0;
 
@@ -731,6 +749,7 @@ end
 initial begin
 	for (i = 0; i < 512; i = i + 1) ddr_mem[i] = 64'd0;
 	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
+	for (i = 0; i < SLOW_WORDS; i = i + 1) slow_mem[i] = 16'hBAD8 + i[15:0];
 	@(negedge clk); rst_n = 1;
 
 	// Blitter busy at first, so the save has to wait for a quiet instant.
@@ -793,6 +812,13 @@ initial begin
 	check("chip word 2", ddr_word(W_CHIP + 2), {bswap16(16'hD005), bswap16(16'hD004)});
 	check("chip word 3", ddr_word(W_CHIP + 3), {bswap16(16'hD007), bswap16(16'hD006)});
 
+	// Slow RAM, immediately after chip RAM and read from its own base. The
+	// mock serves $C000+offset there against $D000+address for chip, so a
+	// sweep that ran on past the end of chip RAM instead of jumping to the
+	// slow base lands D-series values here and fails.
+	check("slow word 0", ddr_word(W_SLOW),     {bswap16(16'hC001), bswap16(16'hC000)});
+	check("slow word 1", ddr_word(W_SLOW + 1), {bswap16(16'hC003), bswap16(16'hC002)});
+
 	// The same two words again, as literals, against the EXTERNAL contract
 	// rather than against bswap16(). The file's byte at offset 4*10+0 must be
 	// the high byte of the Amiga word at chip address 0, and so on; a 32-bit
@@ -844,6 +870,11 @@ initial begin
 	crc_word_step({bswap16(16'hD003), bswap16(16'hD002)});
 	crc_word_step({bswap16(16'hD005), bswap16(16'hD004)});
 	crc_word_step({bswap16(16'hD007), bswap16(16'hD006)});
+	// Slow RAM continues the same running CRC. The two memory regions are one
+	// payload, not two, so a design that re-armed the CRC at the handover
+	// would produce a value that is right for each half and wrong here.
+	crc_word_step({bswap16(16'hC001), bswap16(16'hC000)});
+	crc_word_step({bswap16(16'hC003), bswap16(16'hC002)});
 	expect_crc = ~crc_acc;
 	check("core_crc32", ddr_word(6), expect_crc);
 
@@ -944,6 +975,13 @@ initial begin
 	check("chip RAM restored word 6", {16'd0, chip_mem[6]}, 32'h0000D006);
 	check("chip RAM restored word 7", {16'd0, chip_mem[7]}, 32'h0000D007);
 
+	// Slow RAM restored from its own section, to its own base. Poisoned with
+	// 0xBAD8+n before the restore, so a restore that never reached the slow
+	// section leaves the poison, and one that wrote the chip section here
+	// leaves D-series values -- both distinguishable from a pass.
+	check("slow RAM restored word 0", {16'd0, slow_mem[0]}, 32'h0000C000);
+	check("slow RAM restored word 3", {16'd0, slow_mem[3]}, 32'h0000C003);
+
 	// Chip RAM must be written before the CPU is released, and the state
 	// vector must be applied before the freeze drops -- otherwise the CPU
 	// executes against a half-restored machine. Both counts are snapshots
@@ -1040,6 +1078,7 @@ initial begin
 	// fixed, this reverts to expecting FAIL_KICK (code 5) and the refusal.
 	restore_window();
 	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
+	for (i = 0; i < SLOW_WORDS; i = i + 1) slow_mem[i] = 16'hBAD8 + i[15:0];
 	reset_observers();
 	rom_alt = 1;
 	run_load();
@@ -1087,6 +1126,7 @@ initial begin
 	// has not passed, so not one byte of the Amiga has been touched.
 	restore_window();
 	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
+	for (i = 0; i < SLOW_WORDS; i = i + 1) slow_mem[i] = 16'hBAD8 + i[15:0];
 	reset_observers();
 	watch_bus = 0;
 	sd_stall  = 1;
@@ -1120,6 +1160,7 @@ initial begin
 	// the Amiga is left exactly as it was found, and the user can try again.
 	restore_window();
 	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
+	for (i = 0; i < SLOW_WORDS; i = i + 1) slow_mem[i] = 16'hBAD8 + i[15:0];
 	reset_observers();
 	blit_busy = 1;
 	@(negedge clk); load_req = 1;
@@ -1141,6 +1182,7 @@ initial begin
 	// the whole sequence repeats cleanly rather than working exactly once.
 	restore_window();
 	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
+	for (i = 0; i < SLOW_WORDS; i = i + 1) slow_mem[i] = 16'hBAD8 + i[15:0];
 	reset_observers();
 	run_load();
 	check("revalidates after fails", {31'd0, load_ok},   32'd1);

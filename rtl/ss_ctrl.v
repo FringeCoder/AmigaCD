@@ -133,6 +133,27 @@ module ss_ctrl
 #(
 	parameter STATE_W    = 64,
 	parameter CHIP_WORDS = 24'h100000,  // 16-bit words; 0x100000 = 2 MB
+
+	// Slow RAM, the A500 trapdoor expansion at $C00000-$D7FFFF. It sits in
+	// SDRAM beside chip RAM, so it is read and written by the same sweep --
+	// only the base and the length differ.
+	//
+	// The base is NOT the CPU address. gary hands the bridge a word address,
+	// minimig_sram_bridge drops CPU address bit 23, and what sdram_ctrl's CPU
+	// port ends up seeing is (cpu_byte_address & $7FFFFF) >> 1. For $C00000
+	// that is $200000. Derived by hand once and then checked against the two
+	// real modules in rtl/sim/membank/tb_membank_map.sv, which also pins the
+	// neighbours: the cartridge sits at $100000 below and the 1 MB Kickstart
+	// slot at $300000 above, so a base or a length that was wrong would read
+	// one of those into the file instead.
+	//
+	// The full 1.5 MB is always captured, whatever the configured slow RAM
+	// size. A fixed length keeps CORE_WORDS a constant, and the SDRAM cells
+	// exist regardless of what autoconfig advertised; nothing else is mapped
+	// into $200000-$2BFFFF, so writing all of it back on a restore cannot
+	// disturb anything.
+	parameter SLOW_BASE  = 24'h200000,
+	parameter SLOW_WORDS = 24'hC0000,   // 16-bit words; 0xC0000 = 1.5 MB
 	// Kickstart region, in 16-bit words. 0x40000 = 512 KB, which is the
 	// $F80000-$FFFFFF ROM. A 1 MB CD32 image also occupies $E00000-$E7FFFF,
 	// which is a separate, non-contiguous SDRAM region: this pass covers the
@@ -339,6 +360,7 @@ module ss_ctrl
 
 localparam STATE_WORDS = (STATE_W + 31) / 32;
 localparam CHIP_PAIRS  = CHIP_WORDS / 2;         // 32-bit words of packed chip RAM
+localparam SLOW_PAIRS  = SLOW_WORDS / 2;         // 32-bit words of packed slow RAM
 localparam KICK_PAIRS  = KICK_WORDS / 2;         // 32-bit words scanned per fingerprint
 
 // Payload word 0 is the Kickstart fingerprint, then the state vector, then
@@ -377,15 +399,16 @@ localparam CLUT_WORDS   = 256;
 // the time memory is in place -- it is replayed after chip RAM, because the
 // copper lists the chipset will be pointed at live there.
 localparam CORE_WORDS   = KICK_META + STATE_WORDS + SHADOW_WORDS + CLUT_WORDS
-                          + CHIP_PAIRS;
+                          + CHIP_PAIRS + SLOW_PAIRS;
 
 localparam SS_MAGIC   = 32'h53534341;
 // 1.1: the colour table section was added between the shadow and chip RAM. A
 // 1.0 file has a different CORE_WORDS and would be read with every section
 // after the shadow displaced, so the version has to move with the layout.
-// 1.2: Akiko joined the state vector (522 bits), which lengthens the state
-// section and moves everything after it. Same argument, same consequence: a
-// 1.1 file read as 1.2 would land the shadow on top of the colour table.
+// 1.2: Akiko joined the state vector, which lengthens the state section and
+// moves everything after it, and slow RAM was appended after chip RAM. Same
+// argument, same consequence: a 1.1 file read as 1.2 would land the shadow on
+// top of the colour table.
 localparam SS_VERSION = 32'h00010002;
 
 // Sized copies of CORE_WORDS for the comparisons on the restore path, so a
@@ -621,6 +644,15 @@ ss_dma dma
 
 reg [24:1] chip_addr;
 reg [23:0] pair_count;
+
+// Which SDRAM region the memory sweep is walking: 0 = chip RAM, 1 = slow RAM.
+// Both directions use the same states for both regions -- the only things that
+// differ are the base address and the number of pairs -- so this picks between
+// them rather than duplicating the sweep.
+reg        region;
+localparam REGION_CHIP = 1'b0;
+localparam REGION_SLOW = 1'b1;
+wire [23:0] region_pairs = region ? SLOW_PAIRS[23:0] : CHIP_PAIRS[23:0];
 reg [15:0] chip_low;
 reg        pending_low_held;
 
@@ -995,6 +1027,7 @@ always @(posedge clk) begin
 		// only has to be a value the first comparison cannot accidentally hit.
 		rd_pair          <= 24'hFFFFFF;
 		chip_wr_half     <= 1'b0;
+		region           <= REGION_CHIP;
 		crc_init         <= 1'b0;
 		cap_idx          <= 16'd0;
 		drain_idx        <= 16'd0;
@@ -1478,15 +1511,26 @@ always @(posedge clk) begin
 			if (!word_busy) begin
 				if (clut_idx == CLUT_WORDS - 1) begin
 					clut_active <= 1'b0;
-					chip_addr   <= chip_base;
 					pair_count  <= 24'd0;
 					flush_wd    <= 24'd0;
-					if (CHIP_PAIRS == 0) begin
+					// Chip RAM first, then slow RAM; a build configured with
+					// neither writes no memory section at all and goes
+					// straight to the header.
+					if (CHIP_PAIRS != 0) begin
+						region    <= REGION_CHIP;
+						chip_addr <= chip_base;
+						state     <= S_SAVE_FLUSH;
+					end
+					else if (SLOW_PAIRS != 0) begin
+						region    <= REGION_SLOW;
+						chip_addr <= SLOW_BASE;
+						state     <= S_SAVE_FLUSH;
+					end
+					else begin
 						saved_crc <= crc_value;
 						word_idx  <= 24'd1;
 						state     <= S_HEADER;
 					end
-					else state <= S_SAVE_FLUSH;
 				end
 				else begin
 					clut_idx <= clut_idx + 9'd1;
@@ -1595,10 +1639,22 @@ always @(posedge clk) begin
 
 		S_CHIP_DRAIN: begin
 			if (!word_busy) begin
-				if (pair_count == CHIP_PAIRS - 24'd1) begin
-					saved_crc <= crc_value;
-					word_idx  <= 24'd1;
-					state     <= S_HEADER;
+				if (pair_count == region_pairs - 24'd1) begin
+					// End of chip RAM is not the end of the sweep: slow RAM
+					// follows in the same states, from its own base. Nothing
+					// else changes -- same DMA, same byte swap, same CRC
+					// running over both regions as one payload.
+					if (region == REGION_CHIP && SLOW_PAIRS != 0) begin
+						region     <= REGION_SLOW;
+						chip_addr  <= SLOW_BASE;
+						pair_count <= 24'd0;
+						state      <= S_CHIP_ISSUE;
+					end
+					else begin
+						saved_crc <= crc_value;
+						word_idx  <= 24'd1;
+						state     <= S_HEADER;
+					end
 				end
 				else begin
 					pair_count <= pair_count + 24'd1;
@@ -1952,11 +2008,18 @@ always @(posedge clk) begin
 			clut_wr_en <= 1'b0;
 			if (clut_idx == CLUT_WORDS) begin
 				clut_active <= 1'b0;
-				if (CHIP_PAIRS == 0) state <= S_L_REPLAY;
-				else begin
+				pair_count  <= 24'd0;
+				if (CHIP_PAIRS != 0) begin
+					region    <= REGION_CHIP;
 					chip_addr <= chip_base;
 					state     <= S_L_CH_FETCH;
 				end
+				else if (SLOW_PAIRS != 0) begin
+					region    <= REGION_SLOW;
+					chip_addr <= SLOW_BASE;
+					state     <= S_L_CH_FETCH;
+				end
+				else state <= S_L_REPLAY;
 			end
 			else if (pay_held) state <= S_L_CLUT_LOAD;
 			else begin
@@ -2048,8 +2111,21 @@ always @(posedge clk) begin
 					state        <= S_L_CH_ISSUE2;
 				end
 				else begin
-					chip_addr <= chip_addr + 24'd2;
-					state     <= S_L_CH_FETCH;
+					// The region handover, mirroring the capture side. The
+					// loop still ends on pay_idx reaching CORE_WORDS -- this
+					// only moves the write address across the gap between the
+					// two SDRAM regions at the right pair.
+					if (pair_count == region_pairs - 24'd1
+					    && region == REGION_CHIP && SLOW_PAIRS != 0) begin
+						region     <= REGION_SLOW;
+						chip_addr  <= SLOW_BASE;
+						pair_count <= 24'd0;
+					end
+					else begin
+						pair_count <= pair_count + 24'd1;
+						chip_addr  <= chip_addr + 24'd2;
+					end
+					state <= S_L_CH_FETCH;
 				end
 			end
 		end
