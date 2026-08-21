@@ -1066,8 +1066,7 @@ int amigacd_set_default_roms(int sys)
 	// is the half that matters more.
 	if (!FileExists(mpath, 0))
 	{
-		printf("AmigaCD: default ROM for %s not found (%s), keeping the current one
-",
+		printf("AmigaCD: default ROM for %s not found (%s), keeping the current one\n",
 		       amigacd_system_name(sys), mpath);
 		return 0;
 	}
