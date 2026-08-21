@@ -40,7 +40,12 @@ localparam STATE_WORDS = (STATE_W + 31) / 32;
 // and still fits the mock DDR3 below.
 localparam SHADOW_ENTRIES = 32;
 localparam SHADOW_WORDS   = SHADOW_ENTRIES / 2;
-localparam CORE_WORDS  = 1 + STATE_WORDS + SHADOW_WORDS + CHIP_WORDS / 2;
+// Denise's colour table: 256 entries, one payload word each. Full size even
+// though the rest of this bench is scaled down, because the design's CLUT_WORDS
+// is not a parameter -- the table is 256 deep in the hardware.
+localparam CLUT_WORDS  = 256;
+localparam CORE_WORDS  = 1 + STATE_WORDS + SHADOW_WORDS + CLUT_WORDS
+                         + CHIP_WORDS / 2;
 
 // Where each payload section starts in the DDR3 window, as word indices. The
 // header is eight words, then the fingerprint, the state vector, the chipset
@@ -50,7 +55,8 @@ localparam CORE_WORDS  = 1 + STATE_WORDS + SHADOW_WORDS + CHIP_WORDS / 2;
 localparam W_KICK   = 8;
 localparam W_STATE  = W_KICK + 1;
 localparam W_SHADOW = W_STATE + STATE_WORDS;
-localparam W_CHIP   = W_SHADOW + SHADOW_WORDS;
+localparam W_CLUT   = W_SHADOW + SHADOW_WORDS;
+localparam W_CHIP   = W_CLUT + CLUT_WORDS;
 
 reg  clk = 0;
 reg  rst_n = 0;
@@ -103,11 +109,14 @@ integer si;
 reg [15:0] chip_mem [0:CHIP_WORDS-1];
 
 // Mock DDR3: a flat memory of 64-bit words, addressed by ddr_address.
-reg [63:0] ddr_mem [0:63];
+// 512 beats. The payload outgrew a 64-beat window when the colour table was
+// added: writes past the end wrapped and landed on the header, which showed up
+// as colour data sitting where the Kickstart fingerprint belongs.
+reg [63:0] ddr_mem [0:511];
 
 // A byte-for-byte copy of the window the save leaves behind, so every refusal
 // case below starts from a known-good file and corrupts exactly one field.
-reg [63:0] win_golden [0:63];
+reg [63:0] win_golden [0:511];
 
 wire rom_scan;
 wire cache_flush;
@@ -148,6 +157,25 @@ reg  [15:0] sh_snoop_data = 16'd0;
 
 // What the bench expects the section to contain, so the payload checks and the
 // reference CRC agree with one source rather than two lists.
+// Mock of Denise's colour table. A block RAM: the read address is registered
+// and the data appears a cycle later, which is the whole reason the design
+// splits the sweep across two states. A zero-latency mock would let a design
+// that sampled too early pass here and store every entry shifted by one.
+wire        clut_active;
+wire  [7:0] clut_addr;
+wire        clut_wr_en;
+wire [31:0] clut_wr_data;
+reg  [31:0] clut_mem [0:255];
+reg   [7:0] clut_adr_q;
+integer     ci;
+initial for (ci = 0; ci < 256; ci = ci + 1) clut_mem[ci] = 32'hC0100000 + ci;
+// altsyncram DUAL_PORT: the read address is registered, q is not. One cycle.
+wire [31:0] clut_rd_data = clut_mem[clut_adr_q];
+always @(posedge clk) begin
+	clut_adr_q <= clut_addr;
+	if (clut_active && clut_wr_en) clut_mem[clut_addr] <= clut_wr_data;
+end
+
 reg  [15:0] exp_shadow [0:SHADOW_ENTRIES-1];
 
 // Zeroed here rather than inside the stimulus block, where an earlier attempt
@@ -188,6 +216,9 @@ ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
 	.freeze(freeze),
 	.chip_base(24'h000000),
 	.kick_base(KICK_BASE), .rom_scan(rom_scan), .cache_flush(cache_flush),
+	.clut_active(clut_active), .clut_addr(clut_addr),
+	.clut_rd_data(clut_rd_data), .clut_wr_en(clut_wr_en),
+	.clut_wr_data(clut_wr_data),
 	.sd_addr(sd_addr), .sd_cs(sd_cs), .sd_state(sd_state),
 	.sd_uds_n(sd_uds_n), .sd_lds_n(sd_lds_n),
 	.sd_cache_inhibit(sd_cache_inhibit),
@@ -291,14 +322,14 @@ end
 // until ddr_byteenable was wired up for real).
 always @(posedge clk) begin
 	if (ddr_write && !ddr_waitrequest) begin
-		if (ddr_byteenable[0]) ddr_mem[ddr_address[5:0]][7:0]   <= ddr_writedata[7:0];
-		if (ddr_byteenable[1]) ddr_mem[ddr_address[5:0]][15:8]  <= ddr_writedata[15:8];
-		if (ddr_byteenable[2]) ddr_mem[ddr_address[5:0]][23:16] <= ddr_writedata[23:16];
-		if (ddr_byteenable[3]) ddr_mem[ddr_address[5:0]][31:24] <= ddr_writedata[31:24];
-		if (ddr_byteenable[4]) ddr_mem[ddr_address[5:0]][39:32] <= ddr_writedata[39:32];
-		if (ddr_byteenable[5]) ddr_mem[ddr_address[5:0]][47:40] <= ddr_writedata[47:40];
-		if (ddr_byteenable[6]) ddr_mem[ddr_address[5:0]][55:48] <= ddr_writedata[55:48];
-		if (ddr_byteenable[7]) ddr_mem[ddr_address[5:0]][63:56] <= ddr_writedata[63:56];
+		if (ddr_byteenable[0]) ddr_mem[ddr_address[8:0]][7:0]   <= ddr_writedata[7:0];
+		if (ddr_byteenable[1]) ddr_mem[ddr_address[8:0]][15:8]  <= ddr_writedata[15:8];
+		if (ddr_byteenable[2]) ddr_mem[ddr_address[8:0]][23:16] <= ddr_writedata[23:16];
+		if (ddr_byteenable[3]) ddr_mem[ddr_address[8:0]][31:24] <= ddr_writedata[31:24];
+		if (ddr_byteenable[4]) ddr_mem[ddr_address[8:0]][39:32] <= ddr_writedata[39:32];
+		if (ddr_byteenable[5]) ddr_mem[ddr_address[8:0]][47:40] <= ddr_writedata[47:40];
+		if (ddr_byteenable[6]) ddr_mem[ddr_address[8:0]][55:48] <= ddr_writedata[55:48];
+		if (ddr_byteenable[7]) ddr_mem[ddr_address[8:0]][63:56] <= ddr_writedata[63:56];
 	end
 end
 
@@ -324,7 +355,7 @@ end
 always @(posedge clk) begin
 	ddr_readdatavalid <= 1'b0;
 	if (ddr_read && !ddr_waitrequest) begin
-		ddr_readdata      <= ddr_mem[ddr_address[5:0]];
+		ddr_readdata      <= ddr_mem[ddr_address[8:0]];
 		ddr_readdatavalid <= 1'b1;
 	end
 end
@@ -609,7 +640,7 @@ endtask
 task restore_window;
 	integer k;
 begin
-	for (k = 0; k < 64; k = k + 1) ddr_mem[k] = win_golden[k];
+	for (k = 0; k < 512; k = k + 1) ddr_mem[k] = win_golden[k];
 end
 endtask
 
@@ -698,7 +729,7 @@ initial begin
 end
 
 initial begin
-	for (i = 0; i < 64; i = i + 1) ddr_mem[i] = 64'd0;
+	for (i = 0; i < 512; i = i + 1) ddr_mem[i] = 64'd0;
 	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
 	@(negedge clk); rst_n = 1;
 
@@ -732,7 +763,7 @@ initial begin
 	@(negedge clk);
 
 	check("magic",      ddr_word(2), 32'h53534341);
-	check("version",    ddr_word(3), 32'h00010000);
+	check("version",    ddr_word(3), 32'h00010001);
 	check("core_words", ddr_word(4), CORE_WORDS);
 	check("host_words", ddr_word(5), 32'd0);
 	check("host_crc32", ddr_word(7), 32'd0);
@@ -804,6 +835,11 @@ initial begin
 	// against itself and fail only here.
 	for (si = 0; si < SHADOW_WORDS; si = si + 1)
 		crc_word_step({exp_shadow[2*si + 1], exp_shadow[2*si]});
+	// The colour table, straight out of the mock, in address order. A sweep
+	// that sampled the RAM a cycle early would hand over the table shifted by
+	// one entry and land here rather than looking like working colours.
+	for (si = 0; si < CLUT_WORDS; si = si + 1)
+		crc_word_step(32'hC0100000 + si);
 	crc_word_step({bswap16(16'hD001), bswap16(16'hD000)});
 	crc_word_step({bswap16(16'hD003), bswap16(16'hD002)});
 	crc_word_step({bswap16(16'hD005), bswap16(16'hD004)});
@@ -831,7 +867,7 @@ initial begin
 	// produces, which is the thing that has to be loadable.
 	wait (!save_busy);
 	@(negedge clk);
-	for (i = 0; i < 64; i = i + 1) win_golden[i] = ddr_mem[i];
+	for (i = 0; i < 512; i = i + 1) win_golden[i] = ddr_mem[i];
 
 	// From here on state_in is a different value than the one that was saved,
 	// so a state_out that comes back holding the ORIGINAL vector can only have
@@ -843,7 +879,14 @@ initial begin
 	// value the save path would never write makes "restore left word 0 alone"
 	// checkable: if the restore touched it at all it would land back on 1.
 	poke_word(0, 32'hA5A5A5A5);
-	for (i = 0; i < 64; i = i + 1) win_golden[i] = ddr_mem[i];
+	for (i = 0; i < 512; i = i + 1) win_golden[i] = ddr_mem[i];
+
+	// Poison Denise's colour table so a restore that never writes it, or
+	// writes it from the wrong payload offset, cannot pass. The values are
+	// deliberately unlike the saved ones -- a table left holding these is a
+	// restore that forgot the section, and one holding them shifted is a
+	// restore reading it from the wrong place.
+	for (i = 0; i < 256; i = i + 1) clut_mem[i] = 32'hDEAD0000 + i;
 
 	reset_observers();
 	run_load();
@@ -853,6 +896,16 @@ initial begin
 
 	// The vector that comes back out is the one that went in, not the live
 	// state_in above.
+	// The colour table came back, every entry, in order. This is the section
+	// the register shadow cannot carry: AGA reaches 256 colours through the
+	// thirty-two addresses at $180-$1BE by switching BPLCON3's bank, so a
+	// shadow keyed on address keeps one bank and loses seven.
+	check("restored colour 0",    clut_mem[0],   32'hC0100000);
+	check("restored colour 1",    clut_mem[1],   32'hC0100001);
+	check("restored colour 31",   clut_mem[31],  32'hC010001F);
+	check("restored colour 32",   clut_mem[32],  32'hC0100020);  // bank 1
+	check("restored colour 255",  clut_mem[255], 32'hC01000FF);  // bank 7
+
 	check("restored state low",  state_out[31:0],  32'h89ABCDEF);
 	check("restored state high", state_out[63:32], 32'h01234567);
 

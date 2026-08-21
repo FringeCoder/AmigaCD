@@ -13,7 +13,10 @@
 // little-endian.
 
 #define SS_MAGIC    0x53534341u   // reads "ACSS" in a byte dump
-#define SS_VERSION  0x00010000u   // major 1, minor 0
+// 1.1 added Denise's 256-entry colour table between the register shadow and
+// chip RAM. A 1.0 file has a different core_words and every section after the
+// shadow at a different offset, so it must be refused rather than misread.
+#define SS_VERSION  0x00010001u   // major 1, minor 1
 
 // 4 MB slot / 4 bytes per word.
 #define SS_MAX_WORDS (0x400000u / 4u)

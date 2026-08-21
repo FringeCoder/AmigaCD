@@ -217,6 +217,13 @@ module ss_ctrl
 	// reading whatever lines it still holds from before the restore.
 	output reg                cache_flush,
 
+	// Denise colour table, borrowed while frozen. See CLUT_WORDS.
+	output reg                clut_active,
+	output reg  [7:0]         clut_addr,
+	input      [31:0]         clut_rd_data,
+	output reg                clut_wr_en,
+	output reg  [31:0]        clut_wr_data,
+
 	// Custom chipset register shadow (ss_regshadow, instantiated in Minimig.sv).
 	// Read out on a save, loaded back and replayed on a restore.
 	output reg  [7:0]         shadow_rd_addr,
@@ -355,14 +362,28 @@ localparam KICK_META    = 1;
 // Two 16-bit shadow entries per 32-bit payload word, low entry in the low half.
 localparam SHADOW_WORDS = SHADOW_ENTRIES / 2;
 
-// Payload: fingerprint, state vector, chipset register shadow, chip RAM. The
-// shadow goes before chip RAM so the restore has it in hand by the time memory
-// is in place -- it is replayed after chip RAM, because the copper lists the
-// chipset will be pointed at live there.
-localparam CORE_WORDS   = KICK_META + STATE_WORDS + SHADOW_WORDS + CHIP_PAIRS;
+// Denise's colour table: 256 entries of 32 bits, one payload word each.
+//
+// It cannot come from the register shadow. The shadow keeps one value per
+// register ADDRESS, and AGA reaches all 256 colours through the same
+// thirty-two addresses at $180-$1BE by switching BPLCON3's bank field -- so of
+// eight banks written, the shadow retains whichever was written last and the
+// other seven are lost. Reading the table out of Denise captures what the
+// machine is actually displaying, whatever route the game took to set it.
+localparam CLUT_WORDS   = 256;
+
+// Payload: fingerprint, state vector, chipset register shadow, colour table,
+// chip RAM. The shadow goes before chip RAM so the restore has it in hand by
+// the time memory is in place -- it is replayed after chip RAM, because the
+// copper lists the chipset will be pointed at live there.
+localparam CORE_WORDS   = KICK_META + STATE_WORDS + SHADOW_WORDS + CLUT_WORDS
+                          + CHIP_PAIRS;
 
 localparam SS_MAGIC   = 32'h53534341;
-localparam SS_VERSION = 32'h00010000;
+// 1.1: the colour table section was added between the shadow and chip RAM. A
+// 1.0 file has a different CORE_WORDS and would be read with every section
+// after the shadow displaced, so the version has to move with the layout.
+localparam SS_VERSION = 32'h00010001;
 
 // Sized copies of CORE_WORDS for the comparisons on the restore path, so a
 // 24-bit counter and a 32-bit header word are each compared against something
@@ -449,6 +470,13 @@ localparam [5:0] S_CHIP_ISSUE2 = 6'd47;
 localparam [5:0] S_KICK_ISSUE2 = 6'd48;
 localparam [5:0] S_PEEK_ISSUE2 = 6'd49;
 localparam [5:0] S_L_CH_ISSUE2 = 6'd50;
+// Colour table: sweep out on the save, stream back in on the restore.
+localparam [5:0] S_CLUT_RD     = 6'd51;
+localparam [5:0] S_CLUT_WAIT   = 6'd55;
+localparam [5:0] S_CLUT_DRAIN  = 6'd56;
+localparam [5:0] S_CLUT_CAP    = 6'd52;
+localparam [5:0] S_L_CLUT_FETCH= 6'd53;
+localparam [5:0] S_L_CLUT_LOAD = 6'd54;
 localparam [5:0] S_L_SH_FETCH  = 6'd36;
 localparam [5:0] S_L_SH_LOAD   = 6'd37;
 localparam [5:0] S_L_REPLAY    = 6'd38;
@@ -614,6 +642,7 @@ reg        chip_wr_half;
 // in the module header.
 reg [24:1] kick_addr;
 reg [23:0] kick_pairs;
+reg  [8:0] clut_idx;   // 9 bits so it can pass 255 and terminate
 reg [15:0] kick_low;
 reg        kick_low_held;
 reg [5:0]  kick_ret;
@@ -951,6 +980,11 @@ always @(posedge clk) begin
 		sh_half          <= 1'b0;
 		fail_idx         <= 24'd0;
 		kick_low_held    <= 1'b0;
+		clut_idx         <= 9'd0;
+		clut_active      <= 1'b0;
+		clut_addr        <= 8'd0;
+		clut_wr_en       <= 1'b0;
+		clut_wr_data     <= 32'd0;
 		kick_pairs       <= 24'd0;
 		scan_wd          <= 24'd0;
 		// Nothing matches until a read has actually happened. Every restore
@@ -1373,10 +1407,10 @@ always @(posedge clk) begin
 					state     <= S_HEADER;
 				end
 				else begin
-					chip_addr  <= chip_base;
-					pair_count <= 24'd0;
-					flush_wd   <= 24'd0;
-					state      <= S_SAVE_FLUSH;
+					clut_idx    <= 9'd0;
+					clut_active <= 1'b1;
+					clut_addr   <= 8'd0;
+					state       <= S_CLUT_RD;
 				end
 			end
 			else state <= S_SHADOW_LOW;
@@ -1406,6 +1440,55 @@ always @(posedge clk) begin
 				shadow_rd_addr <= shadow_rd_addr + 8'd1;
 				sh_idx         <= sh_idx + 9'd1;
 				state          <= S_SHADOW_RD;
+			end
+		end
+
+		// Sweep Denise's colour table into the payload. The address is
+		// presented in S_CLUT_RD and the data sampled in S_CLUT_CAP, because
+		// the table is a block RAM: the read address is registered and q
+		// follows a cycle later. Sampling in the same state would store the
+		// PREVIOUS entry 256 times over, shifted by one.
+		S_CLUT_RD: begin
+			clut_addr <= clut_idx[7:0];
+			state     <= S_CLUT_WAIT;
+		end
+
+		// One cycle for the RAM to register the address it was just given.
+		// clut_addr only takes the new value at the end of S_CLUT_RD, and
+		// altsyncram registers address_b on the following edge, so q is not
+		// the wanted entry until the state after this one. Sampling any
+		// earlier stores the previous entry -- the whole table shifted by one,
+		// which would look like a working save until someone compared colours.
+		S_CLUT_WAIT: state <= S_CLUT_CAP;
+
+		S_CLUT_CAP: begin
+			queue_word(clut_rd_data);
+			state <= S_CLUT_DRAIN;
+		end
+
+		// Wait for the queued word to reach DDR3 before producing the next
+		// one, exactly as S_CHIP_DRAIN does. queue_word only ARMS a write;
+		// calling it again before word_busy clears drops words on the floor
+		// and leaves the payload short, which is how the first version of this
+		// sweep put colour data on top of the fingerprint.
+		S_CLUT_DRAIN: begin
+			if (!word_busy) begin
+				if (clut_idx == CLUT_WORDS - 1) begin
+					clut_active <= 1'b0;
+					chip_addr   <= chip_base;
+					pair_count  <= 24'd0;
+					flush_wd    <= 24'd0;
+					if (CHIP_PAIRS == 0) begin
+						saved_crc <= crc_value;
+						word_idx  <= 24'd1;
+						state     <= S_HEADER;
+					end
+					else state <= S_SAVE_FLUSH;
+				end
+				else begin
+					clut_idx <= clut_idx + 9'd1;
+					state    <= S_CLUT_RD;
+				end
 			end
 		end
 
@@ -1831,11 +1914,9 @@ always @(posedge clk) begin
 		S_L_SH_FETCH: begin
 			shadow_ld_we <= 1'b0;
 			if (sh_idx == SHADOW_ENTRIES) begin
-				if (CHIP_PAIRS == 0) state <= S_L_REPLAY;
-				else begin
-					chip_addr <= chip_base;
-					state     <= S_L_CH_FETCH;
-				end
+				clut_idx    <= 9'd0;
+				clut_active <= 1'b1;
+				state       <= S_L_CLUT_FETCH;
 			end
 			else if (sh_half) state <= S_L_SH_LOAD;
 			else if (pay_held) state <= S_L_SH_LOAD;
@@ -1859,6 +1940,36 @@ always @(posedge clk) begin
 			end
 			else sh_half <= 1'b1;
 			state <= S_L_SH_FETCH;
+		end
+
+		// The colour table, straight back into Denise's RAM. Written before
+		// chip RAM for no reason other than payload order; the table is data
+		// the display reads and nothing else depends on it.
+		S_L_CLUT_FETCH: begin
+			clut_wr_en <= 1'b0;
+			if (clut_idx == CLUT_WORDS) begin
+				clut_active <= 1'b0;
+				if (CHIP_PAIRS == 0) state <= S_L_REPLAY;
+				else begin
+					chip_addr <= chip_base;
+					state     <= S_L_CH_FETCH;
+				end
+			end
+			else if (pay_held) state <= S_L_CLUT_LOAD;
+			else begin
+				rd_idx <= pay_win;
+				rd_ret <= S_L_CLUT_LOAD;
+				state  <= S_L_RD_ISSUE;
+			end
+		end
+
+		S_L_CLUT_LOAD: begin
+			clut_addr    <= clut_idx[7:0];
+			clut_wr_data <= pay_word;
+			clut_wr_en   <= 1'b1;
+			clut_idx     <= clut_idx + 9'd1;
+			pay_idx      <= pay_idx + 24'd1;
+			state        <= S_L_CLUT_FETCH;
 		end
 
 		// Everything the machine needs is in place: registers, memory, and the
