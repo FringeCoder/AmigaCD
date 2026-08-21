@@ -6960,7 +6960,19 @@ void HandleUI(void)
 					int sys = amigacd_system();
 					sys = minus ? (sys + AMIGACD_SYS_COUNT - 1) % AMIGACD_SYS_COUNT
 					            : (sys + 1) % AMIGACD_SYS_COUNT;
-					amigacd_apply_system(sys);
+					// A missing default ROM is worth saying out loud. The
+					// machine still boots, but as whatever Amiga the old ROM
+					// makes it, and the only other clue is the Main ROM row
+					// two menus away.
+					if (!amigacd_apply_system(sys))
+					{
+						const char *mname = 0;
+						amigacd_default_rom_names(sys, &mname, 0);
+						char msg[128];
+						snprintf(msg, sizeof(msg), "%s ROM %s not found",
+						         amigacd_system_name(sys), mname);
+						Info(msg, 2500);
+					}
 
 					// The A1200 has no CD drive, so a disc mounted under a
 					// previous system has to go with it -- otherwise the row

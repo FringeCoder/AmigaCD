@@ -135,8 +135,12 @@ unsigned int minimig_get_extcfg();
 
 // AmigaCD console variant helpers (see minimig_config.cpp).
 void amigacd_default_rom_names(int sys, const char **main_name, const char **ext_name);
-void amigacd_set_default_roms(int sys);
-void amigacd_apply_system(int sys);
+// Both return 1 if the machine's default main ROM was found and selected, and
+// 0 if it was missing -- in which case whatever ROM was already loaded is left
+// alone. Callers should tell the user when it returns 0: the machine will boot,
+// but as the wrong Amiga, and the only other clue is the Main ROM row.
+int amigacd_set_default_roms(int sys);
+int amigacd_apply_system(int sys);
 int  amigacd_is_cdtv(void);
 // The AMIGACD_SYS_* values these two speak in live in minimig_profile.h, which
 // is included above so callers need only this header.

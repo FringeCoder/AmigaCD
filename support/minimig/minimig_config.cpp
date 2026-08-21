@@ -1048,7 +1048,7 @@ void amigacd_default_rom_names(int sys, const char **main_name, const char **ext
 // Point the main + ext ROM at this system's defaults under the boot folder.
 // Only sets the ext pairing if the ext file actually exists, so a missing ext
 // ROM doesn't force the composite path / a load failure.
-void amigacd_set_default_roms(int sys)
+int amigacd_set_default_roms(int sys)
 {
 	const char *mname = 0, *ename = 0;
 	amigacd_default_rom_names(sys, &mname, &ename);
@@ -1057,8 +1057,24 @@ void amigacd_set_default_roms(int sys)
 	snprintf(mpath, sizeof(mpath), "%s/%s", getRootDir(), mname);
 	snprintf(epath, sizeof(epath), "%s/%s", getRootDir(), ename);
 
+	// The main ROM is only replaced when the default is actually there. It
+	// used to be set unconditionally, which meant switching machine on a card
+	// whose ROMs are named anything else -- CD32.rom rather than
+	// kick40060.CD32, say, which is what MiSTer's own Amiga sets ship as --
+	// pointed the config at a file that does not exist and took the working
+	// ROM with it. The ext ROM has always been guarded this way; the main one
+	// is the half that matters more.
+	if (!FileExists(mpath, 0))
+	{
+		printf("AmigaCD: default ROM for %s not found (%s), keeping the current one
+",
+		       amigacd_system_name(sys), mpath);
+		return 0;
+	}
+
 	minimig_set_kickstart(mpath);              // also clears any stale ext pairing
 	if (FileExists(epath, 0)) minimig_set_extrom(epath);
+	return 1;
 }
 
 // Apply a complete authentic CD32 or CDTV machine profile (CPU / chipset /
@@ -1067,7 +1083,7 @@ void amigacd_set_default_roms(int sys)
 // AmigaCD Settings menu. Defaults match an authentic CD32: D-Cache OFF (the
 // 68EC020 has no data cache) and no FastRAM. CDTV is a 68000 (cpu 0x00,
 // chipset 0x20, 1M chip).
-void amigacd_apply_system(int sys)
+int amigacd_apply_system(int sys)
 {
 	if (sys == AMIGACD_SYS_CDTV)
 	{
@@ -1128,12 +1144,13 @@ void amigacd_apply_system(int sys)
 	minimig_config.hardfile[0].cfg = (sys == AMIGACD_SYS_A1200) ? 0 : 2;
 	if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1; // single df0
 
-	amigacd_set_default_roms(sys);
+	int rom_ok = amigacd_set_default_roms(sys);
 
 	minimig_ConfigCPU(minimig_config.cpu);
 	minimig_ConfigChipset(minimig_config.chipset);
 	minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
 	// memory is applied on reset via the UploadKickstart / ApplyConfiguration path
+	return rom_ok;
 }
 
 int amigacd_is_cdtv(void)
