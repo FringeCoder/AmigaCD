@@ -904,7 +904,7 @@ int minimig_cfg_load(int num)
 		// authentic profile + PSX-style default ROMs auto-found in /media/fat/.
 		if (is_amigacd())
 		{
-			amigacd_apply_system(0); // 0 = CD32
+			amigacd_apply_system(AMIGACD_SYS_CD32);
 			BootPrintEx(">>> AmigaCD: defaulting to CD32. <<<");
 		}
 	}
@@ -922,12 +922,14 @@ int minimig_cfg_load(int num)
 		//
 		// Chip RAM is a property of the machine, not a preference: the AmigaCD
 		// OSD offers no row for it. Re-assert it from the system the config
-		// itself names, leaving FastRAM, SlowRAM and HRTmon untouched.
-		uint8_t fixed = amigacd_profile_memory(minimig_config.memory, amigacd_is_cdtv());
+		// itself names, leaving FastRAM and HRTmon untouched. SlowRAM is
+		// part of the profile for an A500 and the user's elsewhere.
+		int sys = amigacd_system();
+		uint8_t fixed = amigacd_profile_memory(minimig_config.memory, sys);
 		if (fixed != minimig_config.memory)
 		{
 			printf("AmigaCD: correcting chip RAM for %s: memory 0x%02X -> 0x%02X\n",
-			       amigacd_is_cdtv() ? "CDTV" : "CD32", minimig_config.memory, fixed);
+			       amigacd_system_name(sys), minimig_config.memory, fixed);
 			minimig_config.memory = fixed;
 		}
 	}
@@ -1011,12 +1013,20 @@ void minimig_set_extrom(char *name)
 // research/docs/amiga-console-design-2026-06-13.md and the shipped AmigaCD-ROMs
 // guide.
 
-void amigacd_default_rom_names(int cdtv, const char **main_name, const char **ext_name)
+void amigacd_default_rom_names(int sys, const char **main_name, const char **ext_name)
 {
-	if (cdtv)
+	if (sys == AMIGACD_SYS_CDTV)
 	{
 		if (main_name) *main_name = "kick34005.CDTV";       // Kickstart 1.3 rev 34.5 (256K)
 		if (ext_name)  *ext_name  = "kick34005.CDTV.ext";   // CDTV extended ROM
+	}
+	else if (sys == AMIGACD_SYS_A500)
+	{
+		// An A500 has no extended ROM. The name is still returned so callers
+		// need no special case: amigacd_set_default_roms only pairs an ext ROM
+		// when the file exists, and this one is not expected to.
+		if (main_name) *main_name = "kick34005.A500";       // Kickstart 1.3 rev 34.5 (256K)
+		if (ext_name)  *ext_name  = "kick34005.A500.ext";
 	}
 	else
 	{
@@ -1028,10 +1038,10 @@ void amigacd_default_rom_names(int cdtv, const char **main_name, const char **ex
 // Point the main + ext ROM at this system's defaults under the boot folder.
 // Only sets the ext pairing if the ext file actually exists, so a missing ext
 // ROM doesn't force the composite path / a load failure.
-void amigacd_set_default_roms(int cdtv)
+void amigacd_set_default_roms(int sys)
 {
 	const char *mname = 0, *ename = 0;
-	amigacd_default_rom_names(cdtv, &mname, &ename);
+	amigacd_default_rom_names(sys, &mname, &ename);
 
 	char mpath[1024], epath[1024];
 	snprintf(mpath, sizeof(mpath), "%s/%s", getRootDir(), mname);
@@ -1047,14 +1057,29 @@ void amigacd_set_default_roms(int cdtv)
 // AmigaCD Settings menu. Defaults match an authentic CD32: D-Cache OFF (the
 // 68EC020 has no data cache) and no FastRAM. CDTV is a 68000 (cpu 0x00,
 // chipset 0x20, 1M chip).
-void amigacd_apply_system(int cdtv)
+void amigacd_apply_system(int sys)
 {
-	if (cdtv)
+	if (sys == AMIGACD_SYS_CDTV)
 	{
 		minimig_config.cpu     = 0x00; // 68000
 		minimig_config.chipset = 0x20; // OCS + CONFIG_CDTV
 		minimig_config.memory  = 0x01; // 1M chip, no fast
 		minimig_config.ide_cfg = 0x00; // CDTV bridge (no IDE)
+	}
+	else if (sys == AMIGACD_SYS_A500)
+	{
+		// A plain A500: 68000, OCS, 512K chip + the 512K trapdoor card, and no
+		// CD hardware at all -- neither the CDTV bridge nor Akiko. Games come
+		// from df0 and hardfiles, which the Floppy and CD rows already cover.
+		//
+		// The 68000 here is fx68k, the same core the CDTV profile selects
+		// (cpucfg 0). Save states are refused in that mode -- Minimig.sv gates
+		// them on `ss_supported = |cpucfg` -- so an A500 cannot save state
+		// until fx68k gains an export and restore path.
+		minimig_config.cpu     = 0x00; // 68000
+		minimig_config.chipset = 0x00; // OCS, no CDTV bridge
+		minimig_config.memory  = 0x04; // 512K chip + 512K slow, no fast
+		minimig_config.ide_cfg = 0x00; // no CD bridge
 	}
 	else
 	{
@@ -1066,7 +1091,7 @@ void amigacd_apply_system(int cdtv)
 	minimig_config.hardfile[0].cfg = 2; // single removable CD slot
 	if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1; // single df0
 
-	amigacd_set_default_roms(cdtv);
+	amigacd_set_default_roms(sys);
 
 	minimig_ConfigCPU(minimig_config.cpu);
 	minimig_ConfigChipset(minimig_config.chipset);
@@ -1077,6 +1102,27 @@ void amigacd_apply_system(int cdtv)
 int amigacd_is_cdtv(void)
 {
 	return (minimig_config.chipset & CONFIG_CDTV) ? 1 : 0;
+}
+
+// Which machine the live config describes. Derived rather than stored, so a
+// config written before A500 existed still reads correctly: CONFIG_CDTV names
+// the CDTV, and of what is left a 68000 with no CD bridge is the A500 -- a
+// CD32 is always a 68EC020.
+int amigacd_system(void)
+{
+	if (minimig_config.chipset & CONFIG_CDTV) return AMIGACD_SYS_CDTV;
+	if ((minimig_config.cpu & 0x03) == 0)     return AMIGACD_SYS_A500;
+	return AMIGACD_SYS_CD32;
+}
+
+const char *amigacd_system_name(int sys)
+{
+	switch (sys)
+	{
+		case AMIGACD_SYS_CDTV: return "CDTV";
+		case AMIGACD_SYS_A500: return "A500";
+		default:               return "CD32";
+	}
 }
 
 static char minimig_adjust = 0;

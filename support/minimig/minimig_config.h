@@ -3,6 +3,7 @@
 #define __MINIMIG_CONFIG_H__
 
 #include "../../file_io.h"
+#include "minimig_profile.h"   // AMIGACD_SYS_* for the system helpers below
 
 #define CONFIG_TURBO     1
 #define CONFIG_NTSC      2
@@ -133,9 +134,13 @@ void minimig_set_extcfg(unsigned int ext_cfg);
 unsigned int minimig_get_extcfg();
 
 // AmigaCD console variant helpers (see minimig_config.cpp).
-void amigacd_default_rom_names(int cdtv, const char **main_name, const char **ext_name);
-void amigacd_set_default_roms(int cdtv);
-void amigacd_apply_system(int cdtv);
+void amigacd_default_rom_names(int sys, const char **main_name, const char **ext_name);
+void amigacd_set_default_roms(int sys);
+void amigacd_apply_system(int sys);
 int  amigacd_is_cdtv(void);
+// The AMIGACD_SYS_* values these two speak in live in minimig_profile.h, which
+// is included above so callers need only this header.
+int  amigacd_system(void);
+const char *amigacd_system_name(int sys);
 
 #endif

@@ -16,10 +16,23 @@
 // Kept free of MiSTer headers so it can be unit-tested with the host compiler;
 // minimig_config.h pulls in file_io.h and thence <unistd.h>.
 
-// Returns `memory` with the chip RAM field forced to what the machine actually
-// has: bits [1:0], where 3 == 2M (CD32) and 1 == 1M (CDTV). Every other bit --
-// SlowRAM [3:2], FastRAM [5:4] and [7], HRTmon [6] -- is preserved, because
-// those are the user's to choose.
-uint8_t amigacd_profile_memory(uint8_t memory, int cdtv);
+// The machines this core can be. The value is not persisted directly -- it is
+// derived from the saved chipset/cpu bits by amigacd_system() -- so the order
+// here is free to change.
+enum {
+	AMIGACD_SYS_CD32 = 0,
+	AMIGACD_SYS_CDTV = 1,
+	AMIGACD_SYS_A500 = 2,
+};
+
+// Returns `memory` with the RAM fields forced to what the machine actually
+// has. Chip RAM is bits [1:0], where 0 == 512K, 1 == 1M, 3 == 2M: a CD32 has
+// 2M, a CDTV 1M, an A500 512K. The A500 also gets the 512K trapdoor expansion
+// in SlowRAM [3:2], because a bare 512K machine cannot run much and every real
+// A500 that mattered had one.
+//
+// FastRAM [5:4] and [7] and HRTmon [6] are preserved for every system: those
+// are the user's to choose.
+uint8_t amigacd_profile_memory(uint8_t memory, int sys);
 
 #endif

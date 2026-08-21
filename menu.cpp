@@ -6615,7 +6615,6 @@ void HandleUI(void)
 		menumask = 0x3FF;           // CD, Real CD, DF0, DF1, System, Settings, Advanced, Save, Reset, Exit
 		parentstate = menustate;
 
-		int cdtv = amigacd_is_cdtv();
 		// mister_floppy_status rides in the core's OSD mask: bit 6 board
 		// detected, bit 7 IBM/PC vs Shugart, bit 8 cable straight vs crossed.
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
@@ -6694,7 +6693,7 @@ void HandleUI(void)
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " System   : ");
-		strcat(s, cdtv ? "CDTV" : "CD32");
+		strcat(s, amigacd_system_name(amigacd_system()));
 		OsdWrite(m++, s, menusub == 4, 0);
 
 		OsdWrite(m++, "", 0, 0);
@@ -6899,11 +6898,15 @@ void HandleUI(void)
 					else if (recent_init(fu)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 4) // System: toggle CD32 <-> CDTV
+			else if (menusub == 4) // System: cycle CD32 -> CDTV -> A500
 			{
 				if (select || minus || plus)
 				{
-					amigacd_apply_system(amigacd_is_cdtv() ? 0 : 1);
+					// minus steps backwards so the row behaves like every
+					// other multi-value row in this menu.
+					int sys = amigacd_system();
+					sys = minus ? (sys + 2) % 3 : (sys + 1) % 3;
+					amigacd_apply_system(sys);
 					// Refresh the active bridge with the mounted CD, if any.
 					if (minimig_config.hardfile[0].filename[0])
 						ide_open(0, minimig_config.hardfile[0].filename);

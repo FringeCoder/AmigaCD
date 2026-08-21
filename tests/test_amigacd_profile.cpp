@@ -43,6 +43,20 @@ int main(void)
 	check("cdtv corrects the generic Minimig default",
 	      amigacd_profile_memory(0x11, 1), 0x11);
 
+	// An A500 has 512K chip and the 512K trapdoor card: chip [1:0] == 0 and
+	// slow [3:2] == 1. Unlike the CD machines, SlowRAM is part of the profile
+	// here rather than the user's choice, so it is forced too.
+	check("a500 corrects a CD32 config",
+	      amigacd_profile_memory(0x03, 2), 0x04);
+	check("a500 corrects a CDTV config",
+	      amigacd_profile_memory(0x01, 2), 0x04);
+	check("a500 leaves an already-correct config alone",
+	      amigacd_profile_memory(0x04, 2), 0x04);
+	check("a500 keeps FastRAM and HRTmon",
+	      amigacd_profile_memory(0x53, 2), 0x54);
+	check("a500 clears slow when the config had more than 512K",
+	      amigacd_profile_memory(0x0B, 2), 0x04);
+
 	// Everything outside bits [1:0] is user-adjustable and must survive.
 	// FastRAM lives in [5:4] plus bit 7; SlowRAM in [3:2]; bit 6 is HRTmon.
 	check("fast RAM preserved",
