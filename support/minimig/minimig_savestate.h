@@ -18,8 +18,12 @@
 // shadow at a different offset, so it must be refused rather than misread.
 #define SS_VERSION  0x00010002u   // major 1, minor 2
 
-// 4 MB slot / 4 bytes per word.
-#define SS_MAX_WORDS (0x400000u / 4u)
+// 12 MB slot / 4 bytes per word. The slot grew from 4 MB when Zorro II fast
+// RAM joined the payload: 2 MB chip + 1.5 MB slow + 8 MB fast is 11.5 MB, and
+// every slot has to hold the largest case. Must match the core's CONF_STR
+// ("SS3C000000:C00000") -- the host reads the size from there at startup, and
+// this is only the bound used when validating a file against it.
+#define SS_MAX_WORDS (0xC00000u / 4u)
 
 // Words 2..7 inclusive: the part of the header that follows `length`.
 #define SS_HEADER_TAIL_WORDS 6u

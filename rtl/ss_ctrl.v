@@ -154,6 +154,29 @@ module ss_ctrl
 	// disturb anything.
 	parameter SLOW_BASE  = 24'h200000,
 	parameter SLOW_WORDS = 24'hC0000,   // 16-bit words; 0xC0000 = 1.5 MB
+
+	// Zorro II fast RAM. Unlike chip and slow RAM this lives in DDR3, not
+	// SDRAM, so it is not read through ss_dma at all -- it is copied beat for
+	// beat with the same DDR3 master that writes the payload.
+	//
+	// FAST_BASE is a 64-bit BEAT address, the same units ddr_address takes.
+	// memory_router puts Z2 at ramaddr[28] = 1, and ddram_ctrl prefixes
+	// 3'b001, so the byte address is 0x30000000 and the beat address is that
+	// over eight.
+	//
+	// The whole 8 MB window is copied whenever any Z2 fast RAM is configured,
+	// not just the configured size. That is not laziness: autoconfig places a
+	// 2 MB board at $200000-$3FFFFF and the bridge drops CPU address bit 23,
+	// so the live region sits at an OFFSET inside the window that depends on
+	// the size. Copying the window whole means the savestate never has to
+	// reproduce autoconfig's placement, and the cells outside the live region
+	// belong to nothing else.
+	//
+	// The section is a raw image in ddram_ctrl's own byte order. It is not
+	// byte-swapped the way the chip and slow sections are, because nothing
+	// reads it as Amiga memory -- it goes back exactly as it came out.
+	parameter [28:0] FAST_BASE  = 29'h06000000,  // byte 0x30000000 >> 3
+	parameter [23:0] FAST_BEATS = 24'h100000,    // 64-bit beats; 8 MB
 	// Kickstart region, in 16-bit words. 0x40000 = 512 KB, which is the
 	// $F80000-$FFFFFF ROM. A 1 MB CD32 image also occupies $E00000-$E7FFFF,
 	// which is a separate, non-contiguous SDRAM region: this pass covers the
@@ -162,10 +185,14 @@ module ss_ctrl
 	// need a second base and a second loop for no diagnostic gain. Must be
 	// even and non-zero: the pass reads two 16-bit words per ss_dma request.
 	parameter KICK_WORDS = 24'h40000,
-	// 32-bit words in one DDR3 slot: 0x400000 bytes / 4. Only the restore
+	// 32-bit words in one DDR3 slot: 0xC00000 bytes / 4. Only the restore
 	// path uses it, as the upper bound on a header length field that arrives
 	// from a file and is therefore untrusted.
-	parameter SLOT_WORDS = 32'h100000,
+	//
+	// 12 MB, up from 4 MB, because a machine with 8 MB of Zorro II fast RAM
+	// has 11.5 MB of state and the four slots have to hold the largest case.
+	// The window moved down to 0x3C000000 to make room; see Minimig.sv.
+	parameter SLOT_WORDS = 32'h300000,
 	// Clocks to wait for one SDRAM word during the ROM scan before concluding
 	// the CPU port is not being routed here at all. A cache hit answers in a
 	// handful of cycles and a miss that goes to SDRAM in a few tens, so 65536
@@ -222,6 +249,11 @@ module ss_ctrl
 	output                    freeze,
 
 	input      [24:1]         chip_base,
+
+	// 1 when the machine has Zorro II fast RAM. Decides whether the payload
+	// carries a fast RAM section at all, in BOTH directions -- see the
+	// core_words comment.
+	input                     fast_ena,
 	input      [24:1]         kick_base,
 	output reg                rom_scan,
 
@@ -398,24 +430,42 @@ localparam CLUT_WORDS   = 256;
 // chip RAM. The shadow goes before chip RAM so the restore has it in hand by
 // the time memory is in place -- it is replayed after chip RAM, because the
 // copper lists the chipset will be pointed at live there.
-localparam CORE_WORDS   = KICK_META + STATE_WORDS + SHADOW_WORDS + CLUT_WORDS
+localparam CORE_BASE_W  = KICK_META + STATE_WORDS + SHADOW_WORDS + CLUT_WORDS
                           + CHIP_PAIRS + SLOW_PAIRS;
+
+// Two 32-bit payload words per 64-bit beat.
+localparam [23:0] FAST_WORDS = FAST_BEATS * 2;
+
+// The payload length is no longer a constant: the fast RAM section is present
+// only when the machine has fast RAM. Every other section is fixed, so this is
+// two possible lengths rather than a free-form one, and both directions read it
+// off the same input -- so a file saved with fast RAM and restored without it
+// (or the reverse) fails the header's core_words check as FAIL_LENGTH rather
+// than being read with every section after chip RAM displaced.
+//
+// fast_ena is sampled continuously rather than latched at the start of a
+// transfer. Changing the memory configuration resets the Amiga, which aborts
+// anything in flight, so there is no window in which it can move under a
+// transfer that has already committed to a length.
+wire [23:0] core_words   = CORE_BASE_W[23:0] + (fast_ena ? FAST_WORDS : 24'd0);
+wire [23:0] fast_present = fast_ena ? FAST_BEATS : 24'd0;
 
 localparam SS_MAGIC   = 32'h53534341;
 // 1.1: the colour table section was added between the shadow and chip RAM. A
 // 1.0 file has a different CORE_WORDS and would be read with every section
 // after the shadow displaced, so the version has to move with the layout.
 // 1.2: Akiko joined the state vector, which lengthens the state section and
-// moves everything after it, and slow RAM was appended after chip RAM. Same
-// argument, same consequence: a 1.1 file read as 1.2 would land the shadow on
-// top of the colour table.
+// moves everything after it, slow RAM was appended after chip RAM, and Zorro II
+// fast RAM after that when the machine has any. Same argument, same
+// consequence: a 1.1 file read as 1.2 would land the shadow on top of the
+// colour table.
 localparam SS_VERSION = 32'h00010002;
 
 // Sized copies of CORE_WORDS for the comparisons on the restore path, so a
 // 24-bit counter and a 32-bit header word are each compared against something
 // of their own width rather than against an unsized integer.
-localparam [23:0] CORE_WORDS_24  = CORE_WORDS;
-localparam [31:0] CORE_WORDS_32  = CORE_WORDS;
+wire [23:0] CORE_WORDS_24  = core_words;
+wire [31:0] CORE_WORDS_32  = {8'd0, core_words};
 
 // Payload index bounds for the restore-side walk. The state vector no longer
 // starts at payload word 0 -- the fingerprint does -- so both ends are named
@@ -427,7 +477,7 @@ localparam [23:0] ST_END_24   = KICK_META + STATE_WORDS;
 // 2..7) plus the payload. A file this core can restore must carry at least
 // its own core payload, and cannot claim more words than fit in the slot.
 // The host parser applies the same two bounds (minimig_savestate.cpp).
-localparam [31:0] MIN_LENGTH = 32'd6 + CORE_WORDS_32;
+wire [31:0] MIN_LENGTH = 32'd6 + CORE_WORDS_32;
 localparam [31:0] MAX_LENGTH = SLOT_WORDS - 32'd2;
 
 localparam [5:0] S_IDLE        = 6'd0;
@@ -503,6 +553,18 @@ localparam [5:0] S_CLUT_DRAIN  = 6'd56;
 localparam [5:0] S_CLUT_CAP    = 6'd52;
 localparam [5:0] S_L_CLUT_FETCH= 6'd53;
 localparam [5:0] S_L_CLUT_LOAD = 6'd54;
+
+// Zorro II fast RAM, DDR3 to DDR3. It does not go through ss_dma like the two
+// SDRAM regions -- the same master that writes the payload reads the source,
+// one 64-bit beat at a time, so the save side is read-then-queue-twice and the
+// restore side is fetch-twice-then-write.
+localparam [5:0] S_FAST_RD     = 6'd57;
+localparam [5:0] S_FAST_WAIT   = 6'd58;
+localparam [5:0] S_FAST_DATA   = 6'd59;
+localparam [5:0] S_FAST_Q0     = 6'd60;
+localparam [5:0] S_FAST_Q1     = 6'd61;
+localparam [5:0] S_L_FA_FETCH  = 6'd62;
+localparam [5:0] S_L_FA_LOAD   = 6'd63;
 localparam [5:0] S_L_SH_FETCH  = 6'd36;
 localparam [5:0] S_L_SH_LOAD   = 6'd37;
 localparam [5:0] S_L_REPLAY    = 6'd38;
@@ -644,6 +706,22 @@ ss_dma dma
 
 reg [24:1] chip_addr;
 reg [23:0] pair_count;
+
+// Zorro II fast RAM copy, both directions. fast_idx counts 64-bit beats;
+// fast_dat assembles or holds one beat; fast_half says which payload word of
+// the pair the restore is on.
+reg [23:0] fast_idx;
+reg [63:0] fast_dat;
+reg        fast_half;
+
+// An absolute DDR3 write, as opposed to the slot-relative payload writes the
+// rest of the module makes. Only the fast RAM restore uses it: it is the one
+// thing this module writes that is not part of the save file, so it needs its
+// own address and a full-width byteenable rather than the half-word merge the
+// payload path does.
+reg        pending_abs;
+reg [28:0] pending_addr;
+reg [63:0] pending_d64;
 
 // Which SDRAM region the memory sweep is walking: 0 = chip RAM, 1 = slow RAM.
 // Both directions use the same states for both regions -- the only things that
@@ -1028,6 +1106,12 @@ always @(posedge clk) begin
 		rd_pair          <= 24'hFFFFFF;
 		chip_wr_half     <= 1'b0;
 		region           <= REGION_CHIP;
+		fast_idx         <= 24'd0;
+		fast_dat         <= 64'd0;
+		fast_half        <= 1'b0;
+		pending_abs      <= 1'b0;
+		pending_addr     <= 29'd0;
+		pending_d64      <= 64'd0;
 		crc_init         <= 1'b0;
 		cap_idx          <= 16'd0;
 		drain_idx        <= 16'd0;
@@ -1068,6 +1152,17 @@ always @(posedge clk) begin
 		if (ddr_write && !ddr_waitrequest) begin
 			ddr_write     <= 1'b0;
 			pending_valid <= 1'b0;
+			pending_abs   <= 1'b0;
+		end
+		// The fast RAM restore's write, ahead of the payload path so that a
+		// beat cannot be overtaken by a header word. It does NOT advance
+		// word_idx: this write goes to fast RAM, not into the file, and
+		// bumping the payload cursor here would leave a hole in the save.
+		else if (pending_abs && !ddr_write) begin
+			ddr_address    <= pending_addr;
+			ddr_writedata  <= pending_d64;
+			ddr_byteenable <= 8'hFF;
+			ddr_write      <= 1'b1;
 		end
 		else if (pending_valid && !ddr_write) begin
 			// Two 32-bit words share one 64-bit DDR3 word, so this must be
@@ -1526,6 +1621,10 @@ always @(posedge clk) begin
 						chip_addr <= SLOW_BASE;
 						state     <= S_SAVE_FLUSH;
 					end
+					else if (fast_ena) begin
+						fast_idx <= 24'd0;
+						state    <= S_FAST_RD;
+					end
 					else begin
 						saved_crc <= crc_value;
 						word_idx  <= 24'd1;
@@ -1650,6 +1749,10 @@ always @(posedge clk) begin
 						pair_count <= 24'd0;
 						state      <= S_CHIP_ISSUE;
 					end
+					else if (fast_ena) begin
+						fast_idx <= 24'd0;
+						state    <= S_FAST_RD;
+					end
 					else begin
 						saved_crc <= crc_value;
 						word_idx  <= 24'd1;
@@ -1664,16 +1767,74 @@ always @(posedge clk) begin
 			end
 		end
 
+		// Zorro II fast RAM, DDR3 to DDR3.
+		//
+		// Serialised against the payload writes on purpose. ddr_read and
+		// ddr_write are one Avalon master, so raising a read while a write is
+		// still outstanding is two commands at once -- word_busy already means
+		// "the write path is occupied", so waiting on it here is both the
+		// correct interlock and the one already in use everywhere else.
+		//
+		// The terminal case lives here rather than after the last queue_word
+		// so that the final word has drained into the CRC before saved_crc is
+		// sampled -- the same reason S_CHIP_DRAIN waits on word_busy.
+		S_FAST_RD: begin
+			if (fast_idx == FAST_BEATS) begin
+				if (!word_busy) begin
+					saved_crc <= crc_value;
+					word_idx  <= 24'd1;
+					state     <= S_HEADER;
+				end
+			end
+			else if (!word_busy) begin
+				ddr_address <= FAST_BASE + {5'd0, fast_idx};
+				ddr_read    <= 1'b1;
+				state       <= S_FAST_WAIT;
+			end
+		end
+
+		S_FAST_WAIT: begin
+			if (!ddr_waitrequest) begin
+				ddr_read <= 1'b0;
+				state    <= S_FAST_DATA;
+			end
+		end
+
+		S_FAST_DATA: begin
+			if (ddr_readdatavalid) begin
+				fast_dat <= ddr_readdata;
+				state    <= S_FAST_Q0;
+			end
+		end
+
+		// One beat becomes two payload words, low half first, matching the
+		// order the restore reads them back in. No byte swap: this section is
+		// a raw image of DDR3 and goes back exactly as it came out.
+		S_FAST_Q0: begin
+			if (!word_busy) begin
+				queue_word(fast_dat[31:0]);
+				state <= S_FAST_Q1;
+			end
+		end
+
+		S_FAST_Q1: begin
+			if (!word_busy) begin
+				queue_word(fast_dat[63:32]);
+				fast_idx <= fast_idx + 24'd1;
+				state    <= S_FAST_RD;
+			end
+		end
+
 		// Header words 1..7 are written after the payload, because
 		// core_crc32 is not known until the payload is complete. They are
 		// not fed to the CRC.
 		S_HEADER: begin
 			if (!pending_valid && !ddr_write) begin
 				case (word_idx)
-				24'd1: pending_word <= 6 + CORE_WORDS;
+				24'd1: pending_word <= 32'd6 + CORE_WORDS_32;
 				24'd2: pending_word <= SS_MAGIC;
 				24'd3: pending_word <= SS_VERSION;
-				24'd4: pending_word <= CORE_WORDS;
+				24'd4: pending_word <= CORE_WORDS_32;
 				24'd5: pending_word <= 32'd0;
 				24'd6: pending_word <= saved_crc;
 				default: pending_word <= 32'd0;
@@ -2019,6 +2180,11 @@ always @(posedge clk) begin
 					chip_addr <= SLOW_BASE;
 					state     <= S_L_CH_FETCH;
 				end
+				else if (fast_ena) begin
+					fast_idx  <= 24'd0;
+					fast_half <= 1'b0;
+					state     <= S_L_FA_FETCH;
+				end
 				else state <= S_L_REPLAY;
 			end
 			else if (pay_held) state <= S_L_CLUT_LOAD;
@@ -2038,6 +2204,41 @@ always @(posedge clk) begin
 			state        <= S_L_CLUT_FETCH;
 		end
 
+		// Zorro II fast RAM, back out of the payload. Two payload words make
+		// one 64-bit beat, low half first, in the order the capture wrote
+		// them.
+		//
+		// Guarded on ddr_write and pending_abs for the same reason the capture
+		// side waits on word_busy: the payload read and the fast RAM write are
+		// the same Avalon master, and issuing a read on top of an outstanding
+		// write is two commands at once.
+		S_L_FA_FETCH: begin
+			if (ddr_write || pending_abs) ;      // let the beat land first
+			else if (pay_idx == CORE_WORDS_24) state <= S_L_REPLAY;
+			else if (pay_held) state <= S_L_FA_LOAD;
+			else begin
+				rd_idx <= pay_win;
+				rd_ret <= S_L_FA_LOAD;
+				state  <= S_L_RD_ISSUE;
+			end
+		end
+
+		S_L_FA_LOAD: begin
+			pay_idx <= pay_idx + 24'd1;
+			if (!fast_half) begin
+				fast_dat[31:0] <= pay_word;
+				fast_half      <= 1'b1;
+			end
+			else begin
+				fast_half    <= 1'b0;
+				pending_abs  <= 1'b1;
+				pending_addr <= FAST_BASE + {5'd0, fast_idx};
+				pending_d64  <= {pay_word, fast_dat[31:0]};
+				fast_idx     <= fast_idx + 24'd1;
+			end
+			state <= S_L_FA_FETCH;
+		end
+
 		// Everything the machine needs is in place: registers, memory, and the
 		// chipset shadow. Write the chipset back, in ss_regshadow's order --
 		// plain registers, then ADKCON, INTREQ, INTENA and DMACON last, so DMA
@@ -2053,7 +2254,16 @@ always @(posedge clk) begin
 		// Chip RAM. pay_idx carries straight on from the state words, so the
 		// payload is walked exactly once, in order, in both directions.
 		S_L_CH_FETCH: begin
-			if (pay_idx == CORE_WORDS_24) state <= S_L_REPLAY;
+			// CORE_BASE_W, not CORE_WORDS: the fast RAM section sits after
+			// this one and is not written through ss_dma at all.
+			if (pay_idx == CORE_BASE_W[23:0]) begin
+				if (fast_ena) begin
+					fast_idx  <= 24'd0;
+					fast_half <= 1'b0;
+					state     <= S_L_FA_FETCH;
+				end
+				else state <= S_L_REPLAY;
+			end
 			else if (pay_held) state <= S_L_CH_ISSUE;
 			else begin
 				rd_idx <= pay_win;

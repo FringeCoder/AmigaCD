@@ -36,6 +36,14 @@ localparam [23:0] KICK_BASE = 24'h000080;
 localparam SLOW_WORDS = 4;
 localparam [23:0] SLOW_BASE = 24'h000040;
 
+// Zorro II fast RAM, in the mock DDR3 rather than the mock SDRAM -- that is
+// where it lives in the real design too. Parked at beat 400, well past the
+// payload (which reaches beat ~147 at its longest), so a copy that ran off
+// either end of its own section would corrupt the file and be caught.
+localparam [28:0] FAST_BASE  = 29'd400;
+localparam [23:0] FAST_BEATS = 24'd2;      // 4 payload words
+localparam FAST_WORDS = FAST_BEATS * 2;
+
 localparam STATE_WORDS = (STATE_W + 31) / 32;
 
 // Payload: Kickstart CRC, state vector, chipset register shadow, chip RAM.
@@ -66,11 +74,15 @@ localparam W_SHADOW = W_STATE + STATE_WORDS;
 localparam W_CLUT   = W_SHADOW + SHADOW_WORDS;
 localparam W_CHIP   = W_CLUT + CLUT_WORDS;
 localparam W_SLOW   = W_CHIP + CHIP_WORDS / 2;
+localparam W_FAST   = W_SLOW + SLOW_WORDS / 2;
 
 reg  clk = 0;
 reg  rst_n = 0;
 
 reg  save_req = 0;
+// Off for every case but the fast RAM one at the end: with no fast RAM the
+// payload has no fast section and CORE_WORDS is what it was.
+reg  fast_ena = 0;
 reg  load_req = 0;
 wire load_busy, load_ok, load_fail;
 wire [3:0] load_fail_code;
@@ -211,11 +223,13 @@ wire [15:0] sh_replay_data;
 // is already 3 in the real design and is left alone.
 ss_ctrl #(.STATE_W(STATE_W), .CHIP_WORDS(CHIP_WORDS), .KICK_WORDS(KICK_WORDS),
           .SLOW_BASE(SLOW_BASE), .SLOW_WORDS(SLOW_WORDS[23:0]),
+          .FAST_BASE(FAST_BASE), .FAST_BEATS(FAST_BEATS),
           .SCAN_TIMEOUT(SCAN_TIMEOUT), .SAVE_FRAMES(8'd3),
           .SHADOW_ENTRIES(SHADOW_ENTRIES[8:0])) dut
 (
 	.clk(clk), .rst_n(rst_n),
 	.slot_base(29'd0),
+	.fast_ena(fast_ena),
 	.save_req(save_req), .save_busy(save_busy),
 	.save_ok(save_ok), .save_fail(save_fail),
 	.load_req(load_req), .load_busy(load_busy),
@@ -1267,6 +1281,74 @@ initial begin
 	// on by the case above -- and the file half is what the save wrote.
 	check("kick_pair carries the file's fingerprint",
 	      kick_pair[63:32], ddr_word(W_KICK));
+
+	// ===================================================================
+	// Zorro II fast RAM.
+	//
+	// The one section that is optional, and the one that does not go through
+	// ss_dma: it is copied DDR3 to DDR3 by the same master that writes the
+	// payload. Two things can go wrong that nothing above would catch -- the
+	// copy could collide with its own payload writes on that shared master,
+	// and the payload length could disagree between the two directions.
+	// ===================================================================
+	$display("-- fast RAM");
+	fast_ena  = 1;
+	rom_alt   = 0;
+	blit_busy = 0;
+
+	// Distinguishable in both halves of each beat, and distinct from every
+	// other value series in this bench, so a copy that read the wrong place
+	// or wrote the wrong place lands something recognisable.
+	ddr_mem[400] = 64'hFACE0001_FACE0000;
+	ddr_mem[401] = 64'hFACE0003_FACE0002;
+
+	@(negedge clk); save_req = 1;
+	@(negedge clk); save_req = 0;
+	wait (save_ok);
+	@(negedge clk);
+
+	// The header must advertise the longer payload, and the section must be
+	// where the layout says. A save that wrote the fast words but left
+	// core_words alone would produce a file the restore below refuses.
+	check("fast core_words", ddr_word(4), CORE_WORDS + FAST_WORDS);
+	check("fast length",     ddr_word(1), 6 + CORE_WORDS + FAST_WORDS);
+	check("fast word 0", ddr_word(W_FAST),     32'hFACE0000);
+	check("fast word 1", ddr_word(W_FAST + 1), 32'hFACE0001);
+	check("fast word 2", ddr_word(W_FAST + 2), 32'hFACE0002);
+	check("fast word 3", ddr_word(W_FAST + 3), 32'hFACE0003);
+
+	// The payload must not have been trampled by the fast RAM copy sharing the
+	// DDR3 master with it -- checked at the section immediately before, which
+	// is where an off-by-one in either direction would land.
+	check("slow word 1 still intact", ddr_word(W_SLOW + 1),
+	      {bswap16(16'hC003), bswap16(16'hC002)});
+
+	// Keep this file for the restore, then destroy the source so a restore
+	// that never reached the fast section leaves the poison visible.
+	for (i = 0; i < 512; i = i + 1) win_golden[i] = ddr_mem[i];
+	ddr_mem[400] = 64'hDEAD0001_DEAD0000;
+	ddr_mem[401] = 64'hDEAD0003_DEAD0002;
+
+	run_load();
+	check("fast restore ok", {31'd0, load_ok}, 32'd1);
+	check("fast RAM beat 0 restored", ddr_mem[400][31:0],  32'hFACE0000);
+	check("fast RAM beat 0 high",     ddr_mem[400][63:32], 32'hFACE0001);
+	check("fast RAM beat 1 restored", ddr_mem[401][31:0],  32'hFACE0002);
+	check("fast RAM beat 1 high",     ddr_mem[401][63:32], 32'hFACE0003);
+
+	// A file saved with fast RAM must not be restored into a machine without
+	// it. Every section after chip RAM would be read at the right place -- the
+	// fast section is last -- but core_words would disagree, and accepting
+	// that would mean accepting a file whose length the reader cannot account
+	// for. The header check catches it as FAIL_LENGTH.
+	restore_window();
+	ddr_mem[400] = 64'hDEAD0001_DEAD0000;
+	fast_ena = 0;
+	run_load();
+	check("fast file refused without fast RAM", {31'd0, load_fail}, 32'd1);
+	check("refusal is FAIL_LENGTH", {28'd0, load_fail_code}, 32'd3);
+	check("refused restore left fast RAM alone", ddr_mem[400][31:0], 32'hDEAD0000);
+	fast_ena = 1;
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);

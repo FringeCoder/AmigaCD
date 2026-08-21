@@ -280,7 +280,7 @@ const char *config_smask_msg[] = { "None", "1x", "2x", "1x Rotated", "2x Rotated
 const char *config_scale[] = { "Normal", "V-Integer", "HV-Integer-", "HV-Integer+", "HV-Integer", "???", "???", "???" };
 
 // Save state slots. Four, matching the four DDR3 windows process_ss() maps at
-// the core's advertised base (Minimig.sv CONF_STR "SS3E000000:400000"), and
+// the core's advertised base (Minimig.sv CONF_STR "SS3C000000:C00000"), and
 // matching the four .ss1-.ss4 files FileGenerateSavestatePath() names. Labelled
 // 1-4 for the user; the wire value in status[53:52] is 0-3.
 static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
@@ -288,9 +288,12 @@ static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
 // Save states are refused in two configurations. The OSD greys the rows out so
 // the user is told, rather than pressing SELECT and having nothing happen:
 //
-//  - Z3 fast RAM. The savestate windows start at DDR3 0x3E000000, which is
+//  - Z3 fast RAM. The savestate windows start at DDR3 0x3C000000, which is
 //    inside the region ddram_ctrl.v hands to Z3 fast RAM, so the two cannot
-//    coexist. Fast RAM index >= 4 means a Z3 board (cpu_wrapper.v ac_memcard[2]
+//    coexist. Moving the windows does not help: Z3_1 covers the whole of
+//    0x30000000-0x3FFFFFFF. Z2 fast RAM is a different matter -- it sits at
+//    0x30000000-0x307FFFFF, clear of the windows, and IS carried in the save
+//    state. Fast RAM index >= 4 means a Z3 board (cpu_wrapper.v ac_memcard[2]
 //    selects the 128/256 MB Z3 autoconfig entries). The index is decoded here
 //    exactly as the FastRAM row itself decodes it.
 //  - 68000. cpu_wrapper exports TG68K state only -- fx68k has no equivalent --
