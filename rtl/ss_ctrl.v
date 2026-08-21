@@ -444,6 +444,11 @@ localparam [5:0] S_SHADOW_HI   = 6'd40;
 localparam [5:0] S_SHADOW_Q    = 6'd35;
 // Invalidate the CPU's cache BEFORE dumping memory. See S_SAVE_FLUSH.
 localparam [5:0] S_SAVE_FLUSH  = 6'd46;
+// Second half of a pair, issued as its own transfer. See S_CHIP_ISSUE2.
+localparam [5:0] S_CHIP_ISSUE2 = 6'd47;
+localparam [5:0] S_KICK_ISSUE2 = 6'd48;
+localparam [5:0] S_PEEK_ISSUE2 = 6'd49;
+localparam [5:0] S_L_CH_ISSUE2 = 6'd50;
 localparam [5:0] S_L_SH_FETCH  = 6'd36;
 localparam [5:0] S_L_SH_LOAD   = 6'd37;
 localparam [5:0] S_L_REPLAY    = 6'd38;
@@ -568,7 +573,8 @@ wire        dma_done;
 ss_dma dma
 (
 	.clk(clk), .rst_n(rst_n),
-	.start(dma_start), .base_addr(dma_base), .word_count(24'd2),
+	// ONE word per transfer. See S_CHIP_ISSUE2.
+	.start(dma_start), .base_addr(dma_base), .word_count(24'd1),
 	.sd_addr(sd_addr), .sd_cs(sd_cs), .sd_state(sd_state),
 	.sd_uds_n(sd_uds_n), .sd_lds_n(sd_lds_n),
 	.sd_cache_inhibit(sd_cache_inhibit),
@@ -1117,6 +1123,16 @@ always @(posedge clk) begin
 			state         <= S_PEEK_WAIT;
 		end
 
+		// Second word of the pair, own transfer -- see S_CHIP_ISSUE2. The peek
+		// is the instrument this bug was measured WITH, so it had the fault it
+		// was being used to find: every odd word it reported came from the
+		// wrong address.
+		S_PEEK_ISSUE2: begin
+			dma_start <= 1'b1;
+			dma_base  <= peek_cur + 24'd1;
+			state     <= S_PEEK_WAIT;
+		end
+
 		S_PEEK_WAIT: begin
 			// Bounded like the fingerprint's wait, and for the same reason:
 			// nothing has been written, so giving up is a clean rollback. A
@@ -1135,6 +1151,7 @@ always @(posedge clk) begin
 				if (!peek_low_held) begin
 					peek_low      <= dma_word_out;
 					peek_low_held <= 1'b1;
+					state         <= S_PEEK_ISSUE2;
 				end
 				else begin
 					// 68k order: the lower address word contributes the high
@@ -1216,6 +1233,7 @@ always @(posedge clk) begin
 				if (!kick_low_held) begin
 					kick_low      <= dma_word_out;
 					kick_low_held <= 1'b1;
+					state         <= S_KICK_ISSUE2;
 				end
 				else begin
 					crc_word({dma_word_out[7:0], dma_word_out[15:8],
@@ -1234,6 +1252,16 @@ always @(posedge clk) begin
 				else                          state <= S_FAIL;
 			end
 			else scan_wd <= scan_wd + 24'd1;
+		end
+
+		// Second word of the pair, own transfer -- see S_CHIP_ISSUE2. This is
+		// why the Kickstart fingerprint never once matched its own file: the
+		// scan was CRCing a ROM with the odd words of each longword pair
+		// exchanged.
+		S_KICK_ISSUE2: begin
+			dma_start <= 1'b1;
+			dma_base  <= kick_addr + 24'd1;
+			state     <= S_KICK_WAIT;
 		end
 
 		S_KICK_DRAIN: begin
@@ -1426,11 +1454,40 @@ always @(posedge clk) begin
 		// word_valid (see module header), so counting our own two pulses
 		// sidesteps that race entirely instead of trying to catch both
 		// signals on the same clock.
+		// The second word of the pair, as a transfer of its own.
+		//
+		// ss_dma used to fetch both words in one two-word transfer, and the
+		// SECOND read of such a transfer came back with the contents of
+		// address XOR 2 -- the word one longword away, same half. Measured
+		// against the Kickstart image on hardware, and again in the vector
+		// table: the save read $6C as $00F8679A while the CPU was dispatching
+		// every level-3 interrupt to $00F81204, Exec's real handler, because
+		// $6A and $6E had been exchanged. Restoring that table sent the first
+		// interrupt after a resume into the middle of a ROM routine and
+		// rebooted the Amiga.
+		//
+		// The FIRST read of a transfer is always right, at odd and even start
+		// addresses alike -- an overlap test starting one word in confirmed
+		// it. So every read is now the first read of its own transfer. It is
+		// twice the transfers for the same words, on a path that is already
+		// bounded by DDR3 writes rather than by these reads.
+		//
+		// Not the ack race fixed earlier in ss_dma (real, but not this), and
+		// not the CPU cache (flushing before the dump changed nothing, and the
+		// machine kept running afterwards on the correct vector -- which it
+		// could not have done if the cache had been the one lying).
+		S_CHIP_ISSUE2: begin
+			dma_start <= 1'b1;
+			dma_base  <= chip_addr + 24'd1;
+			state     <= S_CHIP_WAIT;
+		end
+
 		S_CHIP_WAIT: begin
 			if (dma_word_valid) begin
 				if (!pending_low_held) begin
 					chip_low         <= dma_word_out;
 					pending_low_held <= 1'b1;
+					state            <= S_CHIP_ISSUE2;
 				end
 				else begin
 					// Byte-swap each 16-bit word into the pair. The pair is
@@ -1857,11 +1914,24 @@ always @(posedge clk) begin
 		// The second pulse means the second word's sd_ready has already been
 		// taken, i.e. both writes have landed -- which is what makes it safe
 		// for the release below to follow immediately.
+		// Second word of the pair, own transfer. Symmetric with the capture
+		// side: the write direction has never been shown to suffer the same
+		// fault, but it goes through the same ss_dma and the same port, and a
+		// restore that scattered every odd word would be indistinguishable
+		// from the capture bug it is paired with.
+		S_L_CH_ISSUE2: begin
+			dma_word_in    <= chip_high;
+			dma_write_mode <= 1'b1;
+			dma_base       <= chip_addr + 24'd1;
+			dma_start      <= 1'b1;
+			state          <= S_L_CH_WAIT;
+		end
+
 		S_L_CH_WAIT: begin
 			if (dma_word_req) begin
 				if (!chip_wr_half) begin
-					dma_word_in  <= chip_high;
 					chip_wr_half <= 1'b1;
+					state        <= S_L_CH_ISSUE2;
 				end
 				else begin
 					chip_addr <= chip_addr + 24'd2;
