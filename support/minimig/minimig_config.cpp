@@ -1028,6 +1028,16 @@ void amigacd_default_rom_names(int sys, const char **main_name, const char **ext
 		if (main_name) *main_name = "kick34005.A500";       // Kickstart 1.3 rev 34.5 (256K)
 		if (ext_name)  *ext_name  = "kick34005.A500.ext";
 	}
+	else if (sys == AMIGACD_SYS_A1200)
+	{
+		// Kickstart 3.1 rev 40.68, the A1200 ROM. Not the CD32's 40.60: that
+		// one boots the CD and never reaches the hard disk, which is the whole
+		// reason this profile exists. No extended ROM on an A1200; the name is
+		// returned anyway because amigacd_set_default_roms only pairs one when
+		// the file is actually there.
+		if (main_name) *main_name = "kick40068.A1200";
+		if (ext_name)  *ext_name  = "kick40068.A1200.ext";
+	}
 	else
 	{
 		if (main_name) *main_name = "kick40060.CD32";       // Kickstart 3.1 rev 40.60 (512K)
@@ -1081,6 +1091,31 @@ void amigacd_apply_system(int sys)
 		minimig_config.memory  = 0x04; // 512K chip + 512K slow, no fast
 		minimig_config.ide_cfg = 0x00; // no CD bridge
 	}
+	else if (sys == AMIGACD_SYS_A1200)
+	{
+		// An A1200 with a hard disk: AGA, 68EC020 with the D-Cache on, 2 MB
+		// chip and 8 MB of Zorro II fast, Gayle IDE, and NO CD drive.
+		//
+		// The missing CD drive is the point of this profile, not an omission.
+		// A CD32 boots its own ROM, which owns the machine and goes looking
+		// for a disc; ejecting one does not hand the boot over to the hard
+		// disk. Hard-disk software -- AmigaVision, a Workbench install --
+		// needs a machine that has no CD boot path at all and an A1200
+		// Kickstart that enumerates IDE, which is this.
+		//
+		// hardfile[0].cfg = 0 below is what removes the drive, and it doubles
+		// as how amigacd_system() tells an A1200 from a CD32: the two agree on
+		// every other bit.
+		minimig_config.cpu     = 0x13; // 68EC020, D-Cache ON
+		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
+		// 8 MB of Zorro II fast is a seed, not a clamp: it is set here, when
+		// the user picks the machine, and left alone afterwards. Hard-disk
+		// software wants fast RAM and a machine that boots into AmigaVision
+		// with none is not a configuration anyone chose on purpose -- but the
+		// FastRAM row still owns it from this point on.
+		minimig_config.memory  = 0x33; // 2M chip + 8M Zorro II fast
+		minimig_config.ide_cfg = 0x01; // Gayle IDE
+	}
 	else
 	{
 		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF (authentic CD32 default)
@@ -1088,7 +1123,9 @@ void amigacd_apply_system(int sys)
 		minimig_config.memory  = 0x03; // 2M chip, no fast (authentic CD32 default)
 		minimig_config.ide_cfg = 0x01; // akiko / IDE
 	}
-	minimig_config.hardfile[0].cfg = 2; // single removable CD slot
+	// One removable CD slot on every machine that has a CD drive. The A1200
+	// has none -- see above.
+	minimig_config.hardfile[0].cfg = (sys == AMIGACD_SYS_A1200) ? 0 : 2;
 	if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1; // single df0
 
 	amigacd_set_default_roms(sys);
@@ -1112,6 +1149,11 @@ int amigacd_system(void)
 {
 	if (minimig_config.chipset & CONFIG_CDTV) return AMIGACD_SYS_CDTV;
 	if ((minimig_config.cpu & 0x03) == 0)     return AMIGACD_SYS_A500;
+	// A1200 and CD32 agree on CPU and chipset; the CD drive is what separates
+	// them, and its absence is a property of the machine rather than of what
+	// the user happens to have mounted. hardfile[0].cfg is the slot, not the
+	// disc: 2 means "there is a removable CD device", 0 means there is not.
+	if (minimig_config.hardfile[0].cfg == 0)  return AMIGACD_SYS_A1200;
 	return AMIGACD_SYS_CD32;
 }
 
@@ -1119,9 +1161,10 @@ const char *amigacd_system_name(int sys)
 {
 	switch (sys)
 	{
-		case AMIGACD_SYS_CDTV: return "CDTV";
-		case AMIGACD_SYS_A500: return "A500";
-		default:               return "CD32";
+		case AMIGACD_SYS_CDTV:  return "CDTV";
+		case AMIGACD_SYS_A500:  return "A500";
+		case AMIGACD_SYS_A1200: return "A1200";
+		default:                return "CD32";
 	}
 }
 

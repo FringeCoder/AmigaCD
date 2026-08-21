@@ -16,6 +16,8 @@
 #define MEM_SLOW_MASK 0x0C
 #define MEM_SLOW_512K 0x04
 
+
+
 uint8_t amigacd_profile_memory(uint8_t memory, int sys)
 {
 	if (sys == AMIGACD_SYS_A500)

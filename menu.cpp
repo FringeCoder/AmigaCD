@@ -314,6 +314,13 @@ static const char *amigacd_ss_name()
 	static char name[256];
 	const char *f = minimig_config.hardfile[0].filename;
 
+	// No CD: name the state after the hard disk instead. The A1200 profile has
+	// no CD drive at all, and its software lives in the HDF -- without this a
+	// machine that can be saved has nothing to name the file after, and
+	// process_ss is never armed, so the save is captured into DDR3 and never
+	// reaches the card.
+	if (!f[0]) return minimig_config.hardfile[1].filename;
+
 	if (strcmp(f, PHYSICAL_DISC_SENTINEL)) return f;   // an image path: use it
 
 	if (physical_disc_save_name(PHYSICAL_DISC_DISC_NONE, name, sizeof(name)) &&
@@ -6618,6 +6625,14 @@ void HandleUI(void)
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 		helptext_idx = 0;
 		menumask = 0x7FF;           // CD, Real CD, DF0, DF1, HDF, System, Settings, Advanced, Save, Reset, Exit
+
+		// The A1200 profile has no CD drive at all, so its two rows are dead.
+		// Greyed out rather than removed: the row positions are shared with
+		// every other system and menusub indices below them would all shift,
+		// and a row that vanishes reads as a bug where a greyed one reads as
+		// "not on this machine".
+		const int amigacd_has_cd = (amigacd_system() != AMIGACD_SYS_A1200);
+		if (!amigacd_has_cd) menumask &= ~0x003;
 		parentstate = menustate;
 
 		// mister_floppy_status rides in the core's OSD mask: bit 6 board
@@ -6632,7 +6647,8 @@ void HandleUI(void)
 		// load, and ide_open then returns 0. Render the real mount state
 		// (drive[0].phys) so the row cannot claim a disc that is not there.
 		strcpy(s, " CD       : ");
-		if (!strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
+		if (!amigacd_has_cd) strcat(s, "* no drive *");
+		else if (!strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
 		{
 			strcat(s, ide_inst[0].drive[0].phys ? "* physical drive *" : "* no disc *");
 		}
@@ -6643,15 +6659,16 @@ void HandleUI(void)
 			strncat(s, p ? p + 1 : name, 24);
 		}
 		else strcat(s, "* no disc *");
-		OsdWrite(m++, s, menusub == 0, 0);
+		OsdWrite(m++, s, menusub == 0, !amigacd_has_cd);
 
 		// Physical CD-ROM drive attached to the MiSTer. Mounting parks the
 		// sentinel in hardfile[0].filename, which is what ide_open matches on.
 		// Re-selecting while mounted re-reads the TOC, i.e. disc swap.
 		{
 			strcpy(s, " Real CD  : ");
-			strcat(s, ide_inst[0].drive[0].phys ? "re-read TOC" : "mount drive");
-			OsdWrite(m++, s, menusub == 1, 0);
+			if (!amigacd_has_cd) strcat(s, "-");
+			else strcat(s, ide_inst[0].drive[0].phys ? "re-read TOC" : "mount drive");
+			OsdWrite(m++, s, menusub == 1, !amigacd_has_cd);
 		}
 
 		// df0 and df1. The core has always presented two drives -- floppy.drives
@@ -6934,17 +6951,28 @@ void HandleUI(void)
 					else if (recent_init(500)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 5) // System: cycle CD32 -> CDTV -> A500
+			else if (menusub == 5) // System: cycle CD32 -> CDTV -> A500 -> A1200
 			{
 				if (select || minus || plus)
 				{
 					// minus steps backwards so the row behaves like every
 					// other multi-value row in this menu.
 					int sys = amigacd_system();
-					sys = minus ? (sys + 2) % 3 : (sys + 1) % 3;
+					sys = minus ? (sys + AMIGACD_SYS_COUNT - 1) % AMIGACD_SYS_COUNT
+					            : (sys + 1) % AMIGACD_SYS_COUNT;
 					amigacd_apply_system(sys);
+
+					// The A1200 has no CD drive, so a disc mounted under a
+					// previous system has to go with it -- otherwise the row
+					// keeps naming a disc that nothing can read, and stepping
+					// back round to CD32 would silently remount it.
+					if (sys == AMIGACD_SYS_A1200)
+					{
+						minimig_config.hardfile[0].filename[0] = 0;
+						ide_open(0, "");
+					}
 					// Refresh the active bridge with the mounted CD, if any.
-					if (minimig_config.hardfile[0].filename[0])
+					else if (minimig_config.hardfile[0].filename[0])
 						ide_open(0, minimig_config.hardfile[0].filename);
 					menustate = MENU_AMIGACD_MAIN1;
 				}
@@ -7168,7 +7196,7 @@ void HandleUI(void)
 				//
 				// Idempotent: repeat presses re-map the same four windows.
 				// Named after the mounted disc so states are per-game.
-				if (minimig_config.hardfile[0].filename[0])
+				if (amigacd_ss_name()[0])
 					process_ss(amigacd_ss_name(), 1);
 
 				// The core edge-detects this in RTL (Minimig.sv ss_save_edge),
@@ -7208,7 +7236,7 @@ void HandleUI(void)
 				// than a stale window, on a keypress the user made deliberately.
 				// It also resets the poller's counters, so it cannot itself
 				// trigger a spurious write back to disk.
-				if (minimig_config.hardfile[0].filename[0])
+				if (amigacd_ss_name()[0])
 					process_ss(amigacd_ss_name(), 1);
 
 				// status[54], edge-detected in RTL (Minimig.sv ss_load_edge)

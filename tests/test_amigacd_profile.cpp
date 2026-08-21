@@ -57,6 +57,18 @@ int main(void)
 	check("a500 clears slow when the config had more than 512K",
 	      amigacd_profile_memory(0x0B, 2), 0x04);
 
+	// An A1200 has 2 MB of chip RAM, like a CD32. Its fast RAM is seeded when
+	// the user picks the machine, NOT here: this function runs on every config
+	// load, so forcing fast RAM would undo the FastRAM row each time the
+	// config was read back. That distinction is the whole reason these two
+	// checks exist.
+	check("a1200 corrects a CDTV config",
+	      amigacd_profile_memory(0x01, 3), 0x03);
+	check("a1200 leaves the user's FastRAM choice alone",
+	      amigacd_profile_memory(0x13, 3), 0x13);
+	check("a1200 does not force FastRAM on a config that has none",
+	      amigacd_profile_memory(0x03, 3), 0x03);
+
 	// Everything outside bits [1:0] is user-adjustable and must survive.
 	// FastRAM lives in [5:4] plus bit 7; SlowRAM in [3:2]; bit 6 is HRTmon.
 	check("fast RAM preserved",
