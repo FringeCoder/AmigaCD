@@ -197,9 +197,18 @@ static void ss_diag_read(uint16_t *w)
 	DisableIO();
 }
 
-// One peek transaction. addr is a 24-bit SDRAM WORD address.
-static void ss_peek_request(uint32_t addr)
+// One peek transaction. `byte_addr` is an AMIGA BYTE address; the core's
+// ss_peek_addr is a [24:1] WORD vector, so it is halved on the way in.
+//
+// Byte in, word inside, because every use of a peek is a comparison against a
+// save file and the file is byte-addressed. Taking words here cost most of a
+// debugging session: a peek of $0357C0 read $06AF80, the values disagreed with
+// the file, and that read as "chip RAM is only partly restored" -- a bug that
+// did not exist. The units are not written on the trigger file, and a caller
+// with an address out of a disassembly has no reason to halve it.
+static void ss_peek_request(uint32_t byte_addr)
 {
+	uint32_t addr = byte_addr >> 1;
 	// hps_ext.v:257 loads ss_peek_addr[16:1] from the low word, so that word
 	// carries address bits 15:0 and the class-word field has to continue at
 	// bit 16 -- not 17. Shifting by 17 dropped bit 16 and shifted every higher
