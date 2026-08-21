@@ -442,6 +442,8 @@ localparam [5:0] S_SHADOW_RD   = 6'd34;
 localparam [5:0] S_SHADOW_LOW  = 6'd39;
 localparam [5:0] S_SHADOW_HI   = 6'd40;
 localparam [5:0] S_SHADOW_Q    = 6'd35;
+// Invalidate the CPU's cache BEFORE dumping memory. See S_SAVE_FLUSH.
+localparam [5:0] S_SAVE_FLUSH  = 6'd46;
 localparam [5:0] S_L_SH_FETCH  = 6'd36;
 localparam [5:0] S_L_SH_LOAD   = 6'd37;
 localparam [5:0] S_L_REPLAY    = 6'd38;
@@ -1345,7 +1347,8 @@ always @(posedge clk) begin
 				else begin
 					chip_addr  <= chip_base;
 					pair_count <= 24'd0;
-					state      <= S_CHIP_ISSUE;
+					flush_wd   <= 24'd0;
+					state      <= S_SAVE_FLUSH;
 				end
 			end
 			else state <= S_SHADOW_LOW;
@@ -1376,6 +1379,39 @@ always @(posedge clk) begin
 				sh_idx         <= sh_idx + 9'd1;
 				state          <= S_SHADOW_RD;
 			end
+		end
+
+		// Invalidate the CPU cache before reading a single word of memory.
+		//
+		// cache_inhibit stops ss_dma's reads being CACHED; it does not stop
+		// them being ANSWERED from the cache. cpu_cache_new checks the tags
+		// first and returns a hit whatever cache_inhibit says, and the word it
+		// picks out of the line comes from cpu_adr[2:1] -- so a read that hits
+		// can hand back a different word than the one at the address asked
+		// for. Measured on hardware: the level-3 vector at $6C read back as
+		// $00F8679A while the CPU was demonstrably dispatching to $00F81204,
+		// which is Exec's real handler; the two words of that longword pair
+		// had been exchanged with their neighbours. The save therefore stored
+		// a vector table the machine had never had, and restoring it sent the
+		// first interrupt into the middle of a ROM routine and rebooted the
+		// Amiga.
+		//
+		// Which regions it hit depended on what the CPU had cached as DATA:
+		// the vector table and Kickstart's data are read constantly and were
+		// wrong, while game code lives in the I-cache and read back clean.
+		// That is why an overlap test on chip RAM looked fine -- it cannot see
+		// a consistent address permutation, only non-determinism.
+		//
+		// Flushing here makes every read of the dump miss and go to SDRAM,
+		// which is the memory the restore will write back into.
+		S_SAVE_FLUSH: begin
+			cache_flush <= 1'b1;
+			if (flush_wd == FLUSH_HOLD) begin
+				cache_flush <= 1'b0;
+				flush_wd    <= 24'd0;
+				state       <= S_CHIP_ISSUE;
+			end
+			else flush_wd <= flush_wd + 24'd1;
 		end
 
 		S_CHIP_ISSUE: begin
