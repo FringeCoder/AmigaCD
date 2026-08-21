@@ -266,6 +266,11 @@ const char *config_autofire_msg[] = { "        AUTOFIRE OFF", "        AUTOFIRE 
 // Which df unit the AmigaCD floppy browser was opened for, so
 // MENU_AMIGACD_ADFFILE_SELECTED inserts into the row that asked.
 static int amigacd_fdd_unit = 0;
+// Which hardfile slot the Hard Disk browser is filling: 1 for Hard Disk 0
+// (IDE0 slave) and 2 for Hard Disk 1 (IDE1 master). The browser returns on
+// its own menustate long after the row that opened it has gone, the same
+// reason amigacd_fdd_unit above exists.
+static int amigacd_hdf_slot = 1;
 
 const char *config_joystick_mode[] = { "Digital", "Analog", "CD32", "Analog" };
 const char *config_button_turbo_msg[] = { "OFF", "FAST", "MEDIUM", "SLOW" };
@@ -6624,7 +6629,9 @@ void HandleUI(void)
 		// the core menu itself is reskinned, the MiSTer menu stays reachable.
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 		helptext_idx = 0;
-		menumask = 0x7FF;           // CD, Real CD, DF0, DF1, HDF, System, Settings, Advanced, Save, Reset, Exit
+		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
+		// Reset, Exit -- twelve rows.
+		menumask = 0xFFF;
 
 		// The A1200 profile has no CD drive at all, so its two rows are dead.
 		// Greyed out rather than removed: the row positions are shared with
@@ -6712,36 +6719,62 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == (uint32_t)(2 + fu), 0);
 		}
 
-		// Hard disk = hardfile[1], the IDE0 slave. hardfile[0] is the CD slot,
-		// so the HDF sits beside it rather than displacing it and a machine can
-		// boot from an HDF with a disc still mounted. AmigaVision ships as an
-		// HDF and had no way into this menu before.
-		strcpy(s, " Hard Disk: ");
-		if (minimig_config.hardfile[1].cfg && minimig_config.hardfile[1].filename[0])
+		// Two hard disks. HD0 is hardfile[1], the IDE0 slave, so it sits beside
+		// the CD slot (hardfile[0]) rather than displacing it -- a machine can
+		// boot from an HDF with a disc still mounted. HD1 is hardfile[2], the
+		// IDE1 master.
+		//
+		// Two rather than one because a single HDF is not how the software that
+		// wants them ships. AmigaVision keeps its saves and settings on a second
+		// volume, and with nowhere to mount it the system boots and then forgets
+		// everything on reset. ApplyConfiguration already opens all four IDE
+		// units, so the rows were the only part missing.
+		for (int hu = 0; hu < 2; hu++)
 		{
-			char *hname = minimig_config.hardfile[1].filename;
-			char *hp = strrchr(hname, '/');
-			strncat(s, hp ? hp + 1 : hname, 24);
+			const int hslot = hu + 1;    // hardfile[1] and hardfile[2]
+			sprintf(s, " Hard Disk %d: ", hu);
+			if (minimig_config.hardfile[hslot].cfg && minimig_config.hardfile[hslot].filename[0])
+			{
+				char *hname = minimig_config.hardfile[hslot].filename;
+				char *hp = strrchr(hname, '/');
+				strncat(s, hp ? hp + 1 : hname, 22);
+			}
+			else strcat(s, "* none *");
+			OsdWrite(m++, s, menusub == (uint32_t)(4 + hu), 0);
 		}
-		else strcat(s, "* none *");
-		OsdWrite(m++, s, menusub == 4, 0);
 
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " System   : ");
 		strcat(s, amigacd_system_name(amigacd_system()));
-		OsdWrite(m++, s, menusub == 5, 0);
+		OsdWrite(m++, s, menusub == 6, 0);
 
 		OsdWrite(m++, "", 0, 0);
-		OsdWrite(m++, " Settings                 \x16", menusub == 6, 0);
+		OsdWrite(m++, " Settings                 \x16", menusub == 7, 0);
 		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
 		// page so the everyday options stay a short list.
-		OsdWrite(m++, " Advanced                 \x16", menusub == 7, 0);
-		OsdWrite(m++, " Save settings", menusub == 8, 0);
+		OsdWrite(m++, " Advanced                 \x16", menusub == 8, 0);
+		OsdWrite(m++, " Save settings", menusub == 9, 0);
+
+		// Eject is BACKSPACE, which on a controller is A and B pressed together
+		// -- input.cpp synthesises JOY_BTN3 from that pair and maps it to
+		// BACKSPACE. Neither is written down anywhere the user would look, and
+		// with no hint the only discoverable way to change a mounted disc or
+		// disk was to mount a different one. Shown only while the cursor is on
+		// a row that can actually be ejected, so it reads as a property of the
+		// row rather than as decoration.
+		if (menusub <= 5 && !(menusub <= 1 && !amigacd_has_cd))
+		{
+			int occupied = (menusub == 0) ? (minimig_config.hardfile[0].filename[0] != 0)
+			             : (menusub == 1) ? 0
+			             : (menusub <= 3) ? ((df[menusub - 2].status & DSK_INSERTED) != 0)
+			                              : (minimig_config.hardfile[menusub - 3].filename[0] != 0);
+			if (occupied && m < OsdGetSize() - 2) OsdWrite(m++, " Eject: Backspace / A+B", 0, 1);
+		}
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 9, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 10, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 10, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 11, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 		break;
@@ -6934,97 +6967,116 @@ void HandleUI(void)
 					else if (recent_init(fu)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 4) // Hard Disk: select an HDF
+			else if (menusub == 4 || menusub == 5) // Hard Disk 0 / 1: select an HDF
 			{
 				if (select || recent)
 				{
+					// Which row is being filled has to survive the file
+					// browser, which comes back on its own menustate long
+					// after this branch has returned.
+					amigacd_hdf_slot = (menusub - 4) + 1;   // hardfile[1] or [2]
 					fs_Options = SCANO_DIR | SCANO_UMOUNT;
 					fs_MenuSelect = MENU_AMIGACD_HDFFILE_SELECTED;
 					fs_MenuCancel = MENU_AMIGACD_MAIN1;
 					strcpy(fs_pFileExt, "HDFVHDIMGDSK");
 					if (select)
 					{
-						if (!Selected_S[1][0])
-							memcpy(Selected_S[1], minimig_config.hardfile[1].filename, sizeof(Selected_S[1]));
-						SelectFile(Selected_S[1], fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel);
+						if (!Selected_S[amigacd_hdf_slot][0])
+							memcpy(Selected_S[amigacd_hdf_slot],
+							       minimig_config.hardfile[amigacd_hdf_slot].filename,
+							       sizeof(Selected_S[amigacd_hdf_slot]));
+						SelectFile(Selected_S[amigacd_hdf_slot], fs_pFileExt, fs_Options,
+						           fs_MenuSelect, fs_MenuCancel);
 					}
 					else if (recent_init(500)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 5) // System: cycle CD32 -> CDTV -> A500 -> A1200
+			else if (menusub == 6) // System: cycle CD32 -> CDTV -> A500 -> A1200
 			{
 				if (select || minus || plus)
 				{
 					// minus steps backwards so the row behaves like every
 					// other multi-value row in this menu.
-					int sys = amigacd_system();
-					sys = minus ? (sys + AMIGACD_SYS_COUNT - 1) % AMIGACD_SYS_COUNT
-					            : (sys + 1) % AMIGACD_SYS_COUNT;
-					// A missing default ROM is worth saying out loud. The
-					// machine still boots, but as whatever Amiga the old ROM
-					// makes it, and the only other clue is the Main ROM row
-					// two menus away.
-					if (!amigacd_apply_system(sys))
-					{
-						const char *mname = 0;
-						amigacd_default_rom_names(sys, &mname, 0);
-						char msg[128];
-						snprintf(msg, sizeof(msg), "%s ROM %s not found",
-						         amigacd_system_name(sys), mname);
-						Info(msg, 2500);
-					}
+					int old_sys = amigacd_system();
+					int sys = minus ? (old_sys + AMIGACD_SYS_COUNT - 1) % AMIGACD_SYS_COUNT
+					                : (old_sys + 1) % AMIGACD_SYS_COUNT;
 
-					// The A1200 has no CD drive, so a disc mounted under a
-					// previous system has to go with it -- otherwise the row
-					// keeps naming a disc that nothing can read, and stepping
-					// back round to CD32 would silently remount it.
-					if (sys == AMIGACD_SYS_A1200)
+					// Each machine keeps its own settings. The machine being
+					// left is written out first, then the one arriving is read
+					// back if it has ever been configured -- so the discs, hard
+					// disks, RAM and ROM of both survive a round trip through
+					// the row.
+					if (!amigacd_switch_system(old_sys, sys))
 					{
-						minimig_config.hardfile[0].filename[0] = 0;
-						ide_open(0, "");
+						// First time on this machine: build it from the
+						// profile. A missing default ROM is worth saying out
+						// loud -- the machine still boots, but as whatever
+						// Amiga the old ROM makes it, and the only other clue
+						// is the Main ROM row two menus away.
+						if (!amigacd_apply_system(sys))
+						{
+							const char *mname = 0;
+							amigacd_default_rom_names(sys, &mname, 0);
+							char msg[128];
+							snprintf(msg, sizeof(msg), "%s ROM %s not found",
+							         amigacd_system_name(sys), mname);
+							Info(msg, 2500);
+						}
+
+						// The A1200 has no CD drive, so a disc mounted under a
+						// previous system has to go with it -- otherwise the
+						// row keeps naming a disc that nothing can read.
+						if (sys == AMIGACD_SYS_A1200)
+						{
+							minimig_config.hardfile[0].filename[0] = 0;
+							ide_open(0, "");
+						}
+						// Refresh the active bridge with the mounted CD, if any.
+						else if (minimig_config.hardfile[0].filename[0])
+							ide_open(0, minimig_config.hardfile[0].filename);
 					}
-					// Refresh the active bridge with the mounted CD, if any.
-					else if (minimig_config.hardfile[0].filename[0])
-						ide_open(0, minimig_config.hardfile[0].filename);
 					menustate = MENU_AMIGACD_MAIN1;
 				}
 			}
-			else if (menusub == 6 && select) // Settings submenu
+			else if (menusub == 7 && select) // Settings submenu
 			{
 				menusub = 0;
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 7 && select) // Advanced submenu
+			else if (menusub == 8 && select) // Advanced submenu
 			{
 				menusub = 0;
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 8 && select) // Save settings -> default config slot 0
+			else if (menusub == 9 && select) // Save settings -> default config slot 0
 			{
 				// Persists the whole minimig_config: mounted CD (hardfile[0]),
-				// RAM (memory), CPU/chipset (System profile), D-Cache and ROMs.
-				// minimig_cfg_load(0) restores it on the next core load, and
-				// ApplyConfiguration()->hdd_open(0) re-mounts the saved CD.
-				minimig_cfg_save(0);
+				// the two hard disks, RAM, CPU/chipset (System profile),
+				// D-Cache and ROMs. minimig_cfg_load(0) restores it on the next
+				// core load, and ApplyConfiguration()->hdd_open() re-mounts
+				// everything. Also updates this machine's own file, so the
+				// System row hands back these settings rather than older ones.
+				amigacd_cfg_save_current();
 				minimig_mgl_save();
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 9 && select) // Reset
+			else if (menusub == 10 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 10 && select) // Exit
+			else if (menusub == 11 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
 		}
-		else if (c == KEY_BACKSPACE && menusub == 4) // eject the hard disk
+		else if (c == KEY_BACKSPACE && (menusub == 4 || menusub == 5)) // eject a hard disk
 		{
-			minimig_config.hardfile[1].filename[0] = 0;
-			minimig_config.hardfile[1].cfg = 0;
-			ide_open(1, "");
+			const int hslot = (menusub - 4) + 1;
+			minimig_config.hardfile[hslot].filename[0] = 0;
+			minimig_config.hardfile[hslot].cfg = 0;
+			ide_open(hslot, "");
 			menustate = MENU_AMIGACD_MAIN1;
 		}
 		else if (c == KEY_BACKSPACE && (menusub == 2 || menusub == 3)) // eject floppy
@@ -7435,21 +7487,24 @@ void HandleUI(void)
 		break;
 
 	case MENU_AMIGACD_HDFFILE_SELECTED:
-		memcpy(Selected_S[1], selPath, sizeof(Selected_S[1]));
+		// amigacd_hdf_slot was set by the row that opened the browser: 1 for
+		// Hard Disk 0 (IDE0 slave) and 2 for Hard Disk 1 (IDE1 master).
+		memcpy(Selected_S[amigacd_hdf_slot], selPath, sizeof(Selected_S[0]));
 		recent_update(SelectedDir, selPath, SelectedLabel, 500);
 		{
 			uint len = strlen(selPath);
-			if (len > sizeof(minimig_config.hardfile[1].filename) - 1) len = sizeof(minimig_config.hardfile[1].filename) - 1;
-			memcpy(minimig_config.hardfile[1].filename, selPath, len);
-			minimig_config.hardfile[1].filename[len] = 0;
+			if (len > sizeof(minimig_config.hardfile[amigacd_hdf_slot].filename) - 1)
+				len = sizeof(minimig_config.hardfile[amigacd_hdf_slot].filename) - 1;
+			memcpy(minimig_config.hardfile[amigacd_hdf_slot].filename, selPath, len);
+			minimig_config.hardfile[amigacd_hdf_slot].filename[len] = 0;
 		}
-		minimig_config.hardfile[1].cfg = 1;   // fixed disk, not a removable slot
+		minimig_config.hardfile[amigacd_hdf_slot].cfg = 1;   // fixed disk, not a removable slot
 		// The drive is invisible unless the IDE controller is on. A CD32
 		// profile already has it; CDTV and A500 do not, and mounting an HDF is
 		// an unambiguous request for one -- an A590 sidecar in A500 terms.
 		minimig_config.ide_cfg |= 1;
-		ide_open(1, minimig_config.hardfile[1].filename);
-		menusub = 4;
+		ide_open(amigacd_hdf_slot, minimig_config.hardfile[amigacd_hdf_slot].filename);
+		menusub = 4 + (amigacd_hdf_slot - 1);
 		menustate = MENU_AMIGACD_MAIN1;
 		break;
 

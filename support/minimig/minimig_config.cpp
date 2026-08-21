@@ -428,23 +428,39 @@ static char UploadActionReplay()
 	return(0);
 }
 
-static char* GetConfigurationName(int num, int chk)
+// `sys_suffix` gives a machine its own config file, so switching the System row
+// does not overwrite the settings of the machine being left. Null keeps the
+// historical names: <core>.cfg for slot 0 and <core>N.cfg for the numbered
+// presets, which are the user's own and are shared across machines on purpose.
+//
+// CD32 deliberately passes null too. It was the only machine this core had for
+// most of its life, so its settings are already in <core>.cfg -- giving it a
+// suffixed file of its own would strand every existing config.
+static char* GetConfigurationName(int num, int chk, const char *sys_suffix)
 {
 	static char name[128];
-	if (num) sprintf(name, CONFIG_DIR "/%s%d.cfg", user_io_get_core_name(), num);
+	if (sys_suffix && *sys_suffix)
+		sprintf(name, CONFIG_DIR "/%s_%s.cfg", user_io_get_core_name(), sys_suffix);
+	else if (num) sprintf(name, CONFIG_DIR "/%s%d.cfg", user_io_get_core_name(), num);
 	else sprintf(name, CONFIG_DIR "/%s.cfg", user_io_get_core_name());
 
 	if (chk && !S_ISREG(getFileType(name))) return 0;
 	return name+strlen(CONFIG_DIR)+1;
 }
 
-int minimig_cfg_save(int num)
+// The suffix for a machine, or null for the one that keeps the plain name.
+static const char *amigacd_cfg_suffix(int sys)
+{
+	return (sys == AMIGACD_SYS_CD32) ? 0 : amigacd_system_name(sys);
+}
+
+int minimig_cfg_save(int num, const char *sys_suffix)
 {
 	// The A2065 interface selection rides in core status bits, which Minimig
 	// excludes from the generic status-word config load, so it is stored
 	// beside the config slot rather than inside the size-checked blob.
 	a2065_cfg_save(num);
-	return FileSaveConfig(GetConfigurationName(num, 0), &minimig_config, sizeof(minimig_config));
+	return FileSaveConfig(GetConfigurationName(num, 0, sys_suffix), &minimig_config, sizeof(minimig_config));
 }
 
 // ---- MGL surgical save ----
@@ -602,7 +618,7 @@ int minimig_mgl_save()
 
 const char* minimig_get_cfg_info(int num, int label)
 {
-	char *filename = GetConfigurationName(num, 1);
+	char *filename = GetConfigurationName(num, 1, 0);
 	if (!filename) return NULL;
 
 	static mm_configTYPE tmpconf;
@@ -747,12 +763,52 @@ static void ApplyConfiguration(char reloadkickstart)
 	minimig_set_extcfg(minimig_get_extcfg() & ~1);
 }
 
-int minimig_cfg_load(int num)
+// Save settings, from the OSD row of that name.
+//
+// Two files, not one. <core>.cfg is the live config and is what a core load
+// reads back, so it has to hold whatever machine the user is on right now.
+// The per-machine file is that machine's memory, and keeping it current here
+// means "Save settings" and the System row agree about what an A1200 is rather
+// than the row handing back something older.
+//
+// For CD32 the two are the same file, so it is written once.
+int amigacd_cfg_save_current(void)
+{
+	int sys = amigacd_system();
+	int ok = minimig_cfg_save(0);
+	const char *suffix = amigacd_cfg_suffix(sys);
+	if (suffix) ok = minimig_cfg_save(0, suffix) && ok;
+	return ok;
+}
+
+// Remember the machine we are leaving, then become the one we are going to.
+//
+// The System row used to apply a profile and nothing else, so anything set on
+// top of it -- the mounted disc, the hard disks, FastRAM, the ROM -- was lost
+// the moment the row was pressed, and pressing it back did not bring it back.
+// Each machine now keeps its own config file.
+//
+// Returns 1 if the new machine had a saved config, 0 if this is the first time
+// it has been selected and the caller should build it from the profile.
+int amigacd_switch_system(int from_sys, int to_sys)
+{
+	minimig_cfg_save(0, amigacd_cfg_suffix(from_sys));
+
+	// Checked before loading rather than letting the load fall through: the
+	// no-config path inside minimig_cfg_load resets every hardfile and applies
+	// the CD32 profile, which is right at boot and wrong here.
+	if (!GetConfigurationName(0, 1, amigacd_cfg_suffix(to_sys))) return 0;
+
+	minimig_cfg_load(0, amigacd_cfg_suffix(to_sys));
+	return 1;
+}
+
+int minimig_cfg_load(int num, const char *sys_suffix)
 {
 	static const char config_id[] = "MNMGCFG0";
 	int result = 0;
 
-	const char *filename = GetConfigurationName(num, 1);
+	const char *filename = GetConfigurationName(num, 1, sys_suffix);
 
 	// load configuration data
 	int size;

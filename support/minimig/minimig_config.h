@@ -106,8 +106,20 @@ typedef struct
 
 extern mm_configTYPE minimig_config;
 
-int minimig_cfg_load(int num);
-int minimig_cfg_save(int num);
+// sys_suffix gives a machine its own config file so the System row can leave
+// one machine and arrive at another without losing either one's settings.
+// Null keeps the historical names, which is what every existing caller wants
+// and what CD32 keeps using -- see the comment on GetConfigurationName.
+int minimig_cfg_load(int num, const char *sys_suffix = 0);
+int minimig_cfg_save(int num, const char *sys_suffix = 0);
+
+// Saves from_sys, then loads to_sys. Returns 0 when to_sys has never been
+// configured, in which case the caller should apply its profile instead.
+int amigacd_switch_system(int from_sys, int to_sys);
+
+// Writes both the live config and the current machine's own file. What the
+// "Save settings" row calls.
+int amigacd_cfg_save_current(void);
 int minimig_mgl_save();
 const char* minimig_get_cfg_info(int num, int label);
 
