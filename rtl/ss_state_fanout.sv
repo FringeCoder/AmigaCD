@@ -101,6 +101,14 @@ module ss_state_fanout
 	output    [202:0]         cia_b_out,
 	output reg                cia_we,
 
+	// Akiko, by value, on the same one-edge terms as the CIAs and on the
+	// same step: the three are independent buses and none of them can land
+	// half-written, so there is nothing to sequence between them. Separate
+	// strobes rather than one shared wire so that a later change can move
+	// Akiko without disturbing the CIAs.
+	output [`SS_AKIKO_W-1:0]  akiko_out,
+	output reg                akiko_we,
+
 	output                    busy
 );
 
@@ -117,6 +125,7 @@ wire        ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror;
 wire [14:0] ss_intreq;
 wire [190:0] ss_cia_a;
 wire [202:0] ss_cia_b;
+wire [`SS_AKIKO_W-1:0] ss_akiko;
 
 assign `SS_STATE_LIST = state;
 
@@ -124,6 +133,7 @@ assign `SS_STATE_LIST = state;
 assign intreq_out = ss_intreq;
 assign cia_a_out  = ss_cia_a;
 assign cia_b_out  = ss_cia_b;
+assign akiko_out  = ss_akiko;
 
 // Elaboration guard. A concatenation assignment silently truncates, so a
 // mistyped width above would shift every field beyond it and restore a
@@ -225,6 +235,7 @@ always @(posedge clk) begin
 		cpu_cacr_wr  <= 1'b0;
 		map_we       <= 1'b0;
 		cia_we       <= 1'b0;
+		akiko_we     <= 1'b0;
 		cpu_resume   <= 1'b0;
 	end
 	else begin
@@ -239,6 +250,7 @@ always @(posedge clk) begin
 		cpu_cacr_wr <= 1'b0;
 		map_we      <= 1'b0;
 		cia_we      <= 1'b0;
+		akiko_we    <= 1'b0;
 		cpu_resume  <= 1'b0;
 
 		if (!running) begin
@@ -270,7 +282,7 @@ always @(posedge clk) begin
 			// starts the CPU fetching from whatever it already holds.
 			// Both CIAs at once: the two buses are independent and each lands
 			// whole on one edge.
-			STEP_CIA:  cia_we <= 1'b1;
+			STEP_CIA:  begin cia_we <= 1'b1; akiko_we <= 1'b1; end
 			STEP_RES:  cpu_resume <= 1'b1;
 			// Nothing is strobed here; the step exists to hold busy over the
 			// cycle the re-seed is on the wire.

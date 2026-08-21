@@ -58,7 +58,25 @@
 	ss_pc, ss_usp, ss_vbr, ss_sr, ss_cacr, \
 	ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror, \
 	ss_intreq, \
-	ss_cia_a, ss_cia_b }
+	ss_cia_a, ss_cia_b, ss_akiko }
+
+// Akiko, by value. 522 bits: five 32-bit registers, PBX, ten byte-wide
+// registers, two flags, and the 32-byte C2P buffer with its two pointers.
+// akiko.v carries the field order and is the only place it is written out;
+// this is only the total, because three files need it in a port declaration
+// and a number repeated in three files is a number that will disagree in two
+// of them.
+//
+// Akiko is captured by value for the same reason the CIAs are: it sits behind
+// the CPU bus rather than the chipset register bus, so ss_regshadow never sees
+// a write to it, and several of its registers cannot be read back without side
+// effects -- reading INTREQ is how the driver acknowledges an interrupt.
+//
+// The transient half of Akiko (staging buffers, DMA engines mid-transfer) is
+// deliberately absent. akiko.v's ss_idle is what makes that sound: the freeze
+// does not happen until every engine is idle and nothing is staged. See the
+// port comment there.
+`define SS_AKIKO_W 522
 
 // INTREQ, the one chipset register that must be carried by VALUE.
 //
@@ -77,13 +95,13 @@
 // and it changes with this.
 
 // 16 registers + PC + USP + VBR (32 each) + SR (16) + CACR (4) + 4 map bits
-// + INTREQ (15) + CIA A (191) + CIA B (203)
+// + INTREQ (15) + CIA A (191) + CIA B (203) + Akiko (522)
 // The CIAs, by value: 191 bits for CIA A and 203 for CIA B. Both sit on the
 // CPU bus, invisible to the chipset register shadow, and cannot be read back
 // through their own registers without side effects -- reading ICR clears the
 // pending interrupts, reading TOD moves its latch. ciaa.v and ciab.v carry the
 // bit layouts; the widths are stated there and here and nowhere else.
 
-`define SS_STATE_W (16*32 + 32 + 32 + 32 + 16 + 4 + 4 + 15 + 191 + 203)
+`define SS_STATE_W (16*32 + 32 + 32 + 32 + 16 + 4 + 4 + 15 + 191 + 203 + `SS_AKIKO_W)
 
 `endif

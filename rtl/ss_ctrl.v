@@ -383,7 +383,10 @@ localparam SS_MAGIC   = 32'h53534341;
 // 1.1: the colour table section was added between the shadow and chip RAM. A
 // 1.0 file has a different CORE_WORDS and would be read with every section
 // after the shadow displaced, so the version has to move with the layout.
-localparam SS_VERSION = 32'h00010001;
+// 1.2: Akiko joined the state vector (522 bits), which lengthens the state
+// section and moves everything after it. Same argument, same consequence: a
+// 1.1 file read as 1.2 would land the shadow on top of the colour table.
+localparam SS_VERSION = 32'h00010002;
 
 // Sized copies of CORE_WORDS for the comparisons on the restore path, so a
 // 24-bit counter and a 32-bit header word are each compared against something

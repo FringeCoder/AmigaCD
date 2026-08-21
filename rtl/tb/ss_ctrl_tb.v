@@ -763,7 +763,7 @@ initial begin
 	@(negedge clk);
 
 	check("magic",      ddr_word(2), 32'h53534341);
-	check("version",    ddr_word(3), 32'h00010001);
+	check("version",    ddr_word(3), 32'h00010002);
 	check("core_words", ddr_word(4), CORE_WORDS);
 	check("host_words", ddr_word(5), 32'd0);
 	check("host_crc32", ddr_word(7), 32'd0);
