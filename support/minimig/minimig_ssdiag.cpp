@@ -73,7 +73,7 @@
 #define SS_PEEK_ARM        0x0010   // io_din[4]: fetch. Without it, read only.
 #define SS_PEEK_TRIGGER    "/tmp/ss_peek"
 // 13 peek words, then 8 of PC samples and 4 of fingerprints.
-#define SS_PEEK_WORDS      47   // byte_cnt 3..49
+#define SS_PEEK_WORDS      52   // byte_cnt 3..54
 #define SS_DIAG_SIG        0x55AA
 #define SS_DIAG_PAYLOAD    8
 // Two words of slack past the signature's expected position. The alignment of
@@ -282,6 +282,17 @@ static void ss_peek_service(void)
 		// vertical blanks are still happening at all.
 		ss_diag("  live: INTENA %04X  INTREQ %04X  frames %u",
 		        w[22], w[23], (unsigned)(w[24] & 0xFF));
+		// The beam, byte_cnt 50-54 -> w[47..51]. "frames" above says whether
+		// any vertical blank happened at all; these say why not. A vpos_max
+		// far below the frame height with hpos_max at htotal means the line
+		// counter is running and the frame never ends; vbl_int is Paula's
+		// VERTB request, one step upstream of the interrupt the game waits on.
+		ss_diag("  beam: vpos %u  vpos_max %u  hpos_max %u  vbl_int %u",
+		        (unsigned)(w[47] & 0x7FF), (unsigned)(w[48] & 0x7FF),
+		        (unsigned)(w[49] & 0x1FF), (unsigned)(w[50] & 0xFF));
+		ss_diag("  geometry: htotal %u  varbeamen %u  harddis %u",
+		        (unsigned)(w[51] & 0x1FF), (unsigned)((w[51] >> 9) & 1),
+		        (unsigned)((w[51] >> 10) & 1));
 		// Latched since the last restore STARTED, so this names whatever
 		// rebooted the Amiga as a result of that restore. All three land on
 		// the same reset wire in minimig.v and are indistinguishable from the
