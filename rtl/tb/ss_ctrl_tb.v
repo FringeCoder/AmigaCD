@@ -312,6 +312,37 @@ always #5 clk = ~clk;
 // can too: the CPU port is not routed here, so sd_ready never comes. Chip
 // select is still accepted, so a controller with no bound on the wait sits in
 // S_KICK_WAIT forever.
+// Strobe width, in clk cycles, for the two restore sections ss_ctrl drives
+// directly instead of through ss_state_fanout.
+//
+// Both consumers -- ss_regshadow and denise_colortable -- are clocked on
+// clk_sys while ss_ctrl runs on clk_114, four times faster. A one-cycle strobe
+// from here is therefore seen by its consumer only one time in four, and the
+// entries that go missing stay missing: on hardware that produced a restored
+// machine whose palette was partly the saved one, with a sprite drawn in the
+// right shape and the right place and entirely black.
+//
+// This bench cannot reproduce that -- its mocks share a clock with the DUT, so
+// it captured every pulse and passed throughout -- which is exactly why the
+// width has to be asserted rather than the effect. Minimum four, one full
+// clk_sys period.
+localparam MIN_STROBE = 4;
+integer sh_we_run = 0, sh_we_min = 999;
+integer cl_we_run = 0, cl_we_min = 999;
+
+always @(posedge clk) begin
+	if (sh_ld_we) sh_we_run <= sh_we_run + 1;
+	else if (sh_we_run != 0) begin
+		if (sh_we_run < sh_we_min) sh_we_min <= sh_we_run;
+		sh_we_run <= 0;
+	end
+	if (clut_wr_en) cl_we_run <= cl_we_run + 1;
+	else if (cl_we_run != 0) begin
+		if (cl_we_run < cl_we_min) cl_we_min <= cl_we_run;
+		cl_we_run <= 0;
+	end
+end
+
 integer chip_wr_count = 0;
 
 reg rom_alt = 0;
@@ -1275,6 +1306,22 @@ initial begin
 	// path is nondeterministic, which is worth knowing before trusting the bit
 	// on hardware.
 	check("two scans of the same ROM agreed", {31'd0, dbg_kick_unstable}, 32'd0);
+
+	// Every shadow and colour-table strobe must be wide enough for a clk_sys
+	// consumer to see it. See MIN_STROBE for what a one-cycle pulse did.
+	if (sh_we_min < MIN_STROBE) begin
+		$display("FAIL shadow load strobe too narrow: %0d cycles, need %0d",
+		         sh_we_min, MIN_STROBE);
+		errors = errors + 1;
+	end
+	else $display("PASS shadow load strobe held %0d cycles", sh_we_min);
+
+	if (cl_we_min < MIN_STROBE) begin
+		$display("FAIL colour table strobe too narrow: %0d cycles, need %0d",
+		         cl_we_min, MIN_STROBE);
+		errors = errors + 1;
+	end
+	else $display("PASS colour table strobe held %0d cycles", cl_we_min);
 
 	// The pair the last restore compared, published for userspace. The live
 	// half is the fingerprint of the mock's alternate ROM -- rom_alt was left

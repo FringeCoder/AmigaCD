@@ -707,6 +707,34 @@ ss_dma dma
 reg [24:1] chip_addr;
 reg [23:0] pair_count;
 
+// Strobe hold, in clk_114 cycles, for the two restore sections this module
+// drives DIRECTLY rather than through ss_state_fanout.
+//
+// ss_state_fanout exists because of this exact rule and states it in its own
+// header: a strobe generated on clk_114 is one cycle wide, clk_sys is four
+// times slower, and "a clk_sys edge sees it only one time in four". Everything
+// routed through the fanout obeys that by construction. The chipset register
+// shadow and Denise's colour table do not go through it -- they are written
+// from here -- and they were emitting exactly the one-cycle pulses the rule
+// warns about, into ss_regshadow and denise_colortable, both of which are
+// clk_sys.
+//
+// What that looked like: a restore whose chipset registers and palette were
+// PARTLY the saved ones and partly whatever the machine already had. In-session
+// and after an Amiga reboot it is invisible, because the shadow and the colour
+// RAM still hold the values from before the save. After a cold FPGA reload they
+// hold reset values, and the entries that went missing stay missing -- so
+// anything the game rewrites every frame recovers, and anything it wrote once
+// at load time does not. A sprite rendered in the right shape and the right
+// place and entirely black is a palette entry that never arrived.
+//
+// Four clk_114 cycles is exactly one clk_sys period, so five guarantees a
+// clk_sys edge inside the window whatever the phase. The cost is five cycles
+// per entry across 256 shadow entries and 256 colour entries -- about 23 us on
+// a restore that already takes a fifth of a second.
+localparam [2:0] SS_HOLD_MAX = 3'd4;
+reg [2:0] ss_hold;
+
 // Zorro II fast RAM copy, both directions. fast_idx counts 64-bit beats;
 // fast_dat assembles or holds one beat; fast_half says which payload word of
 // the pair the restore is on.
@@ -1106,6 +1134,7 @@ always @(posedge clk) begin
 		rd_pair          <= 24'hFFFFFF;
 		chip_wr_half     <= 1'b0;
 		region           <= REGION_CHIP;
+		ss_hold          <= 3'd0;
 		fast_idx         <= 24'd0;
 		fast_dat         <= 64'd0;
 		fast_half        <= 1'b0;
@@ -1581,6 +1610,7 @@ always @(posedge clk) begin
 		// PREVIOUS entry 256 times over, shifted by one.
 		S_CLUT_RD: begin
 			clut_addr <= clut_idx[7:0];
+			ss_hold   <= 3'd0;
 			state     <= S_CLUT_WAIT;
 		end
 
@@ -1590,7 +1620,15 @@ always @(posedge clk) begin
 		// the wanted entry until the state after this one. Sampling any
 		// earlier stores the previous entry -- the whole table shifted by one,
 		// which would look like a working save until someone compared colours.
-		S_CLUT_WAIT: state <= S_CLUT_CAP;
+		// Long enough for a clk_sys edge, not one clk_114 cycle. The RAM
+		// registers its address on clk_sys, so one cycle here left the
+		// address unlatched three times in four and the sample returned the
+		// PREVIOUS entry -- a table shifted by one, intermittently, which
+		// reads as a working save until someone compares colours.
+		S_CLUT_WAIT: begin
+			if (ss_hold == SS_HOLD_MAX) state <= S_CLUT_CAP;
+			else ss_hold <= ss_hold + 3'd1;
+		end
 
 		S_CLUT_CAP: begin
 			queue_word(clut_rd_data);
@@ -2131,8 +2169,15 @@ always @(posedge clk) begin
 		// storage. Loading is not replaying: the values go in here, and are
 		// written into the chipset only after chip RAM is in place, because the
 		// copper lists they point at live in chip RAM.
+		// ss_hold is armed here rather than in the LOAD state itself. It is
+		// shared with the colour table sweeps, and a LOAD entered with it
+		// already at SS_HOLD_MAX takes the exit branch on its first cycle --
+		// a one-cycle strobe, the exact fault this counter exists to prevent.
+		// It cost the first version of this fix its first shadow entry, which
+		// the bench caught only because it records the MINIMUM width seen.
 		S_L_SH_FETCH: begin
 			shadow_ld_we <= 1'b0;
+			ss_hold      <= 3'd0;
 			if (sh_idx == SHADOW_ENTRIES) begin
 				clut_idx    <= 9'd0;
 				clut_active <= 1'b1;
@@ -2149,17 +2194,23 @@ always @(posedge clk) begin
 
 		// Two entries per word, low entry in the low half -- unpacked in the
 		// order S_SHADOW_Q packed them.
+		// Held for SS_HOLD_MAX+1 cycles, not pulsed: ss_regshadow is clk_sys.
+		// See the SS_HOLD_MAX comment for what a one-cycle strobe here did.
 		S_L_SH_LOAD: begin
 			shadow_ld_we   <= 1'b1;
 			shadow_ld_addr <= sh_idx[7:0];
 			shadow_ld_data <= sh_half ? pay_word[31:16] : pay_word[15:0];
-			sh_idx         <= sh_idx + 9'd1;
-			if (sh_half) begin
-				sh_half <= 1'b0;
-				pay_idx <= pay_idx + 24'd1;   // both halves consumed
+			if (ss_hold == SS_HOLD_MAX) begin
+				ss_hold <= 3'd0;
+				sh_idx  <= sh_idx + 9'd1;
+				if (sh_half) begin
+					sh_half <= 1'b0;
+					pay_idx <= pay_idx + 24'd1;   // both halves consumed
+				end
+				else sh_half <= 1'b1;
+				state <= S_L_SH_FETCH;
 			end
-			else sh_half <= 1'b1;
-			state <= S_L_SH_FETCH;
+			else ss_hold <= ss_hold + 3'd1;
 		end
 
 		// The colour table, straight back into Denise's RAM. Written before
@@ -2167,6 +2218,7 @@ always @(posedge clk) begin
 		// the display reads and nothing else depends on it.
 		S_L_CLUT_FETCH: begin
 			clut_wr_en <= 1'b0;
+			ss_hold    <= 3'd0;
 			if (clut_idx == CLUT_WORDS) begin
 				clut_active <= 1'b0;
 				pair_count  <= 24'd0;
@@ -2195,13 +2247,19 @@ always @(posedge clk) begin
 			end
 		end
 
+		// Held rather than pulsed, for the same reason as the shadow load
+		// above: denise_colortable's RAM is clocked on clk_sys.
 		S_L_CLUT_LOAD: begin
 			clut_addr    <= clut_idx[7:0];
 			clut_wr_data <= pay_word;
 			clut_wr_en   <= 1'b1;
-			clut_idx     <= clut_idx + 9'd1;
-			pay_idx      <= pay_idx + 24'd1;
-			state        <= S_L_CLUT_FETCH;
+			if (ss_hold == SS_HOLD_MAX) begin
+				ss_hold  <= 3'd0;
+				clut_idx <= clut_idx + 9'd1;
+				pay_idx  <= pay_idx + 24'd1;
+				state    <= S_L_CLUT_FETCH;
+			end
+			else ss_hold <= ss_hold + 3'd1;
 		end
 
 		// Zorro II fast RAM, back out of the payload. Two payload words make
