@@ -205,7 +205,7 @@ module ss_ctrl
 	// instance below for why the two differ, and ss_quiesce's header for why
 	// three frames was not enough for a save on real hardware.
 	parameter [7:0] SAVE_FRAMES = 8'd120,   // ~2 s at 60 Hz
-	parameter [7:0] LOAD_FRAMES = 8'd3,
+	parameter [7:0] LOAD_FRAMES = 8'd30,
 
 	// Custom chipset register shadow entries carried in the payload. 256 in the
 	// machine -- every even address $000-$1FE. A parameter so ss_ctrl_tb can
@@ -619,10 +619,33 @@ reg restore_busy;
 // time because the wait is harmless -- the Amiga runs untouched until the
 // instant it is caught -- and because giving up makes saving a running game
 // fail more often than it works: three frames refused three attempts in four
-// on hardware. A restore waits briefly because its wait is NOT harmless: the
-// 68k is parked by ss_arm throughout it while the chipset runs on, so every
-// frame waited is drift between the machine and the state about to be put
-// back into it. Better to refuse and be retried. See ss_quiesce's header.
+// on hardware.
+//
+// A restore's wait is NOT harmless: the 68k is parked by ss_arm throughout it
+// while the chipset runs on, so every frame waited is drift between the machine
+// and the state about to be put back into it. That argument set this to three
+// frames, and three frames is wrong.
+//
+// It is wrong because the drift only matters to a REFUSED restore -- one that
+// succeeds overwrites all of memory and replays the whole chipset, so nothing
+// it drifted past survives. And when refusal is the usual outcome the user
+// simply presses restore again: five refusals at three frames park the 68k for
+// more frames in total than one thirty-frame wait that succeeds, in five
+// separate bursts rather than one. The small limit did not buy what it was
+// chosen to buy. Measured on hardware -- a restore during AmigaVision needed
+// several attempts and reported "busy" on most of them.
+//
+// Thirty frames is half a second, which is long enough to find the gap a
+// machine playing music leaves: `quiet` wants audio DMA idle as well as the
+// blitter, the disk, Akiko and the CPU boundary, and ss_audio_busy is Agnus's
+// per-slot request rather than "audio enabled", so gaps exist -- there are just
+// not many of them inside three frames.
+//
+// The structural fix is better than either number and is not this: wait for the
+// blitter, disk and audio WITHOUT parking the CPU, and park only at the end for
+// cpu_boundary, which the CPU reaches within one instruction. That removes the
+// drift instead of trading against it, and it is a change to ss_quiesce rather
+// than to a parameter. Worth doing if half a second still refuses.
 // Parameters rather than localparams so ss_ctrl_tb.v can shrink them: the
 // wedged-machine cases there have to drive the limit to a timeout, and pulsing
 // 120 frames per case to do it would buy nothing but simulation time.
