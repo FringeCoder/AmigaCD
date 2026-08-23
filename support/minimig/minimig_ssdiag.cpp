@@ -293,16 +293,6 @@ static void ss_peek_service(void)
 		ss_diag("  geometry: htotal %u  varbeamen %u  harddis %u",
 		        (unsigned)(w[51] & 0x1FF), (unsigned)((w[51] >> 9) & 1),
 		        (unsigned)((w[51] >> 10) & 1));
-			// Free-running, so these describe normal running rather than a
-			// restore. A level-3 count that stays at zero while the game plays
-			// means the machine never takes that interrupt, and the restore
-			// introduces it.
-			// The most recent NORMAL level-3 dispatch. If this matches the
-			// entry recorded after a restore, the same handler runs both times
-			// and the restore differs only in the register context it hands
-			// it. If it differs, the vector the CPU fetches is not the one in
-			// the memory we peek.
-		}
 
 		if (!(w[9] & 1)) {
 			ss_diag("peek $%06X: not valid yet", pending);
