@@ -1999,8 +1999,7 @@ void ss_apply_host_state(int slot)
 	if (!hb) return;
 
 	if (!akiko_cd32_state_load(hb, (int)bytes))
-		printf("process_ss: slot %d host block not usable
-", (slot & 3) + 1);
+		printf("process_ss: slot %d host block not usable\n", (slot & 3) + 1);
 }
 
 int process_ss(const char *rom_name, int enable)

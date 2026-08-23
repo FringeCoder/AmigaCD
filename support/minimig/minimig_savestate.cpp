@@ -1,9 +1,10 @@
 // Save state payload format helpers.
 //
 // Deliberately free of MiSTer headers so tests/Makefile can build it with the
-// host compiler. Only <stdint.h> and our own headers.
+// host compiler. Only <stdint.h>, <string.h> and our own headers.
 
 #include <stdint.h>
+#include <string.h>
 
 #include "minimig_savestate.h"
 
