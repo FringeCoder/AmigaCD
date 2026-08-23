@@ -52,4 +52,21 @@ uint32_t ss_host_block_offset(const ss_header_t *h);
 // updating host_words, host_crc32 and length.
 void ss_header_set_host_block(uint32_t *win, uint32_t host_words, uint32_t host_crc);
 
+// Copies `bytes` of host state into the window after the core payload and
+// updates the header to match. Rounds up to a whole number of words, zeroing
+// the tail, because every length in the header counts words.
+//
+// Returns false if the block will not fit in win_words, in which case the
+// window is left exactly as it was -- a save with no host block is a save that
+// restores the machine and not the drive, which is what every state written
+// before this existed already did.
+bool ss_write_host_block(uint32_t *win, uint32_t win_words,
+                         const void *data, uint32_t bytes);
+
+// The reverse: locates the host block and checks its CRC. Returns NULL when
+// there is none (host_words == 0, i.e. a file written before host state was
+// carried) or when it does not verify.
+const void *ss_read_host_block(const uint32_t *win, const ss_header_t *h,
+                               uint32_t *bytes_out);
+
 #endif

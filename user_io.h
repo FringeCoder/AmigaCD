@@ -279,6 +279,9 @@ void user_io_store_filename(char *filename);
 int user_io_use_cheats();
 
 int process_ss(const char *rom_name, int enable = 1);
+// Applies the host half of a save state -- today, the CD drive position.
+// Call after triggering a restore; a file without a host block is a no-op.
+void ss_apply_host_state(int slot);
 
 char is_f12_mod_needed();
 void diskled_on();

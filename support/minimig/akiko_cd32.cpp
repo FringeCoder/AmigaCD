@@ -2897,3 +2897,128 @@ void akiko_cd32_poll(void)
 			break;
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Save state, host side. See akiko_cd32.h for why this exists at all.
+// ---------------------------------------------------------------------------
+
+// Versioned and fixed-layout. Every field is a fixed-width type and the struct
+// is written and read as raw bytes, so a build that changes the layout has to
+// change the version with it -- akiko_cd32_state_load refuses an unknown one
+// rather than reinterpreting the bytes, because a drive told to seek to a
+// plausible wrong place is worse than one told nothing.
+#define AKIKO_SS_MAGIC   0x414B5353u   // "AKSS"
+#define AKIKO_SS_VERSION 1u
+
+typedef struct
+{
+	uint32_t magic;
+	uint32_t version;
+
+	// Auto-init handshake. 0 = drive cold, 1 = media status sent, 2 = the BIOS
+	// has issued INFO and the drive is up. Restoring this is what stops the
+	// restored machine re-running an init the game finished long ago.
+	uint8_t  initialized;
+	uint8_t  paused;
+	uint8_t  playing;
+	uint8_t  door;
+	uint8_t  led_state;
+	uint8_t  speed;            // 1x or 2x, as cmd_multi last set it
+	uint8_t  pad0;
+	uint8_t  pad1;
+
+	uint32_t play_start_lba;
+	uint32_t play_end_lba;
+
+	// The data read position. cd_data_lba_base pairs with the FPGA's
+	// cdrom_sector_counter, which travels in the core payload: userspace serves
+	// base + counter, so the two only mean anything together.
+	int32_t  data_lba_base;
+
+	// CDDA. q_pos and q_end survive a natural end so SUBQ keeps answering;
+	// lba_next and lba_end are the pump's own cursor.
+	int32_t  cdda_q_pos;
+	int32_t  cdda_q_end;
+	int32_t  cdda_lba_next;
+	int32_t  cdda_lba_end;
+
+	uint8_t  cdda_active;      // whether cd_cdda_drv was non-NULL
+	uint8_t  last_mounted;
+	uint8_t  pad2;
+	uint8_t  pad3;
+} akiko_ss_state_t;
+
+int akiko_cd32_state_size(void)
+{
+	return (int)sizeof(akiko_ss_state_t);
+}
+
+void akiko_cd32_state_save(void *buf)
+{
+	akiko_ss_state_t s;
+	memset(&s, 0, sizeof(s));
+	s.magic          = AKIKO_SS_MAGIC;
+	s.version        = AKIKO_SS_VERSION;
+	s.initialized    = cd_initialized;
+	s.paused         = cd_paused;
+	s.playing        = cd_playing;
+	s.door           = cd_door;
+	s.led_state      = cd_led_state;
+	s.speed          = (uint8_t)cdrom_speed;
+	s.play_start_lba = cd_play_start_lba;
+	s.play_end_lba   = cd_play_end_lba;
+	s.data_lba_base  = cd_data_lba_base;
+	s.cdda_q_pos     = cd_cdda_q_pos;
+	s.cdda_q_end     = cd_cdda_q_end;
+	s.cdda_lba_next  = cd_cdda_lba_next;
+	s.cdda_lba_end   = cd_cdda_lba_end;
+	s.cdda_active    = (cd_cdda_drv != NULL) ? 1 : 0;
+	s.last_mounted   = cd_last_mounted ? 1 : 0;
+	memcpy(buf, &s, sizeof(s));
+}
+
+bool akiko_cd32_state_load(const void *buf, int len)
+{
+	akiko_ss_state_t s;
+	if (len < (int)sizeof(s)) return false;
+	memcpy(&s, buf, sizeof(s));
+	if (s.magic != AKIKO_SS_MAGIC || s.version != AKIKO_SS_VERSION) return false;
+
+	cd_initialized    = s.initialized;
+	cd_paused         = s.paused;
+	cd_playing        = s.playing;
+	cd_door           = s.door;
+	cd_led_state      = s.led_state;
+	cdrom_speed       = s.speed ? s.speed : 1;
+	cd_play_start_lba = s.play_start_lba;
+	cd_play_end_lba   = s.play_end_lba;
+	cd_data_lba_base  = s.data_lba_base;
+	cd_cdda_q_pos     = s.cdda_q_pos;
+	cd_cdda_q_end     = s.cdda_q_end;
+	cd_cdda_lba_next  = s.cdda_lba_next;
+	cd_cdda_lba_end   = s.cdda_lba_end;
+	cd_last_mounted   = s.last_mounted ? true : false;
+
+	// cd_cdda_drv is a POINTER into this run's drive table and cannot be
+	// carried across a core reload. It is re-derived instead: the pump only
+	// needs to know a drive is there, and cd_find_drive answers that for the
+	// disc mounted now. If the user swapped discs between save and restore the
+	// LBAs are meaningless anyway and there is nothing better to do than aim
+	// them at the disc that is actually in.
+	cd_cdda_drv = s.cdda_active ? cd_find_drive() : NULL;
+	if (!cd_cdda_drv) {
+		cd_cdda_lba_next = -1;
+		cd_cdda_lba_end  = -1;
+	}
+
+	// The prefetch windows hold sectors from wherever the drive was before the
+	// restore. They are a cache of the disc, not state of the machine, so the
+	// honest thing is to drop them and let them refill from the restored
+	// position -- keeping them risks serving a sector from the old stream.
+	akiko_prefetch_invalidate();
+
+	akiko_diag("[akiko] state restored: init=%u base=%d cdda=%d..%d speed=%ux",
+	           cd_initialized, cd_data_lba_base,
+	           cd_cdda_lba_next, cd_cdda_lba_end, cdrom_speed);
+	return true;
+}

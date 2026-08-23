@@ -7316,6 +7316,11 @@ void HandleUI(void)
 				// gate fails, and reports the outcome as an OSD toast either
 				// way (Minimig.sv's ss_info_* block).
 				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+				// The drive travels beside the payload rather than in it: where
+				// the head is and what was playing are userspace state that the
+				// core cannot see. Applied here so the restored machine's first
+				// sector request is served from the position it was saved at.
+				ss_apply_host_state(minimig_config.ss_slot & 3);
 				user_io_status_set("[54]", 1);
 				user_io_status_set("[54]", 0);
 				// Close the OSD rather than returning to the Settings page.

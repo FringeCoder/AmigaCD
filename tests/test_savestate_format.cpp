@@ -79,6 +79,37 @@ int main(void)
 	memset(win, 0, sizeof(win));
 	check("all-zero window rejected", !ss_header_parse(win, SS_MAX_WORDS, &h));
 
+	// The host block. It carries the CD drive position, which the core cannot
+	// capture, so a file written without one has to keep restoring exactly as
+	// it always did rather than being refused or misread.
+	build_window(win, 3);
+	check("no host block reads as absent",
+	      ss_read_host_block(win, (ss_header_parse(win, SS_MAX_WORDS, &h), &h), 0) == 0);
+
+	build_window(win, 3);
+	{
+		const uint8_t payload[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03 };
+		check("host block written", ss_write_host_block(win, SS_MAX_WORDS,
+		                                                payload, sizeof(payload)));
+		check("window still parses", ss_header_parse(win, SS_MAX_WORDS, &h));
+
+		uint32_t got = 0;
+		const void *hb = ss_read_host_block(win, &h, &got);
+		check("host block read back", hb != 0);
+		// Rounded up to whole words, because every length in the header counts
+		// words -- 7 bytes occupies 8 and the padding must be deterministic or
+		// the CRC would differ for identical state.
+		check("host block padded to words", got == 8);
+		check("host block contents survive", hb && !memcmp(hb, payload, sizeof(payload)));
+
+		// A corrupt host block must read as absent, not as data: the drive
+		// being told to seek somewhere plausible and wrong is worse than it
+		// being told nothing.
+		uint32_t off = ss_host_block_offset(&h);
+		win[off] ^= 0xFFu;
+		check("corrupt host block rejected", ss_read_host_block(win, &h, 0) == 0);
+	}
+
 	build_window(win, 3);
 	ss_header_set_host_block(win, 2, 0x12345678);
 	check("host block sets host_words", win[5] == 2);

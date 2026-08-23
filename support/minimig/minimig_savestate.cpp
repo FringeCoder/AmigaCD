@@ -59,3 +59,35 @@ void ss_header_set_host_block(uint32_t *win, uint32_t host_words, uint32_t host_
 	win[7] = host_crc;
 	win[1] = SS_HEADER_TAIL_WORDS + win[4] + host_words;
 }
+
+bool ss_write_host_block(uint32_t *win, uint32_t win_words,
+                         const void *data, uint32_t bytes)
+{
+	ss_header_t h;
+	if (!ss_header_parse(win, win_words, &h)) return false;
+
+	const uint32_t words = (bytes + 3u) / 4u;
+	const uint32_t off   = ss_host_block_offset(&h);
+	if ((uint64_t)off + words > win_words) return false;
+
+	// Zero first, then copy: the last word is usually partial and the padding
+	// has to be deterministic or the CRC changes for the same state.
+	memset(&win[off], 0, words * 4u);
+	memcpy(&win[off], data, bytes);
+	ss_header_set_host_block(win, words,
+	                         crc32_compute((const uint8_t *)&win[off], (int)(words * 4u)));
+	return true;
+}
+
+const void *ss_read_host_block(const uint32_t *win, const ss_header_t *h,
+                               uint32_t *bytes_out)
+{
+	if (!h->host_words) return 0;
+
+	const uint32_t off = ss_host_block_offset(h);
+	if (crc32_compute((const uint8_t *)&win[off], (int)(h->host_words * 4u))
+	    != h->host_crc32) return 0;
+
+	if (bytes_out) *bytes_out = h->host_words * 4u;
+	return &win[off];
+}
