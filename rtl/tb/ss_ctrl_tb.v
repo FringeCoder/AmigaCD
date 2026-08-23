@@ -330,6 +330,44 @@ localparam MIN_STROBE = 4;
 integer sh_we_run = 0, sh_we_min = 999;
 integer cl_we_run = 0, cl_we_min = 999;
 
+// The CAPTURE side has the same requirement and it is not a strobe: both
+// arrays register their read on clk_sys, so an address must be HELD for a
+// clk_sys edge before the data at it can be sampled. Holding it one clk_114
+// cycle sampled the previous entry instead, and the saved shadow came out as
+// the whole table shifted by one -- every chipset register carrying its
+// neighbour's value. That restored BEAMCON0 with VARBEAMEN set and HTOTAL at
+// zero and hung the machine with a black screen.
+//
+// Measured as the shortest time either read address stays constant, which is
+// the property the RAM actually needs. Only counted while the relevant section
+// is being walked, so the idle gaps between sections do not mask a short hold.
+integer sh_ad_run = 0, sh_ad_min = 999;
+integer cl_ad_run = 0, cl_ad_min = 999;
+reg [7:0] sh_ad_d = 8'd0;
+reg [7:0] cl_ad_d = 8'd0;
+reg       sh_walk = 1'b0, cl_walk = 1'b0;
+
+always @(posedge clk) begin
+	// "walking" starts at the first address change and ends when the section does
+	if (sh_ld_we) sh_walk <= 1'b0;
+	if (sh_ad_d != sh_rd_addr) begin
+		if (sh_walk && sh_ad_run < sh_ad_min) sh_ad_min <= sh_ad_run;
+		sh_ad_run <= 1;
+		sh_walk   <= 1'b1;
+	end
+	else sh_ad_run <= sh_ad_run + 1;
+	sh_ad_d <= sh_rd_addr;
+
+	if (clut_wr_en) cl_walk <= 1'b0;
+	if (cl_ad_d != clut_addr) begin
+		if (cl_walk && cl_ad_run < cl_ad_min) cl_ad_min <= cl_ad_run;
+		cl_ad_run <= 1;
+		cl_walk   <= 1'b1;
+	end
+	else cl_ad_run <= cl_ad_run + 1;
+	cl_ad_d <= clut_addr;
+end
+
 always @(posedge clk) begin
 	if (sh_ld_we) sh_we_run <= sh_we_run + 1;
 	else if (sh_we_run != 0) begin
@@ -1322,6 +1360,20 @@ initial begin
 		errors = errors + 1;
 	end
 	else $display("PASS colour table strobe held %0d cycles", cl_we_min);
+
+	if (sh_ad_min < MIN_STROBE) begin
+		$display("FAIL shadow read address held %0d cycles, need %0d",
+		         sh_ad_min, MIN_STROBE);
+		errors = errors + 1;
+	end
+	else $display("PASS shadow read address held %0d cycles", sh_ad_min);
+
+	if (cl_ad_min < MIN_STROBE) begin
+		$display("FAIL colour table read address held %0d cycles, need %0d",
+		         cl_ad_min, MIN_STROBE);
+		errors = errors + 1;
+	end
+	else $display("PASS colour table read address held %0d cycles", cl_ad_min);
 
 	// The pair the last restore compared, published for userspace. The live
 	// half is the fingerprint of the mock's alternate ROM -- rom_alt was left

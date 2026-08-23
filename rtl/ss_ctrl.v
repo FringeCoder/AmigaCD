@@ -1596,19 +1596,49 @@ always @(posedge clk) begin
 					state       <= S_CLUT_RD;
 				end
 			end
-			else state <= S_SHADOW_LOW;
+			else begin
+				ss_hold <= 3'd0;
+				state   <= S_SHADOW_LOW;
+			end
 		end
 
 		// shadow_rd_data is this entry. Take it, then point at the next one and
 		// give that its own settle in S_SHADOW_HI.
+		//
+		// The settle is SS_HOLD_MAX+1 clk_114 cycles, not one. ss_regshadow
+		// registers its read on clk_sys -- "the cost is a cycle of latency on
+		// every read, which both readers allow for" -- and a clk_sys cycle is
+		// four clk_114 cycles. Waiting one meant the address had not been
+		// registered yet and the sample returned the PREVIOUS entry, so the
+		// saved shadow was the whole table shifted: every chipset register
+		// carrying its neighbour's value.
+		//
+		// That is not a subtle corruption. It restored BEAMCON0 with VARBEAMEN
+		// and HARDDIS set and HTOTAL at zero, which gives the beam counter a
+		// line length of nothing: hpos ran to its 511 maximum instead of
+		// wrapping at 452, no frame ever completed, no VERTB ever fired, and
+		// the machine hung with a black screen.
+		//
+		// It hid behind a second bug. The restore's load strobe was one
+		// clk_114 cycle and was itself mostly missed, so the shadow kept the
+		// live values it already held and the replay wrote those -- correct
+		// ones -- back. Widening the load strobe made the load work, which is
+		// what finally let the bad capture reach the chipset.
 		S_SHADOW_LOW: begin
-			sh_low         <= shadow_rd_data;
-			shadow_rd_addr <= shadow_rd_addr + 8'd1;
-			sh_idx         <= sh_idx + 9'd1;
-			state          <= S_SHADOW_HI;
+			if (ss_hold == SS_HOLD_MAX) begin
+				sh_low         <= shadow_rd_data;
+				shadow_rd_addr <= shadow_rd_addr + 8'd1;
+				sh_idx         <= sh_idx + 9'd1;
+				ss_hold        <= 3'd0;
+				state          <= S_SHADOW_HI;
+			end
+			else ss_hold <= ss_hold + 3'd1;
 		end
 
-		S_SHADOW_HI: state <= S_SHADOW_Q;
+		S_SHADOW_HI: begin
+			if (ss_hold == SS_HOLD_MAX) state <= S_SHADOW_Q;
+			else ss_hold <= ss_hold + 3'd1;
+		end
 
 		// Two entries per payload word, low entry in the low half -- the same
 		// order the restore unpacks them in, and the only place that order is
@@ -1622,6 +1652,7 @@ always @(posedge clk) begin
 				queue_word({shadow_rd_data, sh_low});
 				shadow_rd_addr <= shadow_rd_addr + 8'd1;
 				sh_idx         <= sh_idx + 9'd1;
+				ss_hold        <= 3'd0;
 				state          <= S_SHADOW_RD;
 			end
 		end
