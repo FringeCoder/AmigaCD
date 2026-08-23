@@ -5,6 +5,7 @@
 #include "../../menu.h"
 #include "../../input.h"
 #include "../minimig/minimig_config.h"
+#include "../lightpen/amiga_lightpen.h"
 #include "snac_psx.h"
 
 static uint16_t pad[2];
@@ -110,17 +111,9 @@ static void snac_mouse(void)
 	}
 }
 
-// GunCon X is in 8 MHz dot-clock ticks (125 ns each); the Amiga's VHPOSR reads
-// hpos[8:1], one step of which is 280 ns. So one gun tick is 125/280 of an
-// Amiga step. Y is already in scanlines and needs only an offset.
-//
-// Calibration lives here rather than in RTL precisely so it can be adjusted
-// without a 40-minute Quartus run. Not yet persisted to AmigaCD.cfg (that
-// would need a minimig_config.h/.cpp migration of its own) -- edit and
-// rebuild to calibrate for now.
-static int cfg_gun_offset_x = 0;
-static int cfg_gun_offset_y = 0;
-
+// Calibration used to live here as a pair of offsets. It now lives with the
+// raster mapping in support/lightpen/amiga_lightpen.cpp, so the SNAC gun and a
+// USB gun are calibrated by the same four numbers instead of drifting apart.
 #define SNAC_GUN_OFFSCREEN_X 0x0001
 #define SNAC_GUN_OFFSCREEN_Y 0x000A
 
@@ -154,18 +147,11 @@ static void snac_lightpen(void)
 		// must simply not latch, leaving the last position alone.
 		if (gx == SNAC_GUN_OFFSCREEN_X && gy == SNAC_GUN_OFFSCREEN_Y) continue;
 
-		int hpos = ((int)gx * 125) / 280 + cfg_gun_offset_x;
-		int vpos = (int)gy + cfg_gun_offset_y;
-		if (hpos < 0)     hpos = 0;
-		if (hpos > 0xFF)  hpos = 0xFF;
-		if (vpos < 0)     vpos = 0;
-		if (vpos > 0x7FF) vpos = 0x7FF;
-
-		// Vertical first, then horizontal -- the horizontal write is the one the
-		// Amiga side reads against, so ordering keeps a stale pair impossible to
-		// observe as a wrong position, only as a one-poll-old one.
-		spi_uio_cmd16(UIO_MM2_LPENV, (uint16_t)vpos);
-		spi_uio_cmd16(UIO_MM2_LPENH, (uint16_t)hpos);
+		// A GunCon reports X in 8 MHz dot-clock ticks and Y in scanlines, both
+		// 9 bits, so the full-scale range is the device's own range. The mapping
+		// onto the Amiga raster lives in one place for every pointing device --
+		// see support/lightpen/amiga_lightpen.cpp.
+		amiga_lightpen_abs(gx, gy, 0, 0x1FF, 0, 0x1FF);
 	}
 }
 

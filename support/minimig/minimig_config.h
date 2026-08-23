@@ -3,6 +3,7 @@
 #define __MINIMIG_CONFIG_H__
 
 #include "../../file_io.h"
+#include "minimig_profile.h"   // AMIGACD_SYS_* for the system helpers below
 
 #define CONFIG_TURBO     1
 #define CONFIG_NTSC      2
@@ -92,12 +93,33 @@ typedef struct
 	char            info[64];
 	mm_userportMode userport;
 	unsigned char   snac[2];   // mm_snacPortMode per SNAC port
+	// Save state slot, 0..3 (shown as 1..4). Appended at the end so the
+	// on-disk layout stays loadable. It lands at offset 5226, inside the two
+	// bytes of tail padding snac[2] already left before the struct's 4-byte
+	// alignment, so sizeof(mm_configTYPE) is UNCHANGED at 5228 and
+	// minimig_cfg_load's exact-size dispatch still routes existing files to
+	// the current branch. Those files carry whatever was in that padding --
+	// zero in practice, since minimig_config is a zero-initialised global --
+	// so every reader masks with & 3 rather than trusting it.
+	unsigned char   ss_slot;
 } mm_configTYPE;
 
 extern mm_configTYPE minimig_config;
 
-int minimig_cfg_load(int num);
-int minimig_cfg_save(int num);
+// sys_suffix gives a machine its own config file so the System row can leave
+// one machine and arrive at another without losing either one's settings.
+// Null keeps the historical names, which is what every existing caller wants
+// and what CD32 keeps using -- see the comment on GetConfigurationName.
+int minimig_cfg_load(int num, const char *sys_suffix = 0);
+int minimig_cfg_save(int num, const char *sys_suffix = 0);
+
+// Saves from_sys, then loads to_sys. Returns 0 when to_sys has never been
+// configured, in which case the caller should apply its profile instead.
+int amigacd_switch_system(int from_sys, int to_sys);
+
+// Writes both the live config and the current machine's own file. What the
+// "Save settings" row calls.
+int amigacd_cfg_save_current(void);
 int minimig_mgl_save();
 const char* minimig_get_cfg_info(int num, int label);
 
@@ -124,9 +146,17 @@ void minimig_set_extcfg(unsigned int ext_cfg);
 unsigned int minimig_get_extcfg();
 
 // AmigaCD console variant helpers (see minimig_config.cpp).
-void amigacd_default_rom_names(int cdtv, const char **main_name, const char **ext_name);
-void amigacd_set_default_roms(int cdtv);
-void amigacd_apply_system(int cdtv);
+void amigacd_default_rom_names(int sys, const char **main_name, const char **ext_name);
+// Both return 1 if the machine's default main ROM was found and selected, and
+// 0 if it was missing -- in which case whatever ROM was already loaded is left
+// alone. Callers should tell the user when it returns 0: the machine will boot,
+// but as the wrong Amiga, and the only other clue is the Main ROM row.
+int amigacd_set_default_roms(int sys);
+int amigacd_apply_system(int sys);
 int  amigacd_is_cdtv(void);
+// The AMIGACD_SYS_* values these two speak in live in minimig_profile.h, which
+// is included above so callers need only this header.
+int  amigacd_system(void);
+const char *amigacd_system_name(int sys);
 
 #endif

@@ -67,6 +67,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "ide.h"
 #include "support/physical_disc/physical_disc.h"
 #include "support/physical_disc/physical_disc_autoboot.h"
+#include "support/minimig/minimig_ssdiag.h"
 #include "profiling.h"
 #include "str_util.h"
 #include "autofire.h"
@@ -196,6 +197,7 @@ enum MENU
 	MENU_AMIGACD_ADVANCED1,
 	MENU_AMIGACD_ADVANCED2,
 	MENU_AMIGACD_CDFILE_SELECTED,
+	MENU_AMIGACD_HDFFILE_SELECTED,
 	MENU_AMIGACD_ADFFILE_SELECTED,
 	MENU_AMIGACD_ROMFILE_SELECTED,
 	MENU_AMIGACD_EXTROMFILE_SELECTED,
@@ -264,6 +266,11 @@ const char *config_autofire_msg[] = { "        AUTOFIRE OFF", "        AUTOFIRE 
 // Which df unit the AmigaCD floppy browser was opened for, so
 // MENU_AMIGACD_ADFFILE_SELECTED inserts into the row that asked.
 static int amigacd_fdd_unit = 0;
+// Which hardfile slot the Hard Disk browser is filling: 1 for Hard Disk 0
+// (IDE0 slave) and 2 for Hard Disk 1 (IDE1 master). The browser returns on
+// its own menustate long after the row that opened it has gone, the same
+// reason amigacd_fdd_unit above exists.
+static int amigacd_hdf_slot = 1;
 
 const char *config_joystick_mode[] = { "Digital", "Analog", "CD32", "Analog" };
 const char *config_button_turbo_msg[] = { "OFF", "FAST", "MEDIUM", "SLOW" };
@@ -276,6 +283,67 @@ const char *config_midilink_mode[] = {"Local", "Local", "  USB", "  UDP", "-----
 const char *config_afilter_msg[] = { "Internal","Custom" };
 const char *config_smask_msg[] = { "None", "1x", "2x", "1x Rotated", "2x Rotated" };
 const char *config_scale[] = { "Normal", "V-Integer", "HV-Integer-", "HV-Integer+", "HV-Integer", "???", "???", "???" };
+
+// Save state slots. Four, matching the four DDR3 windows process_ss() maps at
+// the core's advertised base (Minimig.sv CONF_STR "SS3C000000:C00000"), and
+// matching the four .ss1-.ss4 files FileGenerateSavestatePath() names. Labelled
+// 1-4 for the user; the wire value in status[53:52] is 0-3.
+static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
+
+// Save states are refused in two configurations. The OSD greys the rows out so
+// the user is told, rather than pressing SELECT and having nothing happen:
+//
+//  - Z3 fast RAM. The savestate windows start at DDR3 0x3C000000, which is
+//    inside the region ddram_ctrl.v hands to Z3 fast RAM, so the two cannot
+//    coexist. Moving the windows does not help: Z3_1 covers the whole of
+//    0x30000000-0x3FFFFFFF. Z2 fast RAM is a different matter -- it sits at
+//    0x30000000-0x307FFFFF, clear of the windows, and IS carried in the save
+//    state. Fast RAM index >= 4 means a Z3 board (cpu_wrapper.v ac_memcard[2]
+//    selects the 128/256 MB Z3 autoconfig entries). The index is decoded here
+//    exactly as the FastRAM row itself decodes it.
+//  - 68000. cpu_wrapper exports TG68K state only -- fx68k has no equivalent --
+//    so Minimig.sv gates the request on `ss_supported = |cpucfg`, and userio.v
+//    takes cpucfg from the low two bits of the CPU config byte, i.e.
+//    minimig_config.cpu & 3. Without this the request would be silently
+//    swallowed in RTL.
+// Name the save state after the mounted disc.
+//
+// hardfile[0].filename cannot be used directly: for a physical disc it holds
+// PHYSICAL_DISC_SENTINEL, "*PHYSICAL_DISC*". That has no '.', which used to
+// segfault FileGenerateSavestatePath outright, and even with that fixed the
+// '*' is not a legal exfat filename character, so the state could never be
+// written. Use the same identity per-game NVRAM already uses -- the ISO9660
+// volume label, or a TOC-geometry UUID for discs without one.
+static const char *amigacd_ss_name()
+{
+	static char name[256];
+	const char *f = minimig_config.hardfile[0].filename;
+
+	// No CD: name the state after the hard disk instead. The A1200 profile has
+	// no CD drive at all, and its software lives in the HDF -- without this a
+	// machine that can be saved has nothing to name the file after, and
+	// process_ss is never armed, so the save is captured into DDR3 and never
+	// reaches the card.
+	if (!f[0]) return minimig_config.hardfile[1].filename;
+
+	if (strcmp(f, PHYSICAL_DISC_SENTINEL)) return f;   // an image path: use it
+
+	if (physical_disc_save_name(PHYSICAL_DISC_DISC_NONE, name, sizeof(name)) &&
+	    name[0])
+	{
+		return name;
+	}
+
+	// No label and no geometry to hash: still needs a name a file can carry.
+	strcpy(name, "PhysicalDisc");
+	return name;
+}
+
+static int minimig_ss_blocked()
+{
+	int fastram = ((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5);
+	return (fastram >= 4) || !(minimig_config.cpu & 0x03);
+}
 
 #define DPAD_NAMES 4
 #define DPAD_BUTTON_NAMES 12  //DPAD_NAMES + 6 buttons + start/select
@@ -6225,12 +6293,23 @@ void HandleUI(void)
 
 	case MENU_MINIMIG_CHIPSET1:
 		helptext_idx = HELPTEXT_CHIPSET;
-		// 13 selectable rows: 0..10 from this fork, 11 = upstream's A2065
-		// Ethernet row (menusub 9 upstream, renumbered on merge), 12 = Back.
-		menumask = 0x1FFF;
+		// 15 selectable rows: 0..10 from this fork, 11..12 save states,
+		// 13 = upstream's A2065 Ethernet row (menusub 9 upstream, renumbered
+		// twice on merge), 14 = Back.
+		menumask = 0x7FFF;
 		OsdSetTitle("System");
 		parentstate = menustate;
 
+		// *** THIS PAGE IS EXACTLY FULL ***
+		// The core's OSD is 16 lines (sys/osd.v OSD_HEIGHT 64 at highres, and
+		// OsdUpdate() only transmits OsdGetSize() == 16 of them), Back occupies
+		// the last one, so there are 15 lines for 14 rows. The blank separators
+		// this page used to carry between groups are gone: with them, m ran to
+		// 17 even BEFORE the save state rows, which put the Ethernet row on
+		// line 16 where OsdUpdate never sent it and let Back overwrite the
+		// blank on line 15. That row has been invisible since this fork added
+		// D-Cache and CPU Speed. Anything added here from now on has to
+		// displace something.
 		m = 0;
 		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " CPU       : ");
@@ -6242,7 +6321,6 @@ void HandleUI(void)
 		strcpy(s, " CPU Speed : ");
 		strcat(s, (minimig_config.cpu & 0x20) ? "14 MHz" : "Full");
 		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " Chipset   : ");
 		strcat(s, config_chipset_msg[(minimig_config.chipset >> 2) & 7]);
 		OsdWrite(m++, s, menusub == 3, 0);
@@ -6256,12 +6334,10 @@ void HandleUI(void)
 		strcat(s, config_memory_slow_msg[(minimig_config.memory >> 2) & 0x03]);
 		OsdWrite(m++, s, menusub == 6, 0);
 
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " Joystick  : ");
 		strcat(s, config_joystick_mode[(minimig_config.autofire & 6) >> 1]);
 		OsdWrite(m++, s, menusub == 7, 0);
 
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " ROM    : ");
 		{
 			char *path = HomeDir();
@@ -6289,15 +6365,32 @@ void HandleUI(void)
 		strcat(s, (minimig_config.memory & 0x40) ? "enabled " : "disabled");
 		OsdWrite(m++, s, menusub == 10, 0);
 
-		OsdWrite(m++, "", 0, 0);
+		// Save states. The core is the active party in the protocol: these rows
+		// only pick a slot and raise a request bit, the capture itself is
+		// entirely in RTL and the host's process_ss() poller notices the
+		// finished window within a second and writes it to disk.
+		//
+		// Both rows grey out together -- see minimig_ss_blocked() for the two
+		// reasons. A greyed row is still reachable with the cursor (same as the
+		// D-Cache row above), so the handlers re-test the condition.
+		{
+			int ss_blocked = minimig_ss_blocked();
+
+			strcpy(s, " Save slot : ");
+			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
+			OsdWrite(m++, s, menusub == 11, ss_blocked);
+
+			OsdWrite(m++, " Save state", menusub == 12, ss_blocked);
+		}
+
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		// Upstream renders this at menusub 9; this fork has two extra rows
-		// ahead of it, so it lands at 11 and Back moves to 12.
-		OsdWrite(m++, s, menusub == 11, 0);
+		// Upstream renders this at menusub 9; this fork has four extra rows
+		// ahead of it, so it lands at 13 and Back moves to 14.
+		OsdWrite(m++, s, menusub == 13, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 12, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 14, 0);
 
 		menustate = MENU_MINIMIG_CHIPSET2;
 		break;
@@ -6448,7 +6541,39 @@ void HandleUI(void)
 				minimig_config.memory ^= 0x40;
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
-			else if (menusub == 11)
+			else if (menusub == 11 && !minimig_ss_blocked())
+			{
+				// Save slot 1..4, stored 0..3. Kept in minimig_config so it
+				// survives "Save settings"; it is NOT pushed to status[53:52]
+				// here. The core samples slot_base continuously for the whole
+				// ~0.2 s dump, so writing the slot only immediately before the
+				// request (menusub 12 below) makes it impossible for a slot
+				// change to redirect a save that is already in flight.
+				int slot = minimig_config.ss_slot & 3;
+				slot = minus ? (slot + 3) & 3 : (slot + 1) & 3;
+				minimig_config.ss_slot = (unsigned char)slot;
+				menustate = MENU_MINIMIG_CHIPSET1;
+			}
+			else if (menusub == 12 && select && !minimig_ss_blocked())
+			{
+				// Raise the save request. status[51] is edge-triggered in the
+				// core: Minimig.sv latches the 0->1 transition into a pending
+				// bit and clears that bit as soon as ss_ctrl accepts it, so one
+				// press means exactly one save no matter how long the bit
+				// stays set. Clearing it again here is housekeeping -- it keeps
+				// the persisted status word clean so a later core load does not
+				// present a fresh edge -- not a safety property.
+				// The core reports "saved" long before the file exists -- the
+				// poller writes it. Ask that poller to hurry, so a reset
+				// straight after the toast cannot leave the previous save on
+				// the card pretending to be this one.
+				ss_expect_save();
+				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+				user_io_status_set("[51]", 1);
+				user_io_status_set("[51]", 0);
+				menustate = MENU_MINIMIG_CHIPSET1;
+			}
+			else if (menusub == 13)
 			{
 				// A2065 ethernet: OFF -> eth0 -> eth1 -> macvlan -> tap0,
 				// skipping anything this box cannot support (no second NIC,
@@ -6465,8 +6590,8 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
 			// Back. Upstream puts the A2065 row at menusub 9 and Back at 10;
-			// this fork has two extra rows ahead of them, so both shift up.
-			else if (menusub == 12)
+			// this fork has four extra rows ahead of them, so both shift up.
+			else if (menusub == 14)
 			{
 				menustate = MENU_MINIMIG_MAIN1;
 				menusub = 6;
@@ -6497,7 +6622,8 @@ void HandleUI(void)
 		break;
 
 	// ===================== AmigaCD console variant (simplified menu) =========
-	// Top level: CD / Floppy(df0) / System(CD32|CDTV) / Settings / Reset / Exit.
+	// Top level: CD / Real CD / Floppy x2 / Hard Disk / System / Settings /
+	// Advanced / Save / Reset / Exit.
 	// ChipRAM/CPU/chipset/HDD/video/config complexity is hidden; Settings exposes
 	// only FastRAM, D-Cache (020 only) and Main/Ext ROM browse. See
 	// research/docs/amiga-console-design-2026-06-13.md.
@@ -6508,10 +6634,19 @@ void HandleUI(void)
 		// the core menu itself is reskinned, the MiSTer menu stays reachable.
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 		helptext_idx = 0;
-		menumask = 0x3FF;           // CD, Real CD, DF0, DF1, System, Settings, Advanced, Save, Reset, Exit
+		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
+		// Reset, Exit -- twelve rows.
+		menumask = 0xFFF;
+
+		// The A1200 profile has no CD drive at all, so its two rows are dead.
+		// Greyed out rather than removed: the row positions are shared with
+		// every other system and menusub indices below them would all shift,
+		// and a row that vanishes reads as a bug where a greyed one reads as
+		// "not on this machine".
+		const int amigacd_has_cd = (amigacd_system() != AMIGACD_SYS_A1200);
+		if (!amigacd_has_cd) menumask &= ~0x003;
 		parentstate = menustate;
 
-		int cdtv = amigacd_is_cdtv();
 		// mister_floppy_status rides in the core's OSD mask: bit 6 board
 		// detected, bit 7 IBM/PC vs Shugart, bit 8 cable straight vs crossed.
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
@@ -6524,7 +6659,8 @@ void HandleUI(void)
 		// load, and ide_open then returns 0. Render the real mount state
 		// (drive[0].phys) so the row cannot claim a disc that is not there.
 		strcpy(s, " CD       : ");
-		if (!strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
+		if (!amigacd_has_cd) strcat(s, "* no drive *");
+		else if (!strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
 		{
 			strcat(s, ide_inst[0].drive[0].phys ? "* physical drive *" : "* no disc *");
 		}
@@ -6535,15 +6671,16 @@ void HandleUI(void)
 			strncat(s, p ? p + 1 : name, 24);
 		}
 		else strcat(s, "* no disc *");
-		OsdWrite(m++, s, menusub == 0, 0);
+		OsdWrite(m++, s, menusub == 0, !amigacd_has_cd);
 
 		// Physical CD-ROM drive attached to the MiSTer. Mounting parks the
 		// sentinel in hardfile[0].filename, which is what ide_open matches on.
 		// Re-selecting while mounted re-reads the TOC, i.e. disc swap.
 		{
 			strcpy(s, " Real CD  : ");
-			strcat(s, ide_inst[0].drive[0].phys ? "re-read TOC" : "mount drive");
-			OsdWrite(m++, s, menusub == 1, 0);
+			if (!amigacd_has_cd) strcat(s, "-");
+			else strcat(s, ide_inst[0].drive[0].phys ? "re-read TOC" : "mount drive");
+			OsdWrite(m++, s, menusub == 1, !amigacd_has_cd);
 		}
 
 		// df0 and df1. The core has always presented two drives -- floppy.drives
@@ -6587,22 +6724,62 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == (uint32_t)(2 + fu), 0);
 		}
 
+		// Two hard disks. HD0 is hardfile[1], the IDE0 slave, so it sits beside
+		// the CD slot (hardfile[0]) rather than displacing it -- a machine can
+		// boot from an HDF with a disc still mounted. HD1 is hardfile[2], the
+		// IDE1 master.
+		//
+		// Two rather than one because a single HDF is not how the software that
+		// wants them ships. AmigaVision keeps its saves and settings on a second
+		// volume, and with nowhere to mount it the system boots and then forgets
+		// everything on reset. ApplyConfiguration already opens all four IDE
+		// units, so the rows were the only part missing.
+		for (int hu = 0; hu < 2; hu++)
+		{
+			const int hslot = hu + 1;    // hardfile[1] and hardfile[2]
+			sprintf(s, " Hard Disk %d: ", hu);
+			if (minimig_config.hardfile[hslot].cfg && minimig_config.hardfile[hslot].filename[0])
+			{
+				char *hname = minimig_config.hardfile[hslot].filename;
+				char *hp = strrchr(hname, '/');
+				strncat(s, hp ? hp + 1 : hname, 22);
+			}
+			else strcat(s, "* none *");
+			OsdWrite(m++, s, menusub == (uint32_t)(4 + hu), 0);
+		}
+
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " System   : ");
-		strcat(s, cdtv ? "CDTV" : "CD32");
-		OsdWrite(m++, s, menusub == 4, 0);
+		strcat(s, amigacd_system_name(amigacd_system()));
+		OsdWrite(m++, s, menusub == 6, 0);
 
 		OsdWrite(m++, "", 0, 0);
-		OsdWrite(m++, " Settings                 \x16", menusub == 5, 0);
+		OsdWrite(m++, " Settings                 \x16", menusub == 7, 0);
 		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
 		// page so the everyday options stay a short list.
-		OsdWrite(m++, " Advanced                 \x16", menusub == 6, 0);
-		OsdWrite(m++, " Save settings", menusub == 7, 0);
+		OsdWrite(m++, " Advanced                 \x16", menusub == 8, 0);
+		OsdWrite(m++, " Save settings", menusub == 9, 0);
+
+		// Eject is BACKSPACE, which on a controller is A and B pressed together
+		// -- input.cpp synthesises JOY_BTN3 from that pair and maps it to
+		// BACKSPACE. Neither is written down anywhere the user would look, and
+		// with no hint the only discoverable way to change a mounted disc or
+		// disk was to mount a different one. Shown only while the cursor is on
+		// a row that can actually be ejected, so it reads as a property of the
+		// row rather than as decoration.
+		if (menusub <= 5 && !(menusub <= 1 && !amigacd_has_cd))
+		{
+			int occupied = (menusub == 0) ? (minimig_config.hardfile[0].filename[0] != 0)
+			             : (menusub == 1) ? 0
+			             : (menusub <= 3) ? ((df[menusub - 2].status & DSK_INSERTED) != 0)
+			                              : (minimig_config.hardfile[menusub - 3].filename[0] != 0);
+			if (occupied && m < OsdGetSize() - 2) OsdWrite(m++, " Eject: Backspace / A+B", 0, 1);
+		}
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 8, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 9, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 10, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 11, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 		break;
@@ -6795,47 +6972,117 @@ void HandleUI(void)
 					else if (recent_init(fu)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 4) // System: toggle CD32 <-> CDTV
+			else if (menusub == 4 || menusub == 5) // Hard Disk 0 / 1: select an HDF
+			{
+				if (select || recent)
+				{
+					// Which row is being filled has to survive the file
+					// browser, which comes back on its own menustate long
+					// after this branch has returned.
+					amigacd_hdf_slot = (menusub - 4) + 1;   // hardfile[1] or [2]
+					fs_Options = SCANO_DIR | SCANO_UMOUNT;
+					fs_MenuSelect = MENU_AMIGACD_HDFFILE_SELECTED;
+					fs_MenuCancel = MENU_AMIGACD_MAIN1;
+					strcpy(fs_pFileExt, "HDFVHDIMGDSK");
+					if (select)
+					{
+						if (!Selected_S[amigacd_hdf_slot][0])
+							memcpy(Selected_S[amigacd_hdf_slot],
+							       minimig_config.hardfile[amigacd_hdf_slot].filename,
+							       sizeof(Selected_S[amigacd_hdf_slot]));
+						SelectFile(Selected_S[amigacd_hdf_slot], fs_pFileExt, fs_Options,
+						           fs_MenuSelect, fs_MenuCancel);
+					}
+					else if (recent_init(500)) menustate = MENU_RECENT1;
+				}
+			}
+			else if (menusub == 6) // System: cycle CD32 -> CDTV -> A500 -> A1200
 			{
 				if (select || minus || plus)
 				{
-					amigacd_apply_system(amigacd_is_cdtv() ? 0 : 1);
-					// Refresh the active bridge with the mounted CD, if any.
-					if (minimig_config.hardfile[0].filename[0])
-						ide_open(0, minimig_config.hardfile[0].filename);
+					// minus steps backwards so the row behaves like every
+					// other multi-value row in this menu.
+					int old_sys = amigacd_system();
+					int sys = minus ? (old_sys + AMIGACD_SYS_COUNT - 1) % AMIGACD_SYS_COUNT
+					                : (old_sys + 1) % AMIGACD_SYS_COUNT;
+
+					// Each machine keeps its own settings. The machine being
+					// left is written out first, then the one arriving is read
+					// back if it has ever been configured -- so the discs, hard
+					// disks, RAM and ROM of both survive a round trip through
+					// the row.
+					if (!amigacd_switch_system(old_sys, sys))
+					{
+						// First time on this machine: build it from the
+						// profile. A missing default ROM is worth saying out
+						// loud -- the machine still boots, but as whatever
+						// Amiga the old ROM makes it, and the only other clue
+						// is the Main ROM row two menus away.
+						if (!amigacd_apply_system(sys))
+						{
+							const char *mname = 0;
+							amigacd_default_rom_names(sys, &mname, 0);
+							char msg[128];
+							snprintf(msg, sizeof(msg), "%s ROM %s not found",
+							         amigacd_system_name(sys), mname);
+							Info(msg, 2500);
+						}
+
+						// The A1200 has no CD drive, so a disc mounted under a
+						// previous system has to go with it -- otherwise the
+						// row keeps naming a disc that nothing can read.
+						if (sys == AMIGACD_SYS_A1200)
+						{
+							minimig_config.hardfile[0].filename[0] = 0;
+							ide_open(0, "");
+						}
+						// Refresh the active bridge with the mounted CD, if any.
+						else if (minimig_config.hardfile[0].filename[0])
+							ide_open(0, minimig_config.hardfile[0].filename);
+					}
 					menustate = MENU_AMIGACD_MAIN1;
 				}
 			}
-			else if (menusub == 5 && select) // Settings submenu
+			else if (menusub == 7 && select) // Settings submenu
 			{
 				menusub = 0;
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 6 && select) // Advanced submenu
+			else if (menusub == 8 && select) // Advanced submenu
 			{
 				menusub = 0;
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 7 && select) // Save settings -> default config slot 0
+			else if (menusub == 9 && select) // Save settings -> default config slot 0
 			{
 				// Persists the whole minimig_config: mounted CD (hardfile[0]),
-				// RAM (memory), CPU/chipset (System profile), D-Cache and ROMs.
-				// minimig_cfg_load(0) restores it on the next core load, and
-				// ApplyConfiguration()->hdd_open(0) re-mounts the saved CD.
-				minimig_cfg_save(0);
+				// the two hard disks, RAM, CPU/chipset (System profile),
+				// D-Cache and ROMs. minimig_cfg_load(0) restores it on the next
+				// core load, and ApplyConfiguration()->hdd_open() re-mounts
+				// everything. Also updates this machine's own file, so the
+				// System row hands back these settings rather than older ones.
+				amigacd_cfg_save_current();
 				minimig_mgl_save();
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 8 && select) // Reset
+			else if (menusub == 10 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 9 && select) // Exit
+			else if (menusub == 11 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
+		}
+		else if (c == KEY_BACKSPACE && (menusub == 4 || menusub == 5)) // eject a hard disk
+		{
+			const int hslot = (menusub - 4) + 1;
+			minimig_config.hardfile[hslot].filename[0] = 0;
+			minimig_config.hardfile[hslot].cfg = 0;
+			ide_open(hslot, "");
+			menustate = MENU_AMIGACD_MAIN1;
 		}
 		else if (c == KEY_BACKSPACE && (menusub == 2 || menusub == 3)) // eject floppy
 		{
@@ -6860,7 +7107,9 @@ void HandleUI(void)
 	{
 		OsdSetTitle("Settings", 0);
 		helptext_idx = 0;
-		menumask = 0x1F;           // FastRAM, D-Cache, Main ROM, Ext ROM, Back
+		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
+		// Save state(5), Restore state(6), Back(7) -- eight rows, so 0xFF.
+		menumask = 0xFF;
 		parentstate = menustate;
 
 		m = 0;
@@ -6903,8 +7152,28 @@ void HandleUI(void)
 		}
 		OsdWrite(m++, s, menusub == 3, 0);
 
+		// Save states. These rows were originally added to MENU_MINIMIG_CHIPSET1,
+		// which the AmigaCD console variant never reaches -- menu.cpp:5859 sends
+		// it straight to MENU_AMIGACD_MAIN1 and its own menu tree. The rows
+		// existed but were unreachable on the only variant that wanted them.
+		//
+		// All three grey out together on minimig_ss_blocked(): a restore is
+		// refused in exactly the configurations a save is (see that function),
+		// and the core enforces the same lockout in RTL regardless.
+		OsdWrite(m++, "", 0, 0);
+		{
+			int ss_blocked = minimig_ss_blocked();
+
+			strcpy(s, " Save slot: ");
+			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
+			OsdWrite(m++, s, menusub == 4, ss_blocked);
+
+			OsdWrite(m++, " Save state", menusub == 5, ss_blocked);
+			OsdWrite(m++, " Restore state", menusub == 6, ss_blocked);
+		}
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 4, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 7, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -6967,7 +7236,120 @@ void HandleUI(void)
 					SelectFile(Selected_F[5], "ROM", SCANO_DIR | SCANO_UMOUNT, MENU_AMIGACD_EXTROMFILE_SELECTED, MENU_AMIGACD_SETTINGS1);
 				}
 			}
-			else if (menusub == 4 && select) // Back
+			else if (menusub == 4 && !minimig_ss_blocked()) // Save slot 1-4
+			{
+				int slot = minimig_config.ss_slot & 3;
+				slot = minus ? (slot + 3) & 3 : (slot + 1) & 3;
+				minimig_config.ss_slot = (unsigned char)slot;
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 5 && select && !minimig_ss_blocked()) // Save state
+			{
+				// Arm the host poller, here and nowhere earlier.
+				//
+				// process_ss() only ever armed itself from
+				// user_io_file_tx(..., opensave) (user_io.cpp:2877) or the
+				// arcade MRA path (:1613). Minimig uploads its Kickstart by a
+				// different route and reaches neither, so the poller's enabled
+				// flag stayed 0, the once-a-second call at :3870 returned
+				// immediately, and a state the core wrote into its DDR3 window
+				// was never persisted.
+				//
+				// Arming it from the CD mount path instead was tried and the
+				// core would not boot: that path runs during core init
+				// (ide.cpp:1161 -> cdrom_parse, reached from
+				// ApplyConfiguration via hdd_open). Doing it on the user's
+				// explicit save press is the latest possible moment, when
+				// everything is up -- and if it ever does misbehave it can only
+				// affect a save, never stop the core booting.
+				//
+				// Idempotent: repeat presses re-map the same four windows.
+				// Named after the mounted disc so states are per-game.
+				if (amigacd_ss_name()[0])
+					process_ss(amigacd_ss_name(), 1);
+
+				// The core edge-detects this in RTL (Minimig.sv ss_save_edge),
+				// so a set/clear pair here is one save, and a bit left high
+				// cannot re-arm. Everything after this is RTL: quiesce, freeze,
+				// capture, then the host poller writes the window to disk.
+				// The core reports "saved" long before the file exists -- the
+				// poller writes it. Ask that poller to hurry, so a reset
+				// straight after the toast cannot leave the previous save on
+				// the card pretending to be this one, which is exactly what
+				// happened on hardware.
+				ss_expect_save();
+				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+				user_io_status_set("[51]", 1);
+				user_io_status_set("[51]", 0);
+				// Close the OSD rather than returning to the Settings page.
+				//
+				// The outcome arrives as a toast ~250 ms later, and Info()
+				// draws only while menustate <= MENU_INFO (== 2). Staying on
+				// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
+				// far above it, so every toast this feature produces was
+				// silently discarded -- measured on hardware: "Save state:
+				// saved" and "Save state: FAILED" both logged as DROPPED at
+				// menustate=98, and the video-mode toasts with them.
+				//
+				// Closing also matches what the press means. The user asked
+				// the machine to do something and wants to watch it happen,
+				// not sit in a menu while it does.
+				menustate = MENU_NONE1;
+			}
+			else if (menusub == 6 && select && !minimig_ss_blocked()) // Restore state
+			{
+				// This is not housekeeping, it is the load. process_ss() maps
+				// the four DDR3 windows AND reads the four .ss files off disk
+				// into them (user_io.cpp:1988-2028). Nothing else on this core
+				// ever calls it -- the save row above is the only other caller
+				// -- so without this the window the core is about to validate
+				// holds whatever was there, and a restore after a power cycle,
+				// which is the whole point of the feature, could never work.
+				//
+				// It re-reads all four slots every press, ~16 MB. That is the
+				// cost of always validating the freshest file on disk rather
+				// than a stale window, on a keypress the user made deliberately.
+				// It also resets the poller's counters, so it cannot itself
+				// trigger a spurious write back to disk.
+				if (amigacd_ss_name()[0])
+					process_ss(amigacd_ss_name(), 1);
+
+				// status[54], edge-detected in RTL (Minimig.sv ss_load_edge)
+				// exactly as status[51] is. A level here would restore over and
+				// over -- ss_ctrl re-arms out of idle on any cycle load_req is
+				// high -- and the bit being cleared by userspace must not be
+				// what stands between the user and a machine that never runs
+				// again. The set/clear pair below is housekeeping on the
+				// persisted status word, not the safety property.
+				//
+				// Everything after this is the core's: it validates the window
+				// with the Amiga still running, refuses without freezing if any
+				// gate fails, and reports the outcome as an OSD toast either
+				// way (Minimig.sv's ss_info_* block).
+				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+				// The drive travels beside the payload rather than in it: where
+				// the head is and what was playing are userspace state that the
+				// core cannot see. Applied here so the restored machine's first
+				// sector request is served from the position it was saved at.
+				ss_apply_host_state(minimig_config.ss_slot & 3);
+				user_io_status_set("[54]", 1);
+				user_io_status_set("[54]", 0);
+				// Close the OSD rather than returning to the Settings page.
+				//
+				// The outcome arrives as a toast ~250 ms later, and Info()
+				// draws only while menustate <= MENU_INFO (== 2). Staying on
+				// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
+				// far above it, so every toast this feature produces was
+				// silently discarded -- measured on hardware: "Save state:
+				// saved" and "Save state: FAILED" both logged as DROPPED at
+				// menustate=98, and the video-mode toasts with them.
+				//
+				// Closing also matches what the press means. The user asked
+				// the machine to do something and wants to watch it happen,
+				// not sit in a menu while it does.
+				menustate = MENU_NONE1;
+			}
+			else if (menusub == 7 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 5;   // Settings row
@@ -7117,6 +7499,28 @@ void HandleUI(void)
 		minimig_config.hardfile[0].cfg = 2;
 		ide_open(0, minimig_config.hardfile[0].filename);
 		menusub = 0;
+		menustate = MENU_AMIGACD_MAIN1;
+		break;
+
+	case MENU_AMIGACD_HDFFILE_SELECTED:
+		// amigacd_hdf_slot was set by the row that opened the browser: 1 for
+		// Hard Disk 0 (IDE0 slave) and 2 for Hard Disk 1 (IDE1 master).
+		memcpy(Selected_S[amigacd_hdf_slot], selPath, sizeof(Selected_S[0]));
+		recent_update(SelectedDir, selPath, SelectedLabel, 500);
+		{
+			uint len = strlen(selPath);
+			if (len > sizeof(minimig_config.hardfile[amigacd_hdf_slot].filename) - 1)
+				len = sizeof(minimig_config.hardfile[amigacd_hdf_slot].filename) - 1;
+			memcpy(minimig_config.hardfile[amigacd_hdf_slot].filename, selPath, len);
+			minimig_config.hardfile[amigacd_hdf_slot].filename[len] = 0;
+		}
+		minimig_config.hardfile[amigacd_hdf_slot].cfg = 1;   // fixed disk, not a removable slot
+		// The drive is invisible unless the IDE controller is on. A CD32
+		// profile already has it; CDTV and A500 do not, and mounting an HDF is
+		// an unambiguous request for one -- an A590 sidecar in A500 terms.
+		minimig_config.ide_cfg |= 1;
+		ide_open(amigacd_hdf_slot, minimig_config.hardfile[amigacd_hdf_slot].filename);
+		menusub = 4 + (amigacd_hdf_slot - 1);
 		menustate = MENU_AMIGACD_MAIN1;
 		break;
 
@@ -8753,8 +9157,37 @@ int menu_present()
 	return (menustate != MENU_NONE1) && (menustate != MENU_NONE2);
 }
 
-void Info(const char *message, int timeout, int width, int height, int frame)
+void Info(const char *message, int timeout, int width, int height, int frame, int priority)
 {
+	// A priority message owns the slot until it expires. Without this the video
+	// mode popup overwrites save state results -- reported from hardware, where
+	// the "Save state: saved" toast was replaced by a resolution readout before
+	// it could be read, and the restore's own result likewise.
+	static uint32_t info_priority_until = 0;
+
+	if (priority)
+	{
+		info_priority_until = GetTimer(timeout);
+	}
+	else if (info_priority_until && !CheckTimer(info_priority_until))
+	{
+		return;
+	}
+
+	// Diagnostic for the save state toast, which has never once appeared on
+	// hardware even though the log shows the core raising the request, the host
+	// reading it back and resolving it to a non-empty string, and this function
+	// being called with it. The gate below is the next candidate: MENU_INFO is
+	// 2, so anything from MENU_SYSTEM1 upward -- every real menu page, the
+	// AmigaCD settings page included -- drops the call without a word.
+	//
+	// Logging menustate here separates "the gate dropped it" from "it was drawn
+	// and not visible", which no amount of reading either file can settle.
+	// A no-op off Minimig; see support/minimig/minimig_ssdiag.cpp.
+	minimig_ss_diag_log("host Info(\"%s\") menustate=%u gate=%s",
+	                    message, menustate,
+	                    (menustate <= MENU_INFO) ? "open" : "DROPPED");
+
 	if (menustate <= MENU_INFO)
 	{
 		OSD_PrintInfo(message, &width, &height, frame);

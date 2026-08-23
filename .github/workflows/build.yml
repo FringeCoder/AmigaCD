@@ -96,6 +96,12 @@ jobs:
   # RTL simulation. Icarus rather than ModelSim: ModelSim is not installed on the
   # dev machine (C:\intelFPGA_lite\17.0 carries quartus only), and the testbench is
   # plain Verilog with no vendor primitives.
+  #
+  # No GHDL here on purpose. The one VHDL testbench in this project drives
+  # TG68KdotC_Kernel, and the TG68K sources live in the core repo
+  # (Minimig-AGA-cd32-cdtv), not this one -- there is nothing here for GHDL to
+  # compile. That bench runs from the core repo's .github/workflows/rtl-sim.yml,
+  # which installs ghdl alongside iverilog. See rtl/sim/tg68k/ over there.
   rtl-sim:
     runs-on: ubuntu-latest
 
@@ -137,3 +143,75 @@ jobs:
 
       - name: Run CD32 mapping testbench
         run: vvp build/snac_cd32_tb
+
+      - name: Build save state CRC testbench
+        run: iverilog -g2005 -Wall -o build/ss_crc32_tb rtl/ss_crc32.v rtl/tb/ss_crc32_tb.v
+
+      - name: Run save state CRC testbench
+        run: vvp build/ss_crc32_tb
+
+      - name: Build quiesce testbench
+        run: iverilog -g2005 -Wall -o build/ss_quiesce_tb rtl/ss_quiesce.v rtl/tb/ss_quiesce_tb.v
+
+      - name: Run quiesce testbench
+        run: vvp build/ss_quiesce_tb
+
+      - name: Build state serialiser testbench
+        run: iverilog -g2005 -Wall -o build/ss_serdes_tb rtl/ss_serdes.v rtl/tb/ss_serdes_tb.v
+
+      - name: Run state serialiser testbench
+        run: vvp build/ss_serdes_tb
+
+      - name: Build chip RAM readout testbench
+        run: iverilog -g2005 -Wall -o build/ss_dma_tb rtl/ss_dma.v rtl/tb/ss_dma_tb.v
+
+      - name: Run chip RAM readout testbench
+        run: vvp build/ss_dma_tb
+
+      # The freeze's two clk_sys-domain signals. The parking PHASE they choose
+      # is what stops a replay's register-decode ticks from walking the beam,
+      # and it is checked end to end against the real amiga_clk in the core
+      # repo's rtl/sim/ssmux bench; this one covers the sampling rule itself.
+      - name: Build freeze phase testbench
+        run: iverilog -g2005 -Wall -o build/ss_freeze_phase_tb rtl/ss_freeze_phase.v rtl/tb/ss_freeze_phase_tb.v
+
+      - name: Run freeze phase testbench
+        run: vvp build/ss_freeze_phase_tb
+
+      # The restore's register-write sequencer: the sixteen CPU registers in
+      # index order, the five singles, the map bits, and the re-seed last with
+      # the CPU still parked. -g2012 for the .sv, -I. so `include "rtl/..." works
+      # from the repo root the way it does for Quartus.
+      - name: Build state fanout testbench
+        run: iverilog -g2012 -Wall -I. -o build/ss_state_fanout_tb rtl/ss_state_fanout.sv rtl/tb/ss_state_fanout_tb.v
+
+      - name: Run state fanout testbench
+        run: vvp build/ss_state_fanout_tb
+
+      # The chipset register shadow on its own: the snoop, the set/clear rule,
+      # the exclusions, the load path and the replay ordering.
+      - name: Build register shadow testbench
+        run: iverilog -g2005 -Wall -o build/ss_regshadow_tb rtl/ss_regshadow.v rtl/tb/ss_regshadow_tb.v
+
+      - name: Run register shadow testbench
+        run: vvp build/ss_regshadow_tb
+
+      - name: Build save state controller testbench
+        run: |
+          iverilog -g2005 -Wall -o build/ss_ctrl_tb \
+            rtl/ss_ctrl.v rtl/ss_crc32.v rtl/ss_quiesce.v rtl/ss_serdes.v \
+            rtl/ss_dma.v rtl/ss_regshadow.v rtl/tb/ss_ctrl_tb.v
+
+      - name: Run save state controller testbench
+        run: vvp build/ss_ctrl_tb
+
+  # Native unit tests for dependency-free host modules. Separate from the ARM
+  # cross-build because these run on the CI host directly.
+  host-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run native unit tests
+        run: make -C tests

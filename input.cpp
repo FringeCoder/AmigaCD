@@ -37,6 +37,7 @@
 #include "scaler.h"
 #include "ide.h"
 #include "support/minimig/minimig_config.h"
+#include "support/lightpen/amiga_lightpen.h"
 #include "file_io.h"
 
 #define NUMDEV 30
@@ -6062,6 +6063,19 @@ int input_test(int getchar)
 										{
 											input[i].lasty = ev.value;
 										}
+									}
+
+									// AmigaCD's light pen, driven from a USB CRT gun (GunCon 2
+									// and friends). Deliberately after the grace-period handling
+									// above, so lastx/lasty are the settled on-screen position
+									// and an off-screen shot holds rather than snapping to an
+									// edge. guncal[2..3] is the X range, guncal[0..1] the Y --
+									// the same split ABS_X/ABS_Y use just above.
+									if (amiga_lightpen_usb_active())
+									{
+										amiga_lightpen_abs(input[i].lastx, input[i].lasty,
+										                   input[i].guncal[2], input[i].guncal[3],
+										                   input[i].guncal[0], input[i].guncal[1]);
 									}
 								}
 

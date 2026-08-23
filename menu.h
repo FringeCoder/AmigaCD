@@ -13,7 +13,13 @@ void ScrollLongName(void);
 
 void ProgressMessage(const char* title = 0, const char* text = 0, int current = 0, int max = 0);
 void InfoMessage(const char *message, int timeout = 2000, const char *title = "Message");
-void Info(const char *message, int timeout = 2000, int width = 0, int height = 0, int frame = 0);
+// `priority` non-zero marks a message the user asked for -- a save state
+// outcome -- as opposed to one the system volunteered, like the video mode
+// popup. A priority message holds the slot for its timeout and suppresses
+// volunteered ones, which otherwise land on top of it: freezing and releasing
+// the machine changes video timing, so a restore reliably triggers the mode
+// popup at exactly the moment its own result is being shown.
+void Info(const char *message, int timeout = 2000, int width = 0, int height = 0, int frame = 0, int priority = 0);
 void MenuHide();
 void SelectINI();
 

@@ -8,19 +8,15 @@
 # Always overwrites. The folder is scratch -- delete it whenever, it rebuilds
 # from the two core repos and a CI artifact.
 #
-# What lands where on the SD card:
+# What lands where on the SD card (see the generated WHERE-THESE-GO.txt):
 #   amigacd.rbf      -> /media/fat/_Computer/  (or wherever you keep cores)
 #   menu.rbf         -> /media/fat/            (the boot menu core)
-#   MiSTer_AmigaCD   -> /media/fat/            (needs [AmigaCD] main=MiSTer_AmigaCD
-#                                               in MiSTer.ini -- see docs/deployment.md)
-#   MiSTer           -> /media/fat/            (the SAME build, replacing the stock
-#                                               main binary)
+#   MiSTer_AmigaCD   -> /media/fat/            (needs TWO MiSTer.ini sections)
 #
-# The binary is staged under BOTH names on purpose, and they are byte-identical.
-# `main=` only redirects the AmigaCD core, so the boot menu still runs whatever
-# is at /media/fat/MiSTer -- and the Menu core's PSX SNAC OSD navigation lives in
-# userspace, so without replacing that one too the pad does nothing in the menu.
-# See docs/psx-snac-hardware.md:59.
+# The stock /media/fat/MiSTer is deliberately left alone. `main=` matches a core's
+# CONF_STR name, and the boot menu core calls itself MENU, so [MENU] main=
+# MiSTer_AmigaCD gets the SNAC pad into the boot menu without replacing the binary
+# that boots everything -- which also means update_all can keep updating it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -66,7 +62,13 @@ if [ "${1:-}" = "--binary" ]; then
                              -q '.[0].databaseId')
     fi
     if [ -z "$RUN_ID" ]; then
-        echo "MISSING  no successful CI run found for this branch" >&2
+        # The checked-out branch may have no CI of its own (or be unrelated work).
+        # develop carries the merged userspace, which is what ships.
+        RUN_ID=$(gh run list --repo "$REPO_SLUG" --workflow build --branch develop                              --status success --limit 1 --json databaseId                              -q '.[0].databaseId')
+        [ -n "$RUN_ID" ] && echo "  (no CI on this branch; using latest successful develop build)"
+    fi
+    if [ -z "$RUN_ID" ]; then
+        echo "MISSING  no successful CI run found on this branch or develop" >&2
         rc=1
     else
         tmp=$(mktemp -d)
@@ -74,13 +76,12 @@ if [ "${1:-}" = "--binary" ]; then
         elf=$(find "$tmp" -name 'MiSTer.elf' -o -name 'MiSTer' | head -1)
         if [ -n "$elf" ]; then
             SHA=$(gh run view "$RUN_ID" --repo "$REPO_SLUG" --json headSha -q '.headSha' | cut -c1-7)
-            # Same build under both names -- see the header for why the stock
-            # main binary has to be replaced too.
-            for name in MiSTer_AmigaCD MiSTer; do
-                cp -f "$elf" "$OUT/$name"
-                printf "  %-18s %9d bytes  from CI run %s (%s)\n" \
-                    "$name" "$(stat -c%s "$OUT/$name")" "$RUN_ID" "$SHA"
-            done
+            # One name only. The stock /media/fat/MiSTer stays put -- see the
+            # header, and WHERE-THESE-GO.txt for the two .ini sections that make
+            # this binary serve both the boot menu and the AmigaCD core.
+            cp -f "$elf" "$OUT/MiSTer_AmigaCD"
+            printf "  %-18s %9d bytes  from CI run %s (%s)\n" \
+                "MiSTer_AmigaCD" "$(stat -c%s "$OUT/MiSTer_AmigaCD")" "$RUN_ID" "$SHA"
         else
             echo "MISSING  no MiSTer binary in run $RUN_ID's artifacts" >&2
             rc=1
@@ -97,29 +98,44 @@ Copy to the MiSTer SD card:
   amigacd.rbf      -> /media/fat/_Computer/AmigaCD.rbf   (or wherever you keep cores)
   menu.rbf         -> /media/fat/menu.rbf
   MiSTer_AmigaCD   -> /media/fat/MiSTer_AmigaCD
-  MiSTer           -> /media/fat/MiSTer                  (replaces the stock binary)
 
-MiSTer and MiSTer_AmigaCD are the SAME build under two names. Both are needed:
-`main=` only redirects the AmigaCD core, so the boot menu keeps running
-/media/fat/MiSTer, and the Menu core's PSX SNAC pad navigation lives in
-userspace -- without replacing that one the pad does nothing in the menu.
+Do NOT overwrite /media/fat/MiSTer. Leave the stock binary alone -- see below.
 
-/media/fat/MiSTer.ini needs both of these:
+/media/fat/MiSTer.ini:
+
+  [MENU]
+  main=MiSTer_AmigaCD
 
   [AmigaCD]
   main=MiSTer_AmigaCD
 
   snac_psx=1
 
-The first selects our binary for the AmigaCD core. The second enables the pad in
-the boot menu, and is read by whichever binary is running at boot.
+Two sections, one binary. `main=` matches the core's CONF_STR name, and the boot
+menu core calls itself MENU -- so pointing [MENU] at our binary gets the SNAC pad
+working in the boot menu WITHOUT replacing the stock main binary. update_all can
+then update /media/fat/MiSTer as often as it likes; MiSTer_AmigaCD is in no
+Downloader database, so nothing touches it.
 
-Two traps:
+That is also the safe way round: if our binary ever misbehaves, delete one .ini
+line and you are back on stock, rather than having overwritten the binary that
+boots everything. No restart loop -- once running as MiSTer_AmigaCD, the app name
+matches main= and the check falls through.
 
-- update_all OVERWRITES menu.rbf with the stock one, silently dropping SNAC pad
-  support from the boot menu until you copy it back.
-- SW[1] on the DE10-Nano must be OFF. It steals three of the user port's pins
-  and fails silently.
+snac_psx=1 enables the pad in the boot menu. AmigaCD's own SNAC settings are NOT
+here -- they live in AmigaCD.cfg via the OSD, so they can differ per saved config.
+
+update_all AND menu.rbf: there is no way to protect it. Downloader filters are
+category/core level only (filter = console !snes, in downloader.ini under
+[mister]); there is no per-file exclusion, and the boot menu must be named
+menu.rbf so renaming is out. Keep a spare copy under a name Downloader does not
+know and restore it after any update that touches the Menu core:
+
+  cp /media/fat/menu.rbf /media/fat/menu_snac.rbf      # once, now
+  cp /media/fat/menu_snac.rbf /media/fat/menu.rbf      # after each update_all
+
+SW[1] on the DE10-Nano must be OFF. It hands three of the user port's pins to
+HDMI audio and the pad simply never answers, with no error.
 
 The binary is unstripped: same code as a stripped build, ~200 KB larger, and a
 crash under gdb gives a named backtrace instead of `?? ()`.
