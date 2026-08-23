@@ -16,7 +16,7 @@
 // 1.1 added Denise's 256-entry colour table between the register shadow and
 // chip RAM. A 1.0 file has a different core_words and every section after the
 // shadow at a different offset, so it must be refused rather than misread.
-#define SS_VERSION  0x00010002u   // major 1, minor 2
+#define SS_VERSION  0x00010003u   // major 1, minor 3
 
 // 12 MB slot / 4 bytes per word. The slot grew from 4 MB when Zorro II fast
 // RAM joined the payload: 2 MB chip + 1.5 MB slow + 8 MB fast is 11.5 MB, and

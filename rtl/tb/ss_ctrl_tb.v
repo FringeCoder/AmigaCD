@@ -865,7 +865,7 @@ initial begin
 	@(negedge clk);
 
 	check("magic",      ddr_word(2), 32'h53534341);
-	check("version",    ddr_word(3), 32'h00010002);
+	check("version",    ddr_word(3), 32'h00010003);
 	check("core_words", ddr_word(4), CORE_WORDS);
 	check("host_words", ddr_word(5), 32'd0);
 	check("host_crc32", ddr_word(7), 32'd0);
@@ -1150,42 +1150,41 @@ initial begin
 	// controller recomputes over the live ROM no longer matches the one stored in
 	// the payload.
 	//
-	// The fingerprint is currently ADVISORY. On hardware it cannot tell "wrong
-	// ROM" from "same ROM, scanned twice" -- two saves nine seconds apart over
-	// unchanged memory produced different values -- so it was refusing every
-	// restore. Until the scan is trustworthy the mismatch is recorded and
-	// reported, and the restore runs.
+	// The fingerprint is a GATE. It spent a while advisory, because the scan
+	// could not tell "wrong ROM" from "same ROM, scanned twice" -- two saves
+	// nine seconds apart over unchanged memory disagreed, so a gate refused
+	// every restore. That was the ss_dma second-read bug; with it fixed the
+	// live fingerprint has matched the file on hardware every time since,
+	// across cold reloads included.
 	//
-	// So this case now asserts the opposite of what it used to: the restore
-	// completes, and dbg_kick_warn says the ROM did not match. When the scan is
-	// fixed, this reverts to expecting FAIL_KICK (code 5) and the refusal.
+	// So this asserts the refusal again: FAIL_KICK, no chip RAM written, and
+	// the machine handed back running.
 	restore_window();
 	for (i = 0; i < CHIP_WORDS; i = i + 1) chip_mem[i] = 16'hBAD0 + i[15:0];
 	for (i = 0; i < SLOW_WORDS; i = i + 1) slow_mem[i] = 16'hBAD8 + i[15:0];
 	reset_observers();
 	rom_alt = 1;
 	run_load();
-	check("wrong kickstart no longer refuses", {31'd0, load_fail},      32'd0);
-	check("wrong kickstart restores",          {31'd0, load_ok},        32'd1);
+	check("wrong kickstart refuses",           {31'd0, load_fail},      32'd1);
+	check("wrong kickstart does not restore",  {31'd0, load_ok},        32'd0);
+	check("wrong kickstart reports FAIL_KICK", {28'd0, load_fail_code}, 32'd5);
 	check("wrong kickstart is reported",       {31'd0, dbg_kick_warn},  32'd1);
 	check("wrong kickstart releases the machine", freeze_fall_count,    freeze_rise_count);
-	// It is no longer a refusal, so chip RAM IS written: the state loads. The
-	// poison value would mean the restore had quietly done nothing, which is
-	// the other way this could have been got wrong.
-	check("wrong kickstart still restores chip RAM",
-	      {16'd0, chip_mem[0]}, 32'h0000D000);
+	// A refusal must leave memory alone. The poison survives, which is what
+	// separates "refused" from "restored something and then gave up".
+	check("wrong kickstart leaves chip RAM alone",
+	      {16'd0, chip_mem[0]}, 32'h0000BAD0);
 	check("wrong kickstart writes no DDR3",     ddr_write_count,      32'd0);
 	check("wrong kickstart froze once",         freeze_rise_count,    32'd1);
 	// The scan post-mortem in dbg_idx[7:0], proven here rather than trusted on
 	// hardware. This refusal ran the scan to completion, so the port answered.
 	check("wrong kickstart counted acks",
 	      {31'd0, (dbg_idx[7:0] != 8'd0)},                            32'd1);
-	// The gate is still visited -- it is where the comparison happens and where
-	// dbg_kick_warn is raised -- but it no longer ends the restore, so the
-	// release follows it. When the fingerprint is trustworthy again and the
-	// refusal comes back, the second check flips to 0.
+	// The gate is visited and it ENDS the restore, so S_L_RELEASE is never
+	// reached: a refused restore releases the machine through the refusal path
+	// rather than the completion one. This pair is what tells those apart.
 	check("diag saw the kickstart gate", {31'd0, dbg_seen[DBG_S_L_KICK_CHK]}, 32'd1);
-	check("diag saw the release too",    {31'd0, dbg_seen[DBG_S_L_RELEASE]},  32'd1);
+	check("refusal skipped the release", {31'd0, dbg_seen[DBG_S_L_RELEASE]},  32'd0);
 
 	// Gate order: the payload CRC is a verdict on the file and costs the machine
 	// nothing, while the fingerprint costs a full ROM scan over the running

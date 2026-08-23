@@ -1973,6 +1973,18 @@ static void kbd_fifo_poll()
 // them and is the only thing that maps or fills them.
 static void *ss_base_win[4] = {};
 
+// Set when the user asks for a save, cleared when one is written or after the
+// core has had long enough that it is not coming. All it does is speed the
+// poll below up while a save is in flight -- see there for why that matters.
+static int ss_save_expected = 0;
+static unsigned long ss_save_deadline = 0;
+
+void ss_expect_save(void)
+{
+	ss_save_expected = 1;
+	ss_save_deadline = GetTimer(5000);
+}
+
 // Hands the host half of a save state back to whoever owns it. Only the CD
 // drive has one today -- see akiko_cd32.h for why it cannot live in the core
 // payload.
@@ -2069,9 +2081,21 @@ int process_ss(const char *rom_name, int enable)
 
 	if (!enabled) return 0;
 
+	// Normally once a second. After a save has been asked for, ten times a
+	// second until it lands.
+	//
+	// The core captures into its DDR3 window in a fifth of a second and says
+	// "Save state: saved"; this loop is what actually writes the file, and at
+	// a one-second tick the gap between those two moments is up to a second of
+	// looking finished while nothing is on the card. Resetting in that window
+	// silently keeps the OLD save, and the next restore tests a stale file --
+	// which is exactly what happened on hardware and cost an evening chasing a
+	// fix that had already worked.
 	static unsigned long ss_timer = 0;
 	if (ss_timer && !CheckTimer(ss_timer)) return 0;
-	ss_timer = GetTimer(1000);
+	ss_timer = GetTimer(ss_save_expected ? 100 : 1000);
+
+	if (ss_save_expected && CheckTimer(ss_save_deadline)) ss_save_expected = 0;
 
 	fileTYPE f = {};
 	for (int i = 0; i < 4; i++)
@@ -2135,6 +2159,7 @@ int process_ss(const char *rom_name, int enable)
 						}
 					}
 
+					ss_save_expected = 0;
 					MenuHide();
 					Info("Saving the state", 500);
 

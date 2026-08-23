@@ -282,6 +282,9 @@ int process_ss(const char *rom_name, int enable = 1);
 // Applies the host half of a save state -- today, the CD drive position.
 // Call after triggering a restore; a file without a host block is a no-op.
 void ss_apply_host_state(int slot);
+// Tells the save state poller a save is coming, so it writes the file
+// promptly instead of up to a second later. See its definition.
+void ss_expect_save(void);
 
 char is_f12_mod_needed();
 void diskled_on();

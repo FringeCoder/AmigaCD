@@ -6563,6 +6563,11 @@ void HandleUI(void)
 				// stays set. Clearing it again here is housekeeping -- it keeps
 				// the persisted status word clean so a later core load does not
 				// present a fresh edge -- not a safety property.
+				// The core reports "saved" long before the file exists -- the
+				// poller writes it. Ask that poller to hurry, so a reset
+				// straight after the toast cannot leave the previous save on
+				// the card pretending to be this one.
+				ss_expect_save();
 				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
 				user_io_status_set("[51]", 1);
 				user_io_status_set("[51]", 0);
@@ -7267,6 +7272,12 @@ void HandleUI(void)
 				// so a set/clear pair here is one save, and a bit left high
 				// cannot re-arm. Everything after this is RTL: quiesce, freeze,
 				// capture, then the host poller writes the window to disk.
+				// The core reports "saved" long before the file exists -- the
+				// poller writes it. Ask that poller to hurry, so a reset
+				// straight after the toast cannot leave the previous save on
+				// the card pretending to be this one, which is exactly what
+				// happened on hardware.
+				ss_expect_save();
 				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
 				user_io_status_set("[51]", 1);
 				user_io_status_set("[51]", 0);

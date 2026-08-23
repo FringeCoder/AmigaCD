@@ -293,70 +293,15 @@ static void ss_peek_service(void)
 		ss_diag("  geometry: htotal %u  varbeamen %u  harddis %u",
 		        (unsigned)(w[51] & 0x1FF), (unsigned)((w[51] >> 9) & 1),
 		        (unsigned)((w[51] >> 10) & 1));
-		// Latched since the last restore STARTED, so this names whatever
-		// rebooted the Amiga as a result of that restore. All three land on
-		// the same reset wire in minimig.v and are indistinguishable from the
-		// outside: the game just restarts from the beginning.
-		ss_diag("  reset since restore: %s%s%s%s",
-		        (w[25] & 1) ? "HOST(cpurst) " : "",
-		        (w[25] & 2) ? "sys_reset " : "",
-		        (w[25] & 4) ? "CPU-RESET-instruction " : "",
-		        (w[25] & 7) ? "" : "(none)");
-		if (w[25] & 4)
-			ss_diag("  first RESET instruction at PC $%04X%04X", w[27], w[26]);
-		// The fault that put the CPU where it should not be. Vector offsets:
-		// 08 bus error, 0C address error, 10 illegal, 14 divide by zero,
-		// 20 privilege violation, 2C line-F. Interrupts ($60+) are counted
-		// instead, so a zero count means none were ever taken.
-		{
-			const char *what = "?";
-			switch (w[28]) {
-				case 0x00: what = "none";                break;
-				case 0x08: what = "BUS ERROR";           break;
-				case 0x0C: what = "ADDRESS ERROR";       break;
-				case 0x10: what = "ILLEGAL INSTRUCTION"; break;
-				case 0x14: what = "DIVIDE BY ZERO";      break;
-				case 0x20: what = "PRIVILEGE VIOLATION"; break;
-				case 0x28: what = "LINE-A";              break;
-				case 0x2C: what = "LINE-F";              break;
-			}
-			// All of these freeze at the reboot, so they describe the window
-			// between the restore and the reset and nothing after it. A vector
-			// of $00 with a nonzero interrupt count means the machine took
-			// interrupts, faulted at nothing, and still reset -- i.e. the code
-			// executed RESET on purpose.
-			ss_diag("  first fault: vector $%02X (%s) at PC $%04X%04X  SR %04X",
-			        w[28], what, w[30], w[29], w[32]);
-			ss_diag("  before the reset: %u interrupts, %u frames",
-			        (unsigned)(w[31] & 0xFF), (unsigned)(w[24] & 0xFF));
-			// Live VBR against what the state vector recorded. This game
-			// contains movec-to-VBR code and its level-3 vector at physical
-			// $6C points mid-routine into ROM, which a running machine could
-			// not survive if it were really using it.
-			ss_diag("  live: VBR $%04X%04X  SR %04X", w[34], w[33], w[35]);
-			// Where the first interrupt actually went. The vector at $6C is
-			// $00F8679A, which disassembles as the middle of a ROM routine --
-			// if the entry below reads that, the CPU really did use it and the
-			// question becomes why the running machine survives the same
-			// dispatch. Anything else means the vector fetch itself is wrong.
-			if (w[36])
-				ss_diag("  first interrupt: vector $%02X from PC $%04X%04X -> entry $%04X%04X",
-				        w[36], w[38], w[37], w[40], w[39]);
-			else
-				ss_diag("  first interrupt: none recorded");
 			// Free-running, so these describe normal running rather than a
 			// restore. A level-3 count that stays at zero while the game plays
 			// means the machine never takes that interrupt, and the restore
 			// introduces it.
-			ss_diag("  since power-on: %u level-3 interrupts, %u interrupts total",
-			        w[41], w[42]);
 			// The most recent NORMAL level-3 dispatch. If this matches the
 			// entry recorded after a restore, the same handler runs both times
 			// and the restore differs only in the register context it hands
 			// it. If it differs, the vector the CPU fetches is not the one in
 			// the memory we peek.
-			ss_diag("  last level-3: from PC $%04X%04X -> entry $%04X%04X",
-			        w[46], w[45], w[44], w[43]);
 		}
 
 		if (!(w[9] & 1)) {

@@ -459,7 +459,15 @@ localparam SS_MAGIC   = 32'h53534341;
 // fast RAM after that when the machine has any. Same argument, same
 // consequence: a 1.1 file read as 1.2 would land the shadow on top of the
 // colour table.
-localparam SS_VERSION = 32'h00010002;
+// 1.3: nothing about the LAYOUT changed. The capture did. Every file written
+// before the shadow settle fix holds the chipset register table shifted by one
+// entry -- each register carrying its neighbour's value -- and restoring one
+// puts BEAMCON0 back with VARBEAMEN set and HTOTAL at zero, which gives the
+// beam counter no line length, stops vertical blank entirely and hangs the
+// Amiga with a black screen. The format cannot tell those files apart from
+// good ones, so the version has to, and a refusal the user can read beats a
+// machine that stops.
+localparam SS_VERSION = 32'h00010003;
 
 // Sized copies of CORE_WORDS for the comparisons on the restore path, so a
 // 24-bit counter and a 32-bit header word are each compared against something
@@ -2135,17 +2143,23 @@ always @(posedge clk) begin
 		// the freeze, and the machine resumes where it was stopped, exactly as
 		// it does at the end of a save.
 		S_L_KICK_CHK: begin
-			// ADVISORY, not a gate. The fingerprint cannot currently tell "wrong
-			// ROM" from "same ROM, scanned twice": two saves nine seconds apart
-			// on unchanged memory produced different values, so the check was
-			// refusing every restore. It is recorded and reported -- kick_warn
-			// rides out on the diagnostics -- and the restore proceeds.
+			// A GATE again. It was downgraded to advisory when the scan was
+			// returning different fingerprints for the same ROM -- two saves
+			// nine seconds apart on unchanged memory disagreed, so a gate
+			// refused every restore. That was the ss_dma second-read bug, and
+			// with it fixed the fingerprint has matched the file on hardware
+			// every time since, including across cold reloads.
 			//
-			// This is a deliberate loss of a real safety check, and it stays
-			// only until the scan is trustworthy again: with it advisory, a
-			// state made under a genuinely different Kickstart will load and
-			// the machine will do whatever that implies.
-			if (kick_crc != file_kick_crc) kick_warn <= 1'b1;
+			// So the check earns its keep again: a state made under a
+			// different Kickstart restores a machine whose ROM does not match
+			// the memory image it is being given, and refusing is the only
+			// useful answer. kick_warn still rides out on the diagnostics for
+			// anyone reading them.
+			if (kick_crc != file_kick_crc) begin
+				kick_warn <= 1'b1;
+				load_reject(FAIL_KICK);
+			end
+			else begin
 
 			// The machine is already stopped -- the freeze went up before the
 			// fingerprint, because the scan is not safe to run against a live
@@ -2155,6 +2169,7 @@ always @(posedge clk) begin
 			ser_load_start <= 1'b1;
 			pay_idx        <= ST_FIRST_24;
 			state          <= S_L_ST_FETCH;
+			end
 		end
 
 		// The freeze the whole restore runs under. It is raised once, here,
