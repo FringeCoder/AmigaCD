@@ -1,6 +1,8 @@
 #ifndef AMIGA_LIGHTPEN_H
 #define AMIGA_LIGHTPEN_H
 
+#include <stdint.h>
+
 // The Amiga light pen, driven from whatever pointing device is to hand.
 //
 // The core side takes a raster position over two UIO commands and latches it;
@@ -26,5 +28,27 @@ void amiga_lightpen_abs(int x, int y, int xmin, int xmax, int ymin, int ymax);
 // Non-zero when a USB light gun should be driving the pen: an AmigaCD core is
 // running and a CRT light gun is connected.
 int  amiga_lightpen_usb_active(void);
+
+// The trigger.
+//
+// A light pen is two things to the Amiga and only one of them is the position:
+// programs read the raster latch to find out WHERE the pen is, and a joystick
+// fire button on the same port to find out whether it has been FIRED. Agnus has
+// no notion of a gun button, so there is nothing to send it to -- the trigger
+// has to arrive as an ordinary fire button or it does not arrive at all.
+//
+// It also cannot come through the normal button mapping. A light gun is
+// recognised by VID/PID and never gets a .map file, so with no explicit route
+// the trigger goes nowhere: aiming works and shooting does nothing, which is
+// exactly what a GunCon 2 did on hardware.
+//
+// `player` is zero-based, as build_joy_mask() counts (input[].num is 1-based,
+// so subtract one). `code` is the raw EV_KEY code from the device; the module
+// decides which Amiga button it becomes so callers need no table.
+void     amiga_lightpen_button(int player, int code, int pressed);
+
+// The buttons currently held, as JOY_* bits, to be OR'd into the port's mask.
+// Zero for any player with no gun on it, so this is safe to add unconditionally.
+uint32_t amiga_lightpen_joy_mask(int player);
 
 #endif

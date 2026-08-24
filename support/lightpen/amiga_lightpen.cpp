@@ -1,4 +1,6 @@
 #include <stdint.h>
+#include <stdio.h>
+#include <linux/input.h>
 #include "../../spi.h"
 #include "../../user_io.h"
 #include "../../input.h"
@@ -60,4 +62,74 @@ int amiga_lightpen_usb_active(void)
 	// unambiguous enough to act on. The SNAC gun keeps its own OSD mode because
 	// that one shares the user port and genuinely needs arbitrating.
 	return is_amigacd() && input_has_lightgun();
+}
+
+// ---------------------------------------------------------------- the trigger
+//
+// Held state per player, in JOY_* bits, OR'd into that port's mask by
+// input.cpp after build_joy_mask(). Kept here rather than in input.cpp so the
+// SNAC gun can use the same route when its trigger is wired up: both guns then
+// press the same button on the same port and behave identically to the guest.
+static uint32_t lp_buttons[NUMPLAYERS];
+
+void amiga_lightpen_button(int player, int code, int pressed)
+{
+	if (player < 0 || player >= NUMPLAYERS) return;
+
+	// Which Amiga button this is. A gun has one trigger that matters and
+	// usually one or two auxiliary buttons; the trigger becomes fire, the rest
+	// become the second button, which is what an Amiga two-button joystick
+	// offers and as much as any light gun title asks for.
+	//
+	// Three code families are accepted because light guns disagree about which
+	// they use: mouse-style BTN_LEFT/RIGHT, joystick-style BTN_TRIGGER/THUMB,
+	// and gamepad-style BTN_SOUTH/EAST. A GunCon 2 reports in the gamepad
+	// range -- its KEY bitmap on hardware has bits at 0x130 and up -- but the
+	// SNAC gun and other USB guns need not agree, and guessing one family
+	// wrong costs another build-and-deploy cycle to find out.
+	uint32_t bit;
+	switch (code)
+	{
+		case BTN_LEFT:
+		case BTN_TRIGGER:
+		case BTN_SOUTH:
+			bit = JOY_BTN1;
+			break;
+
+		case BTN_RIGHT:
+		case BTN_MIDDLE:
+		case BTN_THUMB:
+		case BTN_THUMB2:
+		case BTN_EAST:
+		case BTN_NORTH:
+		case BTN_WEST:
+			bit = JOY_BTN2;
+			break;
+
+		default:
+			// Say so once per code rather than silently dropping it: if a gun
+			// turns out to report its trigger somewhere unexpected, this line
+			// in the log is the whole diagnosis.
+			{
+				static int moaned[8];
+				static int moans;
+				int seen = 0;
+				for (int i = 0; i < moans; i++) if (moaned[i] == code) seen = 1;
+				if (!seen && moans < (int)(sizeof(moaned) / sizeof(moaned[0])))
+				{
+					moaned[moans++] = code;
+					printf("lightpen: gun button 0x%03X is not routed to the Amiga\n", code);
+				}
+			}
+			return;
+	}
+
+	if (pressed) lp_buttons[player] |= bit;
+	else         lp_buttons[player] &= ~bit;
+}
+
+uint32_t amiga_lightpen_joy_mask(int player)
+{
+	if (player < 0 || player >= NUMPLAYERS) return 0;
+	return lp_buttons[player];
 }
