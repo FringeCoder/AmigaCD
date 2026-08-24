@@ -1999,8 +1999,10 @@ static void kbd_fifo_poll()
 static void *ss_base_win[4] = {};
 
 // Set when the user asks for a save, cleared when one is written or after the
-// core has had long enough that it is not coming. All it does is speed the
-// poll below up while a save is in flight -- see there for why that matters.
+// core has had long enough that it is not coming. It speeds the poll below up
+// while a save is in flight -- see there for why that matters -- and it is
+// also what turns a save that never reached the card into a message the user
+// can read, instead of nothing at all.
 static int ss_save_expected = 0;
 static unsigned long ss_save_deadline = 0;
 
@@ -2120,7 +2122,24 @@ int process_ss(const char *rom_name, int enable)
 	if (ss_timer && !CheckTimer(ss_timer)) return 0;
 	ss_timer = GetTimer(ss_save_expected ? 100 : 1000);
 
-	if (ss_save_expected && CheckTimer(ss_save_deadline)) ss_save_expected = 0;
+	// The deadline only expires when no write happened: the writer below
+	// clears ss_save_expected before it opens the file, so a slow write cannot
+	// trip this.
+	//
+	// Saying so matters more than it looks. "Save state: saved" comes from the
+	// CORE and means its capture into the DDR3 window finished; the file is
+	// written here, later, and only when the window's counter word differs
+	// from the last one seen. When that does not happen the user has been told
+	// the save succeeded and nothing is on the card -- and the next restore
+	// silently loads the PREVIOUS state and looks like it worked. Measured on
+	// hardware before this existed.
+	if (ss_save_expected && CheckTimer(ss_save_deadline))
+	{
+		ss_save_expected = 0;
+		printf("process_ss: save was announced but no window updated - nothing written
+");
+		Info("Save state NOT written", 3000);
+	}
 
 	fileTYPE f = {};
 	for (int i = 0; i < 4; i++)

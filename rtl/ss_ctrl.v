@@ -205,7 +205,7 @@ module ss_ctrl
 	// instance below for why the two differ, and ss_quiesce's header for why
 	// three frames was not enough for a save on real hardware.
 	parameter [7:0] SAVE_FRAMES = 8'd120,   // ~2 s at 60 Hz
-	parameter [7:0] LOAD_FRAMES = 8'd30,
+	parameter [7:0] LOAD_FRAMES = 8'd120,   // was 30; see the instance below
 
 	// Custom chipset register shadow entries carried in the payload. 256 in the
 	// machine -- every even address $000-$1FE. A parameter so ss_ctrl_tb can
@@ -649,11 +649,28 @@ reg restore_busy;
 // per-slot request rather than "audio enabled", so gaps exist -- there are just
 // not many of them inside three frames.
 //
-// The structural fix is better than either number and is not this: wait for the
-// blitter, disk and audio WITHOUT parking the CPU, and park only at the end for
-// cpu_boundary, which the CPU reaches within one instruction. That removes the
-// drift instead of trading against it, and it is a change to ss_quiesce rather
-// than to a parameter. Worth doing if half a second still refuses.
+// HALF A SECOND STILL REFUSED. Measured on hardware 2026-08-24: eight restores
+// timed out at LOAD_FRAMES = 30, every one of them stuck at S_L_FREEZE with
+// freeze never asserting, against zero save timeouts in the same session at
+// 120. Both directions wait on the same `quiet`, so there was never a reason
+// for a restore to find its gap sooner than a save -- the machine is doing the
+// same things either way. The limits are equal now.
+//
+// The argument for keeping the load limit small was drift, and it does not
+// survive its own reasoning: drift only matters to a REFUSED restore, since a
+// successful one overwrites all of memory and replays the whole chipset. A
+// refusal sends the user back to press again, so five refusals at thirty
+// frames park the 68k longer in total, in five bursts, than one wait that
+// succeeds.
+//
+// The structural fix is still better than either number and is still not this:
+// wait for the blitter, disk and audio WITHOUT parking the CPU, and park only
+// at the end for cpu_boundary, which the CPU reaches within one instruction.
+// That removes the drift instead of trading against it. It is not a parameter
+// change -- ss_arm is raised from restore_busy today, so the CPU is parked for
+// the whole wait, and moving that means making the freeze atomic with the
+// instant `quiet` is observed rather than one cycle behind it. Worth doing if
+// two seconds also refuses, and worth doing carefully.
 // Parameters rather than localparams so ss_ctrl_tb.v can shrink them: the
 // wedged-machine cases there have to drive the limit to a timeout, and pulsing
 // 120 frames per case to do it would buy nothing but simulation time.
@@ -665,11 +682,11 @@ ss_quiesce quiesce
 	// SDRAM CPU port answered nothing until the machine itself was stopped,
 	// which is the condition every other user of this port has always had.
 	.req(save_busy || restore_busy || peek_busy),
-	// A peek gets the save's budget, not the restore's. `quiet` requires audio
-	// DMA to be idle, and a game with continuous music only offers gaps every
-	// so often: a save waits up to 120 frames and finds one, a restore waits 3
-	// because by then the machine is already stopped. A peek that inherited
-	// the restore's 3 frames gave up every single time on hardware.
+	// All three get the same budget now. `quiet` requires audio DMA to be idle
+	// and a game with continuous music only offers gaps every so often, which
+	// is as true of a restore and a peek as it is of a save -- a peek that once
+	// inherited the restore's three frames gave up every single time on
+	// hardware, and the restore's thirty were not enough either.
 	.frame_limit((save_busy || peek_busy) ? SAVE_FRAMES : LOAD_FRAMES),
 	.blit_busy(blit_busy), .disk_busy(disk_busy), .audio_busy(audio_busy),
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),

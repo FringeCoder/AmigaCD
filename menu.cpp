@@ -355,6 +355,53 @@ static int minimig_ss_blocked()
 	return (fastram >= 4) || !(minimig_config.cpu & 0x03);
 }
 
+// Ask the core for a save, from either menu.
+//
+// Both save rows used to raise status[51] themselves, and only the AmigaCD one
+// armed process_ss() first. The other did not, so a save pressed from the
+// Minimig System page was captured into the DDR3 window by the core, announced
+// as "Save state: saved" -- that toast is the CORE's, and it means the capture
+// finished, not that anything reached the card -- and then never written,
+// because the host poller only writes when the window's counter word differs
+// from the last one it saw and nothing had reset that. Measured on hardware:
+// core says saved at t=2453, no "Saving the state" from the writer ever
+// follows, no file on the card, and the next restore quietly loads the
+// PREVIOUS save and looks like it worked.
+//
+// Arming is also what resets ss_cnt[] to 0xFFFFFFFF, so it is not optional
+// even when the poller is already enabled from an earlier save this session.
+//
+// Returns 0 without asking the core for anything when there is no name to save
+// under, because a capture nothing can write is worse than a refusal: it looks
+// like it worked.
+static int minimig_ss_request_save()
+{
+	const char *name = amigacd_ss_name();
+	if (!name || !name[0])
+	{
+		Info("No disc or HDF - cannot name the save", 2500);
+		return 0;
+	}
+
+	// Idempotent: re-maps the same four windows, reloads them from the file on
+	// disk and re-stamps the counter word.
+	process_ss(name, 1);
+
+	// The core reports "saved" long before the file exists -- the poller writes
+	// it. Ask that poller to hurry, so a reset straight after the toast cannot
+	// leave the previous save on the card pretending to be this one.
+	ss_expect_save();
+
+	// The core edge-detects this in RTL (Minimig.sv ss_save_edge), so a
+	// set/clear pair is one save and a bit left high cannot re-arm. Clearing it
+	// again is housekeeping on the persisted status word, not a safety
+	// property.
+	user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+	user_io_status_set("[51]", 1);
+	user_io_status_set("[51]", 0);
+	return 1;
+}
+
 #define DPAD_NAMES 4
 #define DPAD_BUTTON_NAMES 12  //DPAD_NAMES + 6 buttons + start/select
 
@@ -6713,21 +6760,11 @@ void HandleUI(void)
 			}
 			else if (menusub == 12 && select && !minimig_ss_blocked())
 			{
-				// Raise the save request. status[51] is edge-triggered in the
-				// core: Minimig.sv latches the 0->1 transition into a pending
-				// bit and clears that bit as soon as ss_ctrl accepts it, so one
-				// press means exactly one save no matter how long the bit
-				// stays set. Clearing it again here is housekeeping -- it keeps
-				// the persisted status word clean so a later core load does not
-				// present a fresh edge -- not a safety property.
-				// The core reports "saved" long before the file exists -- the
-				// poller writes it. Ask that poller to hurry, so a reset
-				// straight after the toast cannot leave the previous save on
-				// the card pretending to be this one.
-				ss_expect_save();
-				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
-				user_io_status_set("[51]", 1);
-				user_io_status_set("[51]", 0);
+				// Everything this needs -- arming the writer included -- is in
+				// the shared helper. This row used to do the raise on its own
+				// and skip the arm, which is how a save could be announced and
+				// never written.
+				minimig_ss_request_save();
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
 			else if (menusub == 13)
@@ -7402,42 +7439,21 @@ void HandleUI(void)
 			}
 			else if (menusub == 5 && select && !minimig_ss_blocked()) // Save state
 			{
-				// Arm the host poller, here and nowhere earlier.
+				// Arming the host poller happens here and nowhere earlier.
 				//
 				// process_ss() only ever armed itself from
-				// user_io_file_tx(..., opensave) (user_io.cpp:2877) or the
-				// arcade MRA path (:1613). Minimig uploads its Kickstart by a
-				// different route and reaches neither, so the poller's enabled
-				// flag stayed 0, the once-a-second call at :3870 returned
-				// immediately, and a state the core wrote into its DDR3 window
-				// was never persisted.
+				// user_io_file_tx(..., opensave) or the arcade MRA path.
+				// Minimig uploads its Kickstart by a different route and
+				// reaches neither, so the poller's enabled flag stayed 0 and a
+				// state the core wrote into its DDR3 window was never
+				// persisted. Arming from the CD mount path instead was tried
+				// and the core would not boot -- that path runs during core
+				// init. The user's explicit save press is the latest possible
+				// moment, when everything is up.
 				//
-				// Arming it from the CD mount path instead was tried and the
-				// core would not boot: that path runs during core init
-				// (ide.cpp:1161 -> cdrom_parse, reached from
-				// ApplyConfiguration via hdd_open). Doing it on the user's
-				// explicit save press is the latest possible moment, when
-				// everything is up -- and if it ever does misbehave it can only
-				// affect a save, never stop the core booting.
-				//
-				// Idempotent: repeat presses re-map the same four windows.
-				// Named after the mounted disc so states are per-game.
-				if (amigacd_ss_name()[0])
-					process_ss(amigacd_ss_name(), 1);
-
-				// The core edge-detects this in RTL (Minimig.sv ss_save_edge),
-				// so a set/clear pair here is one save, and a bit left high
-				// cannot re-arm. Everything after this is RTL: quiesce, freeze,
-				// capture, then the host poller writes the window to disk.
-				// The core reports "saved" long before the file exists -- the
-				// poller writes it. Ask that poller to hurry, so a reset
-				// straight after the toast cannot leave the previous save on
-				// the card pretending to be this one, which is exactly what
-				// happened on hardware.
-				ss_expect_save();
-				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
-				user_io_status_set("[51]", 1);
-				user_io_status_set("[51]", 0);
+				// See minimig_ss_request_save(): it arms, asks, and refuses
+				// rather than pressing on when there is no name to save under.
+				minimig_ss_request_save();
 				// Close the OSD rather than returning to the Settings page.
 				//
 				// The outcome arrives as a toast ~250 ms later, and Info()
