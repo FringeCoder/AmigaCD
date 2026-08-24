@@ -230,7 +230,17 @@ char is_menu()
 static int is_x86_type = 0;
 char is_x86()
 {
-	if (!is_x86_type) is_x86_type = strcasecmp(orig_name, "AO486") ? 2 : 1;
+	if (!is_x86_type)
+	{
+		if (!strcasecmp(orig_name, "AO486") ||
+		    !strcasecmp(orig_name, "PC110") ||
+		    !strcasecmp(orig_name, "Z486") ||
+		    !strcasecmp(orig_name, "Z386")
+		   )
+			is_x86_type = 1;
+		else
+			is_x86_type = 2;
+	}
 	return (is_x86_type == 1);
 }
 
@@ -276,12 +286,27 @@ char is_neogeo_cd() {
 static int is_minimig_type = 0;
 char is_minimig()
 {
-	// Prefix-match so renamed CONF_STR variants ("MinimigCD" for our CD32+CDTV
-	// fork, "AmigaCD" for the simplified console variant, etc.) still satisfy
-	// the Minimig-specific code paths gated below.
-	if (!is_minimig_type) is_minimig_type =
-		(!strncasecmp(orig_name, "minimig", 7) || !strncasecmp(orig_name, "amigacd", 7)) ? 1 : 2;
-	return (is_minimig_type == 1);
+	// Two questions in one call. Returns 0 for a non-Minimig core, 1 for a
+	// Minimig-family core, 2 for one that also carries the Akiko/CDTV
+	// hardware.
+	//
+	// Prefix-match on the name so renamed CONF_STR variants ("MinimigCD" for
+	// the CD32+CDTV fork, "AmigaCD" for the console variant) still satisfy the
+	// Minimig-specific code paths. Upstream exact-matches two names, which
+	// would leave every one of ours unrecognised.
+	//
+	// The CD hardware is asked for rather than inferred from the name:
+	// hps_ext.v answers 1 to the first word of UIO_GET_VMODE when the core has
+	// the bridges in it. That is what gates the CD polls, so a core built
+	// without them stays quiet instead of talking to nothing.
+	if (!is_minimig_type)
+	{
+		is_minimig_type =
+			(!strncasecmp(orig_name, "minimig", 7) || !strncasecmp(orig_name, "amigacd", 7)) ? 1 : 2;
+		if (is_minimig_type == 1 && spi_uio_cmd(UIO_GET_VMODE) == 1) is_minimig_type = 3;
+	}
+
+	return (is_minimig_type == 1) ? 1 : (is_minimig_type == 3) ? 2 : 0;
 }
 
 // Bring-up shim, see is_amigacd(). Testing aid; delete the file once running a
@@ -1747,7 +1772,7 @@ void user_io_init(const char *path, const char *xml)
 		if (xml && isXmlName(xml) == 1) arcade_check_error();
 
 		char cfg_errs[512];
-		if (cfg_check_errors(cfg_errs, sizeof(cfg_errs)))
+		if (cfg.sanity_check && cfg_check_errors(cfg_errs, sizeof(cfg_errs)))
 		{
 			Info(cfg_errs, 5000);
 			sleep(5);
@@ -3344,13 +3369,16 @@ void user_io_poll()
 		ide_io(1, (sd_req >> 3) & 7);
 		if (sd_req & 0x0100) ide_cdda_send_sector();
 		UpdateDriveStatus();
-		akiko_cd32_poll();
-		cdtv_cd_poll();
-		// Watch the tray when the physical drive is armed: mount on insert,
-		// unmount on eject. Ordered after the bridges so a mount made here is
-		// seen by their mediachange handling on the next poll rather than
-		// mid-iteration.
-		physical_disc_autoboot_poll();
+		if (is_minimig() == 2)
+		{
+			akiko_cd32_poll();
+			cdtv_cd_poll();
+			// Watch the tray when the physical drive is armed: mount on
+			// insert, unmount on eject. Ordered after the bridges so a mount
+			// made here is seen by their mediachange handling on the next poll
+			// rather than mid-iteration.
+			physical_disc_autoboot_poll();
+		}
 
 		// Save state diagnostics. Rate limited and change-gated inside; a
 		// no-op against a core without the 0xF600 window. Ordered after the
