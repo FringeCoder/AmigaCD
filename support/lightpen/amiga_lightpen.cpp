@@ -35,8 +35,19 @@
 // this, because the true geometry depends on the display. That is the right
 // long-term shape here too; these constants are the starting point it would
 // be an offset from.
-#define LPEN_HPOS_MIN       0x18
-#define LPEN_HPOS_SPAN      160
+//
+// One scaling step on top of WinUAE's numbers: its cx is in CCK units, and so
+// is the hpos VHPOSR reports -- but the latch userspace writes is read back as
+// lpen_hpos[8:1], because hpos[0] is the CCK phase bit. So the value sent here
+// is twice the CCK position, and 0x18 CCK is 0x30 written. Sending WinUAE's
+// number unscaled put the gun's whole travel in the left third of the screen.
+#define LPEN_HPOS_MIN       0x30    // 0x18 CCK
+#define LPEN_HPOS_SPAN      320     // 160 CCK
+
+// "No position to report" -- no gun, or the pointer is off screen. The core
+// tests for exactly this value; see the LIGHT PEN LATCH block in
+// agnus_beamcounter.v.
+#define LPEN_VPOS_NONE      0x7FF
 
 #define LPEN_VPOS_MIN_PAL   25
 #define LPEN_VPOS_SPAN_PAL  256
@@ -57,11 +68,25 @@ static int map_range(int v, int vmin, int vmax, int omin, int omax)
 
 void amiga_lightpen_abs(int x, int y, int xmin, int xmax, int ymin, int ymax)
 {
-	// Off-screen is a real state, not an error. Leaving the latch alone means
-	// the Amiga keeps reading the last position the gun actually saw, which is
-	// what a physical light pen does when it loses the raster.
-	if (x < xmin || x > xmax) return;
-	if (y < ymin || y > ymax) return;
+	// Off screen is a real state, not an error, and it has to be said out loud
+	// rather than by staying quiet. The core freezes VPOSR on the latched
+	// position, so a stale one left behind has the Amiga believing the pen is
+	// still seeing a beam it cannot. Send the sentinel instead and the core
+	// falls back to its no-pen behaviour.
+	//
+	// Once per crossing, not once per event: the pointer sits off screen for
+	// long stretches and this is SPI traffic on the input path.
+	static int offscreen;
+	if (x < xmin || x > xmax || y < ymin || y > ymax)
+	{
+		if (!offscreen)
+		{
+			offscreen = 1;
+			spi_uio_cmd16(UIO_MM2_LPENV, LPEN_VPOS_NONE);
+		}
+		return;
+	}
+	offscreen = 0;
 
 	// PAL and NTSC do not share a vertical origin or a visible height, and the
 	// core knows which it is: chipset bit 1 is the NTSC flag.
@@ -72,10 +97,10 @@ void amiga_lightpen_abs(int x, int y, int xmin, int xmax, int ymin, int ymax)
 	int hpos = map_range(x, xmin, xmax, LPEN_HPOS_MIN, LPEN_HPOS_MIN + LPEN_HPOS_SPAN);
 	int vpos = map_range(y, ymin, ymax, vmin, vmin + vspan);
 
-	// Vertical first, then horizontal -- the horizontal write is the one the
-	// Amiga side reads against, so this ordering makes a torn pair observable
-	// only as a one-poll-old position, never as a position from two different
-	// places on the screen.
+	// Vertical first, then horizontal. The core arms its latch on both matching
+	// the raster at once, so a pair torn across a frame boundary simply does not
+	// match and the latch waits for the next frame -- one frame stale at worst,
+	// never a position stitched together from two places on the screen.
 	spi_uio_cmd16(UIO_MM2_LPENV, (uint16_t)vpos);
 	spi_uio_cmd16(UIO_MM2_LPENH, (uint16_t)hpos);
 }
