@@ -21,6 +21,12 @@ static void check(const char *name, unsigned got, unsigned want)
 	else { printf("FAIL %s: got 0x%02X, want 0x%02X\n", name, got, want); failures++; }
 }
 
+static void check_true(const char *name, int cond)
+{
+	if (cond) printf("PASS %s\n", name);
+	else { printf("FAIL %s\n", name); failures++; }
+}
+
 int main(void)
 {
 	// A CD32 always has 2 MB of chip RAM. Chip size is memory[1:0], where
