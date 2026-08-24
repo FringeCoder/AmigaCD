@@ -30,6 +30,17 @@ enum {
 // menu, so adding one is a single edit.
 #define AMIGACD_SYS_COUNT 4
 
+// The machine's display name, and the config-file suffix that goes with it.
+//
+// Every machine has a suffix, CD32 included. CD32 used to have none, so its
+// file WAS the unsuffixed AmigaCD.cfg that amigacd_cfg_save_current() rewrites
+// on every "Save settings" -- and saving while on any other machine therefore
+// overwrote CD32's stored config with that machine. The System row then looked
+// frozen, because switching to CD32 loaded a copy of wherever you had just
+// been. Distinct, non-empty suffixes are the invariant; the test asserts it.
+const char *amigacd_system_name(int sys);
+const char *amigacd_cfg_suffix(int sys);
+
 // Returns `memory` with the RAM fields forced to what the machine actually
 // has. Chip RAM is bits [1:0], where 0 == 512K, 1 == 1M, 3 == 2M: a CD32 has
 // 2M, a CDTV 1M, an A500 512K. The A500 also gets the 512K trapdoor expansion

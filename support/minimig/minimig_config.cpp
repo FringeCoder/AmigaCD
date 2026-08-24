@@ -492,11 +492,6 @@ static char* GetConfigurationName(int num, int chk, const char *sys_suffix)
 }
 
 // The suffix for a machine, or null for the one that keeps the plain name.
-static const char *amigacd_cfg_suffix(int sys)
-{
-	return (sys == AMIGACD_SYS_CD32) ? 0 : amigacd_system_name(sys);
-}
-
 int minimig_cfg_save(int num, const char *sys_suffix)
 {
 	minimig_config.a2065_mode = a2065_cfg_get();
@@ -843,6 +838,18 @@ int amigacd_switch_system(int from_sys, int to_sys)
 	if (!GetConfigurationName(0, 1, amigacd_cfg_suffix(to_sys))) return 0;
 
 	minimig_cfg_load(0, amigacd_cfg_suffix(to_sys));
+
+	// Verify the arrival. A stored config that does not describe the machine it
+	// is filed under leaves the System row apparently frozen -- the user presses
+	// it and lands back where they were -- and there is nothing on screen to say
+	// why. Treating it as "never configured" hands the caller the profile path
+	// instead, which loses whatever that file held but always moves.
+	if (amigacd_system() != to_sys)
+	{
+		printf("AmigaCD: %s config describes a %s, ignoring it\n",
+		       amigacd_system_name(to_sys), amigacd_system_name(amigacd_system()));
+		return 0;
+	}
 	return 1;
 }
 
@@ -1342,17 +1349,6 @@ int amigacd_system(void)
 	// disc: 2 means "there is a removable CD device", 0 means there is not.
 	if (minimig_config.hardfile[0].cfg == 0)  return AMIGACD_SYS_A1200;
 	return AMIGACD_SYS_CD32;
-}
-
-const char *amigacd_system_name(int sys)
-{
-	switch (sys)
-	{
-		case AMIGACD_SYS_CDTV:  return "CDTV";
-		case AMIGACD_SYS_A500:  return "A500";
-		case AMIGACD_SYS_A1200: return "A1200";
-		default:                return "CD32";
-	}
 }
 
 static char minimig_adjust = 0;

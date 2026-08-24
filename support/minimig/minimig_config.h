@@ -178,7 +178,6 @@ int  amigacd_is_cdtv(void);
 // The AMIGACD_SYS_* values these two speak in live in minimig_profile.h, which
 // is included above so callers need only this header.
 int  amigacd_system(void);
-const char *amigacd_system_name(int sys);
 // slot: 0 = cd32_drive, 1 = cdtv_drive
 int minimig_cd_drive_open(int slot, const char *filename);
 drive_t* minimig_cd_drive_get(int slot);
