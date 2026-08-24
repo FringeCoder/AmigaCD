@@ -2136,8 +2136,7 @@ int process_ss(const char *rom_name, int enable)
 	if (ss_save_expected && CheckTimer(ss_save_deadline))
 	{
 		ss_save_expected = 0;
-		printf("process_ss: save was announced but no window updated - nothing written
-");
+		printf("process_ss: save was announced but no window updated - nothing written\n");
 		Info("Save state NOT written", 3000);
 	}
 
