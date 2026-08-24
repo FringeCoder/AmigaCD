@@ -6094,13 +6094,17 @@ int input_test(int getchar)
 								// nothing at all -- aim works, shooting does not, which is
 								// what a GunCon 2 did on hardware.
 								//
-								// input[].num is 1-based; build_joy_mask() counts from 0.
+								// The port is the module's to decide, not this one's: the
+								// pen is wired to a fixed port and a program looking for it
+								// reads that port and no other, so following input[].num
+								// would put fire wherever MiSTer happened to assign the gun.
+								//
 								// Skipped while the OSD is up so a shot aimed at a menu does
 								// not also press fire on the machine behind it.
 								if (ev.type == EV_KEY && !user_io_osd_is_visible()
-								    && amiga_lightpen_usb_active() && input[i].num > 0)
+								    && amiga_lightpen_usb_active())
 								{
-									amiga_lightpen_button(input[i].num - 1, ev.code, ev.value != 0);
+									amiga_lightpen_button(ev.code, ev.value != 0);
 								}
 
 								// redirect further actions to left joycon in combined mode

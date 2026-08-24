@@ -42,10 +42,13 @@ int  amiga_lightpen_usb_active(void);
 // the trigger goes nowhere: aiming works and shooting does nothing, which is
 // exactly what a GunCon 2 did on hardware.
 //
-// `player` is zero-based, as build_joy_mask() counts (input[].num is 1-based,
-// so subtract one). `code` is the raw EV_KEY code from the device; the module
-// decides which Amiga button it becomes so callers need no table.
-void     amiga_lightpen_button(int player, int code, int pressed);
+// `code` is the raw EV_KEY code from the device; the module decides which
+// Amiga button it becomes, and which port it lands on, so callers need no
+// table and no port argument.
+void     amiga_lightpen_button(int code, int pressed);
+
+// The port the light pen occupies, zero-based as build_joy_mask() counts.
+int      amiga_lightpen_player(void);
 
 // The buttons currently held, as JOY_* bits, to be OR'd into the port's mask.
 // Zero for any player with no gun on it, so this is safe to add unconditionally.

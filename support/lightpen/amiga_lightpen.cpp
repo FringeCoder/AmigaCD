@@ -4,24 +4,44 @@
 #include "../../spi.h"
 #include "../../user_io.h"
 #include "../../input.h"
+#include "../minimig/minimig_config.h"
 #include "amiga_lightpen.h"
 
 // Where on the Amiga raster a fully-deflected pointer lands.
 //
 // VHPOSR returns hpos[8:1], so the horizontal axis is 8 bits at 280 ns per
-// step; vpos counts scanlines, 0..312 on PAL. The values below are the visible
-// window, not the whole raster -- a gun cannot see blanking, so mapping onto
-// the full counter range would waste most of the travel on lines and columns
-// that are never displayed.
+// step; vpos counts scanlines. The values below are the visible window, not
+// the whole raster -- a gun cannot see blanking, so mapping onto the full
+// counter range would waste most of the travel on lines that are never
+// displayed.
 //
-// THESE ARE STARTING POINTS, NOT MEASUREMENTS. They have never been fitted
-// against a real display. If the pointer tracks with a constant offset or the
-// wrong gain, these four numbers are what to change -- and being here in
-// userspace is the reason that does not need a 22-minute Quartus run.
-#define LPEN_HPOS_MIN   0x20
-#define LPEN_HPOS_MAX   0xD8
-#define LPEN_VPOS_MIN   0x2C
-#define LPEN_VPOS_MAX   0x128
+// The origins are WinUAE's, read out of its source rather than guessed. It
+// converts a screen position to a raster one in drawing.cpp:
+//
+//     cx = ((lightpen_x + visible_left_border) >> (1 + gfx_resolution)) + 29;
+//     cy = (lightpen_y >> linedbl) + minfirstline;
+//     if (cx <= 0x18 - 1) out = true;
+//
+// so the horizontal floor is 0x18 and the vertical origin is minfirstline,
+// which is VBLANK_ENDLINE_{PAL,NTSC} - 1 == 25 and 20 (include/custom.h).
+// The previous values here were 0x20 and 0x2C -- the vertical one about 19
+// lines too far down the screen.
+//
+// The spans are derived, not quoted: 320 lores pixels at two per hpos step is
+// 160 steps, and the visible height is 256 lines on PAL and 200 on NTSC. So
+// the ends are as sound as the origins and the middle is arithmetic.
+//
+// WinUAE also carries a user-tunable lightpen_offset[] pair on top of all
+// this, because the true geometry depends on the display. That is the right
+// long-term shape here too; these constants are the starting point it would
+// be an offset from.
+#define LPEN_HPOS_MIN       0x18
+#define LPEN_HPOS_SPAN      160
+
+#define LPEN_VPOS_MIN_PAL   25
+#define LPEN_VPOS_SPAN_PAL  256
+#define LPEN_VPOS_MIN_NTSC  20
+#define LPEN_VPOS_SPAN_NTSC 200
 
 static int map_range(int v, int vmin, int vmax, int omin, int omax)
 {
@@ -43,8 +63,14 @@ void amiga_lightpen_abs(int x, int y, int xmin, int xmax, int ymin, int ymax)
 	if (x < xmin || x > xmax) return;
 	if (y < ymin || y > ymax) return;
 
-	int hpos = map_range(x, xmin, xmax, LPEN_HPOS_MIN, LPEN_HPOS_MAX);
-	int vpos = map_range(y, ymin, ymax, LPEN_VPOS_MIN, LPEN_VPOS_MAX);
+	// PAL and NTSC do not share a vertical origin or a visible height, and the
+	// core knows which it is: chipset bit 1 is the NTSC flag.
+	const int ntsc  = (minimig_config.chipset & CONFIG_NTSC) != 0;
+	const int vmin  = ntsc ? LPEN_VPOS_MIN_NTSC  : LPEN_VPOS_MIN_PAL;
+	const int vspan = ntsc ? LPEN_VPOS_SPAN_NTSC : LPEN_VPOS_SPAN_PAL;
+
+	int hpos = map_range(x, xmin, xmax, LPEN_HPOS_MIN, LPEN_HPOS_MIN + LPEN_HPOS_SPAN);
+	int vpos = map_range(y, ymin, ymax, vmin, vmin + vspan);
 
 	// Vertical first, then horizontal -- the horizontal write is the one the
 	// Amiga side reads against, so this ordering makes a torn pair observable
@@ -72,9 +98,31 @@ int amiga_lightpen_usb_active(void)
 // press the same button on the same port and behave identically to the guest.
 static uint32_t lp_buttons[NUMPLAYERS];
 
-void amiga_lightpen_button(int player, int code, int pressed)
+// Which port the pen is on.
+//
+// Not the one the user assigned the gun to -- the light pen is wired to a
+// fixed port and a program looking for it reads that port's fire button and no
+// other. WinUAE says which (inputdevice.cpp):
+//
+//     static int lightpen_port_number(void)
+//     {
+//         return (cs_agnusmodel == AGNUSMODEL_A1000 ||
+//                 cs_agnusmodel == AGNUSMODEL_VELVET) ? 0 : 1;
+//     }
+//
+// so port 1 on everything this core can be. Following input[].num instead put
+// the trigger wherever MiSTer happened to assign the gun, which for a gun on
+// player 1 is the wrong port entirely and reaches nothing.
+#define LPEN_PLAYER 1
+
+int amiga_lightpen_player(void)
 {
-	if (player < 0 || player >= NUMPLAYERS) return;
+	return LPEN_PLAYER;
+}
+
+void amiga_lightpen_button(int code, int pressed)
+{
+	const int player = LPEN_PLAYER;
 
 	// Which Amiga button this is. A gun has one trigger that matters and
 	// usually one or two auxiliary buttons; the trigger becomes fire, the rest
