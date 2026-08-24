@@ -2057,7 +2057,7 @@ static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 // hunk decode), (c) push_sector (2352 byte-by-byte SPI w/ ACK). Sum µs spent
 // in each across N sectors and emit one log line per bucket so we can see
 // where the bottleneck actually lives before optimizing.
-static void akiko_handle_sec_req(void)
+static bool akiko_handle_sec_req(void)
 {
 	struct timespec ts0, ts1, ts2, ts3;
 	static int64_t phase_a_us = 0, phase_b_us = 0, phase_c_us = 0;
@@ -2900,7 +2900,11 @@ void akiko_cd32_state_save(void *buf)
 	s.cdda_lba_next  = cd_cdda_lba_next;
 	s.cdda_lba_end   = cd_cdda_lba_end;
 	s.cdda_active    = (cd_cdda_drv != NULL) ? 1 : 0;
-	s.last_mounted   = cd_last_mounted ? 1 : 0;
+	// The field predates upstream's media-level state machine, which replaced
+	// the cd_last_mounted flag it used to carry. cd_media_level means the same
+	// thing -- what the guest was last told -- so the on-disk .ss format stays
+	// as it was.
+	s.last_mounted   = (cd_media_level == CD_MEDIA_PRESENT) ? 1 : 0;
 	memcpy(buf, &s, sizeof(s));
 }
 
@@ -2924,7 +2928,7 @@ bool akiko_cd32_state_load(const void *buf, int len)
 	cd_cdda_q_end     = s.cdda_q_end;
 	cd_cdda_lba_next  = s.cdda_lba_next;
 	cd_cdda_lba_end   = s.cdda_lba_end;
-	cd_last_mounted   = s.last_mounted ? true : false;
+	cd_media_level    = s.last_mounted ? CD_MEDIA_PRESENT : CD_MEDIA_ABSENT;
 
 	// cd_cdda_drv is a POINTER into this run's drive table and cannot be
 	// carried across a core reload. It is re-derived instead: the pump only
