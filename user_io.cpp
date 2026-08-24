@@ -2006,10 +2006,22 @@ static void *ss_base_win[4] = {};
 static int ss_save_expected = 0;
 static unsigned long ss_save_deadline = 0;
 
+// Twenty seconds, not five. Measured on hardware: the core raises save_ok one
+// second after the request, and the window's counter word -- the only thing the
+// writer below watches -- does not change for another 3.3 s after that. Five
+// seconds from the press left barely a second of margin, and a save that was
+// merely slow got reported as one that never happened.
+//
+// The cost of being generous is only how long a genuinely lost save stays
+// unreported. The cost of being tight is telling the user a save failed while
+// it is still on its way, which is worse: they press again, and now two
+// captures are racing for the same window.
+#define SS_SAVE_DEADLINE_MS 20000
+
 void ss_expect_save(void)
 {
 	ss_save_expected = 1;
-	ss_save_deadline = GetTimer(5000);
+	ss_save_deadline = GetTimer(SS_SAVE_DEADLINE_MS);
 }
 
 // Hands the host half of a save state back to whoever owns it. Only the CD
@@ -2206,16 +2218,36 @@ int process_ss(const char *rom_name, int enable)
 					MenuHide();
 					Info("Saving the state", 500);
 
+					// Say what happened, either way. Until now the only
+					// confirmation a save existed was the CORE's "Save state:
+					// saved", which is raised when its capture finishes and
+					// says nothing about the file -- so a write that never
+					// happened and one that succeeded looked identical from
+					// the couch. A short write counts as a failure: the file
+					// is on the card either way and the next restore would
+					// find a truncated one.
 					*ss_sufx = i + '1';
 					if (FileOpenEx(&f, ss_name, O_CREAT | O_TRUNC | O_RDWR | O_SYNC))
 					{
 						int ret = FileWriteAdv(&f, ss_base_win[i], size);
 						FileClose(&f);
 						printf("Wrote %d bytes to file: %s\n", ret, ss_name);
+						if (ret == (int)size)
+						{
+							char msg[32];
+							snprintf(msg, sizeof(msg), "Save state %d written", i + 1);
+							Info(msg, 2000);
+						}
+						else
+						{
+							printf("process_ss: short write, %d of %u bytes\n", ret, size);
+							Info("Save state write FAILED", 3000);
+						}
 					}
 					else
 					{
 						printf("Unable to create file: %s\n", ss_name);
+						Info("Save state write FAILED", 3000);
 					}
 				}
 			}
