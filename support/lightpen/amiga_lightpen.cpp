@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <linux/input.h>
 #include "../../spi.h"
 #include "../../user_io.h"
@@ -54,6 +55,32 @@
 #define LPEN_VPOS_MIN_NTSC  20
 #define LPEN_VPOS_SPAN_NTSC 200
 
+// ------------------------------------------------------------- diagnostic
+// Temporary; see the note in the header for why an external capture cannot
+// work. Capped rather than rate-limited by a clock, so it needs no timer and
+// a short session is guaranteed to fit.
+#define LPEN_LOG_MAX_LINES 4000
+
+void amiga_lightpen_log(const char *fmt, ...)
+{
+	static int   lines;
+	static FILE *f;
+
+	if (lines >= LPEN_LOG_MAX_LINES) return;
+	if (!f)
+	{
+		f = fopen("/tmp/lpen.log", "w");
+		if (!f) { lines = LPEN_LOG_MAX_LINES; return; }
+	}
+
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(f, fmt, ap);
+	va_end(ap);
+	fflush(f);   // the core can be reset out from under this at any moment
+	lines++;
+}
+
 static int map_range(int v, int vmin, int vmax, int omin, int omax)
 {
 	// Integer maths on purpose: this runs per input event, and the whole range
@@ -84,8 +111,11 @@ void amiga_lightpen_abs(int x, int y, int xmin, int xmax, int ymin, int ymax)
 			offscreen = 1;
 			spi_uio_cmd16(UIO_MM2_LPENV, LPEN_VPOS_NONE);
 		}
+		amiga_lightpen_log("abs  OFFSCREEN x=%d y=%d window x[%d..%d] y[%d..%d]\n",
+		                   x, y, xmin, xmax, ymin, ymax);
 		return;
 	}
+	if (offscreen) amiga_lightpen_log("abs  back on screen\n");
 	offscreen = 0;
 
 	// PAL and NTSC do not share a vertical origin or a visible height, and the
@@ -103,6 +133,16 @@ void amiga_lightpen_abs(int x, int y, int xmin, int xmax, int ymin, int ymax)
 	// never a position stitched together from two places on the screen.
 	spi_uio_cmd16(UIO_MM2_LPENV, (uint16_t)vpos);
 	spi_uio_cmd16(UIO_MM2_LPENH, (uint16_t)hpos);
+
+	// Every sixteenth, so a sweep across the screen is legible without the cap
+	// being spent in the first second.
+	static unsigned n;
+	if (!(n++ & 15))
+	{
+		amiga_lightpen_log("abs  x=%d y=%d window x[%d..%d] y[%d..%d] -> vpos=%d hpos=%d (cck %d) %s\n",
+		                   x, y, xmin, xmax, ymin, ymax, vpos, hpos, hpos >> 1,
+		                   ntsc ? "NTSC" : "PAL");
+	}
 }
 
 int amiga_lightpen_usb_active(void)
@@ -199,6 +239,9 @@ void amiga_lightpen_button(int code, int pressed)
 
 	if (pressed) lp_buttons[player] |= bit;
 	else         lp_buttons[player] &= ~bit;
+
+	amiga_lightpen_log("btn  code=0x%03X %s -> port %d bit 0x%02X mask now 0x%02X\n",
+	                   code, pressed ? "down" : "up", player, bit, lp_buttons[player]);
 }
 
 uint32_t amiga_lightpen_joy_mask(int player)

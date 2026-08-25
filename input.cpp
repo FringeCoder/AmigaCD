@@ -6014,6 +6014,23 @@ int input_test(int getchar)
 
 								if (ev.type == EV_ABS && input[i].quirk == QUIRK_LIGHTGUN_CRT)
 								{
+									// TEMPORARY. The raw event, before any of the
+									// grace-period handling below touches it, so the
+									// log distinguishes "no events arriving" from
+									// "events arriving outside the calibration window".
+									if (amiga_lightpen_usb_active())
+									{
+										static unsigned rawn;
+										if (!(rawn++ & 15))
+										{
+											amiga_lightpen_log("raw  dev=%d code=%d value=%d cal x[%d..%d] y[%d..%d] timeout=%d\n",
+											                   i, ev.code, ev.value,
+											                   input[i].guncal[2], input[i].guncal[3],
+											                   input[i].guncal[0], input[i].guncal[1],
+											                   crtgun_timeout[i] ? 1 : 0);
+										}
+									}
+
 									menu_lightgun_cb(i, ev.type, ev.code, ev.value);
 
 									if (ev.code == ABS_X)
