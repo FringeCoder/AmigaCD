@@ -50,6 +50,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "osd.h"
 #include "hardware.h"
 #include "menu.h"
+#include "support/lightpen/amiga_lightpen.h"
 #include "user_io.h"
 #include "debug.h"
 #include "fpga_io.h"
@@ -9460,6 +9461,17 @@ int menu_lightgun_cb(int idx, uint16_t type, uint16_t code, int value)
 	{
 		if (code == 0 && value) gun_x = value;
 		if (code == 1 && value != 1023) gun_y = value;
+
+		// TEMPORARY. Calibration stored a one-unit-wide window -- both vertical
+		// edges as 5, both horizontal as 1 -- while the gun was reporting x up
+		// to 1732. So gun_x/gun_y were at their floor whenever a side was
+		// confirmed, and this says whether they ever leave it.
+		if (menustate == MENU_LGCAL1)
+		{
+			static unsigned n;
+			if (!(n++ & 7)) amiga_lightpen_log("cal  abs code=%d value=%d -> gun_x=%d gun_y=%d side=%d\n",
+			                                   code, value, gun_x, gun_y, gun_side);
+		}
 	}
 
 	if (type == EV_KEY)
@@ -9476,6 +9488,9 @@ int menu_lightgun_cb(int idx, uint16_t type, uint16_t code, int value)
 			gun_idx = idx;
 			if (value == 1) gun_ok = 1;
 			if (value == 0) gun_ok = 2;
+			// TEMPORARY. The moment a side is locked in, and with what.
+			amiga_lightpen_log("cal  CONFIRM code=0x%03X %s side=%d gun_x=%d gun_y=%d\n",
+			                   code, value ? "down" : "up", gun_side, gun_x, gun_y);
 			return 1;
 		}
 	}

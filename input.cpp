@@ -5371,6 +5371,21 @@ int input_test(int getchar)
 							input[n].guncal[2] = 145;
 							input[n].guncal[3] = 700;
 							input_lightgun_load(n);
+
+							// TEMPORARY. The window this gun is judged against comes
+							// either from these defaults or from a saved calibration,
+							// and neither has ever been checked against what the
+							// driver actually reports. Print all three side by side.
+							{
+								struct input_absinfo ai;
+								if (!ioctl(pool[n].fd, EVIOCGABS(ABS_X), &ai))
+									amiga_lightpen_log("dev  ABS_X driver min=%d max=%d value=%d\n", ai.minimum, ai.maximum, ai.value);
+								if (!ioctl(pool[n].fd, EVIOCGABS(ABS_Y), &ai))
+									amiga_lightpen_log("dev  ABS_Y driver min=%d max=%d value=%d\n", ai.minimum, ai.maximum, ai.value);
+								amiga_lightpen_log("dev  window in use x[%d..%d] y[%d..%d]\n",
+								                   input[n].guncal[2], input[n].guncal[3],
+								                   input[n].guncal[0], input[n].guncal[1]);
+							}
 						}
 
 						//Namco GunCon 3
