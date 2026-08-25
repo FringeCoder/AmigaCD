@@ -5371,21 +5371,6 @@ int input_test(int getchar)
 							input[n].guncal[2] = 145;
 							input[n].guncal[3] = 700;
 							input_lightgun_load(n);
-
-							// TEMPORARY. The window this gun is judged against comes
-							// either from these defaults or from a saved calibration,
-							// and neither has ever been checked against what the
-							// driver actually reports. Print all three side by side.
-							{
-								struct input_absinfo ai;
-								if (!ioctl(pool[n].fd, EVIOCGABS(ABS_X), &ai))
-									amiga_lightpen_log("dev  ABS_X driver min=%d max=%d value=%d\n", ai.minimum, ai.maximum, ai.value);
-								if (!ioctl(pool[n].fd, EVIOCGABS(ABS_Y), &ai))
-									amiga_lightpen_log("dev  ABS_Y driver min=%d max=%d value=%d\n", ai.minimum, ai.maximum, ai.value);
-								amiga_lightpen_log("dev  window in use x[%d..%d] y[%d..%d]\n",
-								                   input[n].guncal[2], input[n].guncal[3],
-								                   input[n].guncal[0], input[n].guncal[1]);
-							}
 						}
 
 						//Namco GunCon 3
@@ -6029,31 +6014,6 @@ int input_test(int getchar)
 
 								if (ev.type == EV_ABS && input[i].quirk == QUIRK_LIGHTGUN_CRT)
 								{
-									// TEMPORARY. The raw event, before any of the
-									// grace-period handling below touches it, so the
-									// log distinguishes "no events arriving" from
-									// "events arriving outside the calibration window".
-									if (amiga_lightpen_usb_active())
-									{
-										// Every sample, not every sixteenth, and numbered.
-										// Sampling one in sixteen over several seconds mixes
-										// the settled aim with the approach to it, and those
-										// two look identical afterwards -- a tight cluster
-										// with outliers cannot be told from a sweep. The
-										// sequence number also shows whether the far-end
-										// readings alternate with the good ones or arrive in
-										// runs, which says whether this is a per-frame miss
-										// or a loss of lock.
-										static unsigned rawn;
-										if (rawn < 600)
-										{
-											rawn++;
-											amiga_lightpen_log("raw  #%u %s=%d\n", rawn,
-											                   ev.code == ABS_X ? "X" : (ev.code == ABS_Y ? "Y" : "?"),
-											                   ev.value);
-										}
-									}
-
 									menu_lightgun_cb(i, ev.type, ev.code, ev.value);
 
 									if (ev.code == ABS_X)

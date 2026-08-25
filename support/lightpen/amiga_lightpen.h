@@ -54,16 +54,4 @@ int      amiga_lightpen_player(void);
 // Zero for any player with no gun on it, so this is safe to add unconditionally.
 uint32_t amiga_lightpen_joy_mask(int player);
 
-// TEMPORARY diagnostic, to be removed once the light pen is understood on
-// hardware. Appends a line to /tmp/lpen.log, capped so it cannot fill /tmp.
-//
-// This exists because the gun cannot be observed from outside the process at
-// all: input.cpp calls ioctl(EVIOCGRAB) on every pooled device whenever the
-// OSD is up or input is grabbed, and a grabbed evdev node delivers events to
-// the grabbing client and to nobody else. Reading /dev/input/eventN from a
-// shell returns zero bytes however the gun is aimed, which looks exactly like
-// a gun that is not tracking. Instrumenting from in here is the only way to
-// see the coordinates.
-void amiga_lightpen_log(const char *fmt, ...);
-
 #endif
