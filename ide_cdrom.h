@@ -13,8 +13,12 @@ void ide_cdda_send_sector();
 // (akiko_cd32.cpp). Returns 0 on success, non-zero on error/no data; on error
 // the caller is expected to push zeros so the FPGA engine doesn't stall.
 int cdrom_read_raw_sector(struct drive_t *drive, uint32_t lba, uint8_t *buf);
+bool cdrom_read_track_raw(struct track_t *track, uint32_t lba, uint8_t *buf, int buflen);
 
 const char* cdrom_parse(uint32_t num, const char *filename);
 void cdrom_close_chd(drive_t *drv);
+
+// slot: 0 = cd32_drive, 1 = cdtv_drive
+const char* cd_drive_parse(drive_t *drv, int slot, const char *filename);
 
 #endif

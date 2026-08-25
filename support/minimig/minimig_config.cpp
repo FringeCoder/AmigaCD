@@ -15,6 +15,7 @@
 #include "../../ide.h"
 #include "minimig_boot.h"
 #include "minimig_fdd.h"
+#include "minimig_profile.h"
 #include "minimig_config.h"
 #include "minimig_share.h"
 #include "akiko_cd32.h"
@@ -78,6 +79,76 @@ typedef struct
 	unsigned char    autofire;
 	char             info[64];
 } mm_configTYPE_NoExtFloppy;
+
+// The config layout as it was before PSX SNAC, i.e. every AmigaCD.cfg written
+// between the MiSTer Floppy change and this one. snac[2] went onto the end, so
+// a file of this size loaded into the new struct would leave snac[] as garbage
+// rather than misaligning -- but the size check is what tells the two apart,
+// and without this struct there is nothing to compare against.
+typedef struct
+{
+	char             id[8];
+	unsigned short   version;
+	unsigned short   ext_cfg2;
+	char             kickstart[992];
+	char             label[32];
+	unsigned short   ext_cfg;
+	unsigned char    memory;
+	unsigned char    chipset;
+	mm_floppyTYPE    floppy;
+	unsigned char    disable_ar3;
+	unsigned char    ide_cfg;
+	unsigned char    scanlines;
+	unsigned char    audio;
+	mm_hardfileTYPE  hardfile[4];
+	unsigned char    cpu;
+	unsigned char    autofire;
+	char             info[64];
+	mm_userportMode  userport;
+} mm_configTYPE_NoSnac;
+
+// The layout as it was before the CD32/CDTV drive slots were appended -- the
+// 5228-byte file every config on the card is today. Everything through
+// ss_slot, and nothing after it.
+typedef struct
+{
+	char             id[8];
+	unsigned short   version;
+	unsigned short   ext_cfg2;
+	char             kickstart[992];
+	char             label[32];
+	unsigned short   ext_cfg;
+	unsigned char    memory;
+	unsigned char    chipset;
+	mm_floppyTYPE    floppy;
+	unsigned char    disable_ar3;
+	unsigned char    ide_cfg;
+	unsigned char    scanlines;
+	unsigned char    audio;
+	mm_hardfileTYPE  hardfile[4];
+	unsigned char    cpu;
+	unsigned char    autofire;
+	char             info[64];
+	mm_userportMode  userport;
+	unsigned char    snac[2];
+	unsigned char    ss_slot;
+} mm_configTYPE_NoCdSlots;
+
+// Every layout above predates the dedicated CD drive slots, so none of them
+// says anything about them -- and minimig_ConfigChipset() now derives
+// CONFIG_CDTV from cdtv_drive.cfg and CLEARS the bit when that slot is empty.
+// Migrating a CDTV config without this would load one that still has the
+// chipset bit set and then send the core a non-CDTV chipset word: the machine
+// comes up as a plain Amiga and nothing about the saved config looks wrong.
+// The memset also stops a stale filename surviving from a previous load.
+static void derive_cd_slots_from_legacy(void)
+{
+	memset(&minimig_config.cd32_drive, 0, sizeof(minimig_config.cd32_drive));
+	memset(&minimig_config.cdtv_drive, 0, sizeof(minimig_config.cdtv_drive));
+	const bool cdtv = (minimig_config.chipset & CONFIG_CDTV) != 0;
+	minimig_config.cdtv_drive.cfg = cdtv ? 1 : 0;
+	minimig_config.cd32_drive.cfg = (!cdtv && minimig_config.hardfile[0].cfg == 2) ? 1 : 0;
+}
 
 mm_configTYPE minimig_config = { };
 static unsigned char romkey[3072];
@@ -400,23 +471,31 @@ static char UploadActionReplay()
 	return(0);
 }
 
-static char* GetConfigurationName(int num, int chk)
+// `sys_suffix` gives a machine its own config file, so switching the System row
+// does not overwrite the settings of the machine being left. Null keeps the
+// historical names: <core>.cfg for slot 0 and <core>N.cfg for the numbered
+// presets, which are the user's own and are shared across machines on purpose.
+//
+// CD32 deliberately passes null too. It was the only machine this core had for
+// most of its life, so its settings are already in <core>.cfg -- giving it a
+// suffixed file of its own would strand every existing config.
+static char* GetConfigurationName(int num, int chk, const char *sys_suffix)
 {
 	static char name[128];
-	if (num) sprintf(name, CONFIG_DIR "/%s%d.cfg", user_io_get_core_name(), num);
+	if (sys_suffix && *sys_suffix)
+		sprintf(name, CONFIG_DIR "/%s_%s.cfg", user_io_get_core_name(), sys_suffix);
+	else if (num) sprintf(name, CONFIG_DIR "/%s%d.cfg", user_io_get_core_name(), num);
 	else sprintf(name, CONFIG_DIR "/%s.cfg", user_io_get_core_name());
 
 	if (chk && !S_ISREG(getFileType(name))) return 0;
 	return name+strlen(CONFIG_DIR)+1;
 }
 
-int minimig_cfg_save(int num)
+// The suffix for a machine, or null for the one that keeps the plain name.
+int minimig_cfg_save(int num, const char *sys_suffix)
 {
-	// The A2065 interface selection rides in core status bits, which Minimig
-	// excludes from the generic status-word config load, so it is stored
-	// beside the config slot rather than inside the size-checked blob.
-	a2065_cfg_save(num);
-	return FileSaveConfig(GetConfigurationName(num, 0), &minimig_config, sizeof(minimig_config));
+	minimig_config.a2065_mode = a2065_cfg_get();
+	return FileSaveConfig(GetConfigurationName(num, 0, sys_suffix), &minimig_config, sizeof(minimig_config));
 }
 
 // ---- MGL surgical save ----
@@ -574,7 +653,7 @@ int minimig_mgl_save()
 
 const char* minimig_get_cfg_info(int num, int label)
 {
-	char *filename = GetConfigurationName(num, 1);
+	char *filename = GetConfigurationName(num, 1, 0);
 	if (!filename) return NULL;
 
 	static mm_configTYPE tmpconf;
@@ -603,7 +682,7 @@ static void ApplyConfiguration(char reloadkickstart)
 
 	if (!reloadkickstart)
 	{
-		minimig_ConfigChipset(minimig_config.chipset);
+		minimig_ConfigChipset(&minimig_config);
 		minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
 	}
 
@@ -644,10 +723,13 @@ static void ApplyConfiguration(char reloadkickstart)
 		(hdd_open(2) ? 8 : 0) |
 		(hdd_open(3) ? 16 : 0));
 
+	minimig_cd_drive_open(0, minimig_config.cd32_drive.cfg ? minimig_config.cd32_drive.filename : "");
+	minimig_cd_drive_open(1, minimig_config.cdtv_drive.cfg ? minimig_config.cdtv_drive.filename : "");
+
 	minimig_ConfigMemory(memcfg);
 	minimig_ConfigCPU(minimig_config.cpu);
 
-	minimig_ConfigChipset(minimig_config.chipset);
+	minimig_ConfigChipset(&minimig_config);
 	minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
 
 	if (minimig_config.memory & 0x40) UploadActionReplay();
@@ -715,16 +797,68 @@ static void ApplyConfiguration(char reloadkickstart)
 	minimig_ConfigAutofire(minimig_config.autofire, 0xC);
 	minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
 	                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
-	minimig_ConfigUserPort(minimig_config.userport);
+	minimig_ConfigSnac();
 	minimig_set_extcfg(minimig_get_extcfg() & ~1);
 }
 
-int minimig_cfg_load(int num)
+// Save settings, from the OSD row of that name.
+//
+// Two files, not one. <core>.cfg is the live config and is what a core load
+// reads back, so it has to hold whatever machine the user is on right now.
+// The per-machine file is that machine's memory, and keeping it current here
+// means "Save settings" and the System row agree about what an A1200 is rather
+// than the row handing back something older.
+//
+// For CD32 the two are the same file, so it is written once.
+int amigacd_cfg_save_current(void)
+{
+	int sys = amigacd_system();
+	int ok = minimig_cfg_save(0);
+	const char *suffix = amigacd_cfg_suffix(sys);
+	if (suffix) ok = minimig_cfg_save(0, suffix) && ok;
+	return ok;
+}
+
+// Remember the machine we are leaving, then become the one we are going to.
+//
+// The System row used to apply a profile and nothing else, so anything set on
+// top of it -- the mounted disc, the hard disks, FastRAM, the ROM -- was lost
+// the moment the row was pressed, and pressing it back did not bring it back.
+// Each machine now keeps its own config file.
+//
+// Returns 1 if the new machine had a saved config, 0 if this is the first time
+// it has been selected and the caller should build it from the profile.
+int amigacd_switch_system(int from_sys, int to_sys)
+{
+	minimig_cfg_save(0, amigacd_cfg_suffix(from_sys));
+
+	// Checked before loading rather than letting the load fall through: the
+	// no-config path inside minimig_cfg_load resets every hardfile and applies
+	// the CD32 profile, which is right at boot and wrong here.
+	if (!GetConfigurationName(0, 1, amigacd_cfg_suffix(to_sys))) return 0;
+
+	minimig_cfg_load(0, amigacd_cfg_suffix(to_sys));
+
+	// Verify the arrival. A stored config that does not describe the machine it
+	// is filed under leaves the System row apparently frozen -- the user presses
+	// it and lands back where they were -- and there is nothing on screen to say
+	// why. Treating it as "never configured" hands the caller the profile path
+	// instead, which loses whatever that file held but always moves.
+	if (amigacd_system() != to_sys)
+	{
+		printf("AmigaCD: %s config describes a %s, ignoring it\n",
+		       amigacd_system_name(to_sys), amigacd_system_name(amigacd_system()));
+		return 0;
+	}
+	return 1;
+}
+
+int minimig_cfg_load(int num, const char *sys_suffix)
 {
 	static const char config_id[] = "MNMGCFG0";
 	int result = 0;
 
-	const char *filename = GetConfigurationName(num, 1);
+	const char *filename = GetConfigurationName(num, 1, sys_suffix);
 
 	// load configuration data
 	int size;
@@ -764,6 +898,84 @@ int minimig_cfg_load(int num)
 				minimig_config.autofire = oldconf.autofire;
 				memcpy(minimig_config.info, oldconf.info, sizeof(oldconf.info));
 				minimig_config.userport = mmup_mp32pi;
+				minimig_config.snac[0] = mmsp_off;
+				minimig_config.snac[1] = mmsp_off;
+				derive_cd_slots_from_legacy();
+				result = 1;
+			}
+			else BootPrint("Cannot migrate configuration file\n");
+		}
+		else if (size == sizeof(mm_configTYPE_NoSnac))
+		{
+			// Written before PSX SNAC. Copy field by field -- a straight memcpy
+			// would leave snac[] holding whatever garbage followed the file on
+			// disk instead of a defined "both ports off".
+			printf("Pre PSX SNAC configuration file, migrating.\n");
+			static mm_configTYPE_NoSnac oldconf = {};
+			if (FileLoadConfig(filename, &oldconf, sizeof(oldconf))
+			    && !strncmp(oldconf.id, config_id, sizeof(minimig_config.id))
+			    && oldconf.floppy.drives <= 4)
+			{
+				memcpy(minimig_config.id, oldconf.id, sizeof(oldconf.id));
+				minimig_config.version  = oldconf.version;
+				minimig_config.ext_cfg2 = oldconf.ext_cfg2;
+				memcpy(minimig_config.kickstart, oldconf.kickstart, sizeof(oldconf.kickstart));
+				memcpy(minimig_config.label,     oldconf.label,     sizeof(oldconf.label));
+				minimig_config.ext_cfg     = oldconf.ext_cfg;
+				minimig_config.memory      = oldconf.memory;
+				minimig_config.chipset     = oldconf.chipset;
+				minimig_config.floppy      = oldconf.floppy;
+				minimig_config.disable_ar3 = oldconf.disable_ar3;
+				minimig_config.ide_cfg     = oldconf.ide_cfg;
+				minimig_config.scanlines   = oldconf.scanlines;
+				minimig_config.audio       = oldconf.audio;
+				memcpy(minimig_config.hardfile, oldconf.hardfile, sizeof(oldconf.hardfile));
+				minimig_config.cpu      = oldconf.cpu;
+				minimig_config.autofire = oldconf.autofire;
+				memcpy(minimig_config.info, oldconf.info, sizeof(oldconf.info));
+				minimig_config.userport = oldconf.userport;
+				minimig_config.snac[0] = mmsp_off;
+				minimig_config.snac[1] = mmsp_off;
+				derive_cd_slots_from_legacy();
+				result = 1;
+			}
+			else BootPrint("Cannot migrate configuration file\n");
+		}
+		else if (size == sizeof(mm_configTYPE_NoCdSlots))
+		{
+			// Written before the CD32/CDTV drive slots. Same field-by-field
+			// shape as the rungs above: a straight memcpy of sizeof(oldconf)
+			// would drop the old layout's last padding byte onto
+			// cd32_drive.cfg, and the drive filenames would keep whatever the
+			// previous load left in them.
+			printf("Pre CD-slot configuration file, migrating.\n");
+			static mm_configTYPE_NoCdSlots oldconf = {};
+			if (FileLoadConfig(filename, &oldconf, sizeof(oldconf))
+			    && !strncmp(oldconf.id, config_id, sizeof(minimig_config.id))
+			    && oldconf.floppy.drives <= 4)
+			{
+				memcpy(minimig_config.id, oldconf.id, sizeof(oldconf.id));
+				minimig_config.version  = oldconf.version;
+				minimig_config.ext_cfg2 = oldconf.ext_cfg2;
+				memcpy(minimig_config.kickstart, oldconf.kickstart, sizeof(oldconf.kickstart));
+				memcpy(minimig_config.label,     oldconf.label,     sizeof(oldconf.label));
+				minimig_config.ext_cfg     = oldconf.ext_cfg;
+				minimig_config.memory      = oldconf.memory;
+				minimig_config.chipset     = oldconf.chipset;
+				minimig_config.floppy      = oldconf.floppy;
+				minimig_config.disable_ar3 = oldconf.disable_ar3;
+				minimig_config.ide_cfg     = oldconf.ide_cfg;
+				minimig_config.scanlines   = oldconf.scanlines;
+				minimig_config.audio       = oldconf.audio;
+				memcpy(minimig_config.hardfile, oldconf.hardfile, sizeof(oldconf.hardfile));
+				minimig_config.cpu      = oldconf.cpu;
+				minimig_config.autofire = oldconf.autofire;
+				memcpy(minimig_config.info, oldconf.info, sizeof(oldconf.info));
+				minimig_config.userport = oldconf.userport;
+				minimig_config.snac[0]  = oldconf.snac[0];
+				minimig_config.snac[1]  = oldconf.snac[1];
+				minimig_config.ss_slot  = oldconf.ss_slot & 3;
+				derive_cd_slots_from_legacy();
 				result = 1;
 			}
 			else BootPrint("Cannot migrate configuration file\n");
@@ -810,13 +1022,33 @@ int minimig_cfg_load(int num)
 			}
 			else printf("Cannot load configuration file\n");
 		}
+		else if ((size_t)size <= sizeof(minimig_config))
+		{
+			static mm_configTYPE tmpconf = {};
+			memset((void*)&tmpconf, 0, sizeof(tmpconf));
+			if (FileLoadConfig(filename, &tmpconf, sizeof(tmpconf)))
+			{
+				// check file id and version
+				if (strncmp(tmpconf.id, config_id, sizeof(minimig_config.id)) == 0) {
+					// A few more sanity checks...
+					if (tmpconf.floppy.drives <= 4) {
+						memcpy((void*)&minimig_config, (void*)&tmpconf, sizeof(minimig_config));
+						result = 1; // We successfully loaded the config.
+					}
+					else BootPrint("Config file sanity check failed!\n");
+				}
+				else BootPrint("Wrong configuration file format!\n");
+			}
+			else printf("Cannot load configuration file\n");
+		}
 		else printf("Wrong configuration file size: %d (expected: %u)\n", size, sizeof(minimig_config));
 	}
+
 	if (!result) {
 		BootPrint("Can not open configuration file!\n");
 		BootPrint("Setting config defaults\n");
 		// set default configuration
-		memset((void*)&minimig_config, 0, sizeof(minimig_config));  // Finally found default config bug - params were reversed!
+		memset((void*)&minimig_config, 0, sizeof(minimig_config));
 		memcpy(minimig_config.id, config_id, sizeof(minimig_config.id));
 		snprintf(minimig_config.kickstart, sizeof(minimig_config.kickstart) - 1, "%s/%s", HomeDir(), "KICK.ROM");
 		minimig_config.memory = 0x11;
@@ -833,20 +1065,47 @@ int minimig_cfg_load(int num)
 		minimig_config.hardfile[2].filename[0] = 0;
 		minimig_config.hardfile[3].cfg = 0;
 		minimig_config.hardfile[3].filename[0] = 0;
+		minimig_config.cd32_drive.cfg = 0;
+		minimig_config.cd32_drive.filename[0] = 0;
+		minimig_config.cdtv_drive.cfg = 0;
+		minimig_config.cdtv_drive.filename[0] = 0;
 		BootPrintEx(">>> No config found. Using defaults. <<<");
 
 		// AmigaCD console variant: no saved CFG -> start as a CD32 with its
 		// authentic profile + PSX-style default ROMs auto-found in /media/fat/.
 		if (is_amigacd())
 		{
-			amigacd_apply_system(0); // 0 = CD32
+			amigacd_apply_system(AMIGACD_SYS_CD32);
 			BootPrintEx(">>> AmigaCD: defaulting to CD32. <<<");
 		}
 	}
+	else if (is_amigacd())
+	{
+		// A loaded config carries whatever chip RAM was last persisted, and
+		// until now nothing ever corrected it: amigacd_apply_system() runs only
+		// in the no-config branch above, and mounting a CD image
+		// (MENU_AMIGACD_CDFILE_SELECTED) only sets the filename and calls
+		// ide_open. So a config holding the generic Minimig default (0x11) or a
+		// CDTV profile (0x01) -- both 1 MB chip -- left CD32 discs running on
+		// half the chip RAM a CD32 has. Many titles need more than 1 MB and
+		// failed with an out-of-memory message; the less demanding ones ran,
+		// which is what made it look intermittent.
+		//
+		// Chip RAM is a property of the machine, not a preference: the AmigaCD
+		// OSD offers no row for it. Re-assert it from the system the config
+		// itself names, leaving FastRAM and HRTmon untouched. SlowRAM is
+		// part of the profile for an A500 and the user's elsewhere.
+		int sys = amigacd_system();
+		uint8_t fixed = amigacd_profile_memory(minimig_config.memory, sys);
+		if (fixed != minimig_config.memory)
+		{
+			printf("AmigaCD: correcting chip RAM for %s: memory 0x%02X -> 0x%02X\n",
+			       amigacd_system_name(sys), minimig_config.memory, fixed);
+			minimig_config.memory = fixed;
+		}
+	}
 
-	// Restore the A2065 interface selection for this slot (kept in core status
-	// bits, saved beside the config blob by minimig_cfg_save()).
-	a2065_cfg_load(num);
+	a2065_cfg_set(minimig_config.a2065_mode);
 
 	for (int i = 0; i < 4; i++)
 	{
@@ -890,7 +1149,7 @@ void minimig_reset()
 	a2065_start();
 }
 
-void minimig_set_kickstart(char *name)
+void minimig_set_kickstart(const char *name)
 {
 	uint len = strlen(name);
 	if (len > (sizeof(minimig_config.kickstart) - 1)) len = sizeof(minimig_config.kickstart) - 1;
@@ -902,17 +1161,18 @@ void minimig_set_kickstart(char *name)
 	force_reload_kickstart = 1;
 }
 
-void minimig_set_extrom(char *name)
+void minimig_set_extrom(const char *name)
 {
-	const size_t cap = sizeof(minimig_config.kickstart);
-	size_t kicklen = strnlen(minimig_config.kickstart, cap);
-	if (kicklen + 1 >= cap) return;
-	size_t off = kicklen + 1;
-	size_t room = cap - off - 1;
-	size_t nlen = strlen(name);
+	int cap = sizeof(minimig_config.kickstart);
+	int kicklen = strnlen(minimig_config.kickstart, cap) + 1;
+	if (kicklen + 1 >= cap) return; // at least one additional byte for extrom is required (for NULL termination)
+	int room = cap - kicklen;
+	int nlen = strlen(name);
 	if (nlen > room) nlen = room;
-	memcpy(minimig_config.kickstart + off, name, nlen);
-	memset(minimig_config.kickstart + off + nlen, 0, cap - off - nlen);
+	memcpy(minimig_config.kickstart + kicklen, name, nlen);
+	room = cap - kicklen - nlen;
+	if(room > 0) memset(minimig_config.kickstart + kicklen + nlen, 0, room);
+	minimig_config.kickstart[cap - 1] = 0; // make sure NULL is at the end
 	force_reload_kickstart = 1;
 }
 
@@ -923,12 +1183,30 @@ void minimig_set_extrom(char *name)
 // research/docs/amiga-console-design-2026-06-13.md and the shipped AmigaCD-ROMs
 // guide.
 
-void amigacd_default_rom_names(int cdtv, const char **main_name, const char **ext_name)
+void amigacd_default_rom_names(int sys, const char **main_name, const char **ext_name)
 {
-	if (cdtv)
+	if (sys == AMIGACD_SYS_CDTV)
 	{
 		if (main_name) *main_name = "kick34005.CDTV";       // Kickstart 1.3 rev 34.5 (256K)
 		if (ext_name)  *ext_name  = "kick34005.CDTV.ext";   // CDTV extended ROM
+	}
+	else if (sys == AMIGACD_SYS_A500)
+	{
+		// An A500 has no extended ROM. The name is still returned so callers
+		// need no special case: amigacd_set_default_roms only pairs an ext ROM
+		// when the file exists, and this one is not expected to.
+		if (main_name) *main_name = "kick34005.A500";       // Kickstart 1.3 rev 34.5 (256K)
+		if (ext_name)  *ext_name  = "kick34005.A500.ext";
+	}
+	else if (sys == AMIGACD_SYS_A1200)
+	{
+		// Kickstart 3.1 rev 40.68, the A1200 ROM. Not the CD32's 40.60: that
+		// one boots the CD and never reaches the hard disk, which is the whole
+		// reason this profile exists. No extended ROM on an A1200; the name is
+		// returned anyway because amigacd_set_default_roms only pairs one when
+		// the file is actually there.
+		if (main_name) *main_name = "kick40068.A1200";
+		if (ext_name)  *ext_name  = "kick40068.A1200.ext";
 	}
 	else
 	{
@@ -940,17 +1218,32 @@ void amigacd_default_rom_names(int cdtv, const char **main_name, const char **ex
 // Point the main + ext ROM at this system's defaults under the boot folder.
 // Only sets the ext pairing if the ext file actually exists, so a missing ext
 // ROM doesn't force the composite path / a load failure.
-void amigacd_set_default_roms(int cdtv)
+int amigacd_set_default_roms(int sys)
 {
 	const char *mname = 0, *ename = 0;
-	amigacd_default_rom_names(cdtv, &mname, &ename);
+	amigacd_default_rom_names(sys, &mname, &ename);
 
 	char mpath[1024], epath[1024];
 	snprintf(mpath, sizeof(mpath), "%s/%s", getRootDir(), mname);
 	snprintf(epath, sizeof(epath), "%s/%s", getRootDir(), ename);
 
+	// The main ROM is only replaced when the default is actually there. It
+	// used to be set unconditionally, which meant switching machine on a card
+	// whose ROMs are named anything else -- CD32.rom rather than
+	// kick40060.CD32, say, which is what MiSTer's own Amiga sets ship as --
+	// pointed the config at a file that does not exist and took the working
+	// ROM with it. The ext ROM has always been guarded this way; the main one
+	// is the half that matters more.
+	if (!FileExists(mpath, 0))
+	{
+		printf("AmigaCD: default ROM for %s not found (%s), keeping the current one\n",
+		       amigacd_system_name(sys), mpath);
+		return 0;
+	}
+
 	minimig_set_kickstart(mpath);              // also clears any stale ext pairing
 	if (FileExists(epath, 0)) minimig_set_extrom(epath);
+	return 1;
 }
 
 // Apply a complete authentic CD32 or CDTV machine profile (CPU / chipset /
@@ -959,14 +1252,54 @@ void amigacd_set_default_roms(int cdtv)
 // AmigaCD Settings menu. Defaults match an authentic CD32: D-Cache OFF (the
 // 68EC020 has no data cache) and no FastRAM. CDTV is a 68000 (cpu 0x00,
 // chipset 0x20, 1M chip).
-void amigacd_apply_system(int cdtv)
+int amigacd_apply_system(int sys)
 {
-	if (cdtv)
+	if (sys == AMIGACD_SYS_CDTV)
 	{
 		minimig_config.cpu     = 0x00; // 68000
 		minimig_config.chipset = 0x20; // OCS + CONFIG_CDTV
 		minimig_config.memory  = 0x01; // 1M chip, no fast
 		minimig_config.ide_cfg = 0x00; // CDTV bridge (no IDE)
+	}
+	else if (sys == AMIGACD_SYS_A500)
+	{
+		// A plain A500: 68000, OCS, 512K chip + the 512K trapdoor card, and no
+		// CD hardware at all -- neither the CDTV bridge nor Akiko. Games come
+		// from df0 and hardfiles, which the Floppy and CD rows already cover.
+		//
+		// The 68000 here is fx68k, the same core the CDTV profile selects
+		// (cpucfg 0). Save states are refused in that mode -- Minimig.sv gates
+		// them on `ss_supported = |cpucfg` -- so an A500 cannot save state
+		// until fx68k gains an export and restore path.
+		minimig_config.cpu     = 0x00; // 68000
+		minimig_config.chipset = 0x00; // OCS, no CDTV bridge
+		minimig_config.memory  = 0x04; // 512K chip + 512K slow, no fast
+		minimig_config.ide_cfg = 0x00; // no CD bridge
+	}
+	else if (sys == AMIGACD_SYS_A1200)
+	{
+		// An A1200 with a hard disk: AGA, 68EC020 with the D-Cache on, 2 MB
+		// chip and 8 MB of Zorro II fast, Gayle IDE, and NO CD drive.
+		//
+		// The missing CD drive is the point of this profile, not an omission.
+		// A CD32 boots its own ROM, which owns the machine and goes looking
+		// for a disc; ejecting one does not hand the boot over to the hard
+		// disk. Hard-disk software -- AmigaVision, a Workbench install --
+		// needs a machine that has no CD boot path at all and an A1200
+		// Kickstart that enumerates IDE, which is this.
+		//
+		// hardfile[0].cfg = 0 below is what removes the drive, and it doubles
+		// as how amigacd_system() tells an A1200 from a CD32: the two agree on
+		// every other bit.
+		minimig_config.cpu     = 0x13; // 68EC020, D-Cache ON
+		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
+		// 8 MB of Zorro II fast is a seed, not a clamp: it is set here, when
+		// the user picks the machine, and left alone afterwards. Hard-disk
+		// software wants fast RAM and a machine that boots into AmigaVision
+		// with none is not a configuration anyone chose on purpose -- but the
+		// FastRAM row still owns it from this point on.
+		minimig_config.memory  = 0x33; // 2M chip + 8M Zorro II fast
+		minimig_config.ide_cfg = 0x01; // Gayle IDE
 	}
 	else
 	{
@@ -975,20 +1308,47 @@ void amigacd_apply_system(int cdtv)
 		minimig_config.memory  = 0x03; // 2M chip, no fast (authentic CD32 default)
 		minimig_config.ide_cfg = 0x01; // akiko / IDE
 	}
-	minimig_config.hardfile[0].cfg = 2; // single removable CD slot
+	// One removable CD slot on every machine that has a CD drive. The A1200
+	// has none -- see above.
+	minimig_config.hardfile[0].cfg = (sys == AMIGACD_SYS_A1200) ? 0 : 2;
+
+	// Upstream's dedicated drive slots have to agree with the profile:
+	// minimig_ConfigChipset() derives CONFIG_CDTV from cdtv_drive.cfg and
+	// clears the bit when that slot is empty, so setting minimig_config.chipset
+	// above is not on its own enough to bring the core up as a CDTV.
+	minimig_config.cdtv_drive.cfg = (sys == AMIGACD_SYS_CDTV) ? 1 : 0;
+	minimig_config.cd32_drive.cfg = (sys == AMIGACD_SYS_CD32) ? 1 : 0;
+
 	if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1; // single df0
 
-	amigacd_set_default_roms(cdtv);
+	int rom_ok = amigacd_set_default_roms(sys);
 
 	minimig_ConfigCPU(minimig_config.cpu);
-	minimig_ConfigChipset(minimig_config.chipset);
+	minimig_ConfigChipset(&minimig_config);
 	minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
 	// memory is applied on reset via the UploadKickstart / ApplyConfiguration path
+	return rom_ok;
 }
 
 int amigacd_is_cdtv(void)
 {
 	return (minimig_config.chipset & CONFIG_CDTV) ? 1 : 0;
+}
+
+// Which machine the live config describes. Derived rather than stored, so a
+// config written before A500 existed still reads correctly: CONFIG_CDTV names
+// the CDTV, and of what is left a 68000 with no CD bridge is the A500 -- a
+// CD32 is always a 68EC020.
+int amigacd_system(void)
+{
+	if (minimig_config.chipset & CONFIG_CDTV) return AMIGACD_SYS_CDTV;
+	if ((minimig_config.cpu & 0x03) == 0)     return AMIGACD_SYS_A500;
+	// A1200 and CD32 agree on CPU and chipset; the CD drive is what separates
+	// them, and its absence is a property of the machine rather than of what
+	// the user happens to have mounted. hardfile[0].cfg is the slot, not the
+	// disc: 2 means "there is a removable CD device", 0 means there is not.
+	if (minimig_config.hardfile[0].cfg == 0)  return AMIGACD_SYS_A1200;
+	return AMIGACD_SYS_CD32;
 }
 
 static char minimig_adjust = 0;
@@ -1167,8 +1527,9 @@ void minimig_ConfigCPU(unsigned char cpu)
 	spi_uio_cmd8(UIO_MM2_CPU, cpu & 0x3f);
 }
 
-void minimig_ConfigChipset(unsigned char chipset)
+void minimig_ConfigChipset(mm_configTYPE *config)
 {
+	unsigned char chipset = config->cdtv_drive.cfg ? (config->chipset | CONFIG_CDTV) : (config->chipset & ~CONFIG_CDTV);
 	spi_uio_cmd8(UIO_MM2_CHIP, chipset & 0x3f);
 }
 
@@ -1186,12 +1547,15 @@ void minimig_ConfigFloppyExt(unsigned char drive0, unsigned char drive1, unsigne
 	spi_uio_cmd8(UIO_MM2_FLPEX23, ((drive3 & 0x07) << 3) | (drive2 & 0x07));
 }
 
-// Hand the SNAC user port to MiSTer Floppy or to MT32-pi. Minimig.sv muxes
-// USER_OUT on this bit and resets mt32pi on the change, so the two can never
-// drive the port at once.
-void minimig_ConfigUserPort(mm_userportMode mode)
+// One command carries both the tenant and the per-port modes, so they can never
+// be set inconsistently. Bits 1:0 keep their old meaning, which is why widening
+// the payload needs no config migration for the tenant itself.
+void minimig_ConfigSnac(void)
 {
-	spi_uio_cmd8(UIO_MM2_USRPORT, (mode == mmup_misterfloppy) ? 1 : 0);
+	unsigned char p1 = minimig_config.snac[0] & 0x07;
+	unsigned char p2 = minimig_config.snac[1] & 0x07;
+	uint16_t param = (uint16_t)((p2 << 11) | (p1 << 8) | (minimig_config.userport & 0x03));
+	spi_uio_cmd16(UIO_MM2_USRPORT, param);
 }
 
 void minimig_ConfigAutofire(unsigned char autofire, unsigned char mask)
@@ -1215,4 +1579,144 @@ void minimig_set_extcfg(unsigned int ext_cfg)
 unsigned int minimig_get_extcfg()
 {
 	return (minimig_config.ext_cfg2 << 16) | minimig_config.ext_cfg;
+}
+
+#define CD32_MAIN_ROM  "CD32.rom"
+#define CD32_EXT_ROM   "CD32_ext.rom"
+#define CDTV_MAIN_ROM  "CDTV.rom"
+#define CDTV_EXT_ROM   "CDTV_ext.rom"
+#define A500_MAIN_ROM  "a500.rom"
+#define A600_MAIN_ROM  "a600.rom"
+#define A1200_MAIN_ROM "a1200.rom"
+
+static const char *preset_rom_path(const char *name)
+{
+	static char path[1024];
+	snprintf(path, sizeof(path), "%s/%s", HomeDir(), name);
+	return path;
+}
+
+void minimig_cfg_set(int preset)
+{
+	switch (preset)
+	{
+	case CONFIG_PRESET_CD32:
+		minimig_config.cpu = 3; // 68020, d-cache off;
+		minimig_config.chipset = (6 << 2); // AGA
+		minimig_config.memory = 3; // ChipRAM 2MB, FastRAM 0MB
+		minimig_set_kickstart(preset_rom_path(CD32_MAIN_ROM));
+		if(getFileSize(minimig_config.kickstart) < 1024 * 1024) minimig_set_extrom(preset_rom_path(CD32_EXT_ROM));
+		minimig_config.autofire = 2 << 1; // CD32 joystick
+		minimig_config.cd32_drive.cfg = 1;
+		minimig_config.cdtv_drive.cfg = 0;
+		minimig_config.ide_cfg = 0;
+		break;
+
+	case CONFIG_PRESET_CDTV:
+		minimig_config.cpu = 0; // 68000
+		minimig_config.chipset = (2 << 2); // ECS
+		minimig_config.memory = 1; // ChipRAM 1MB, FastRAM 0MB
+		minimig_set_kickstart(preset_rom_path(CDTV_MAIN_ROM));
+		if (getFileSize(minimig_config.kickstart) < 1024 * 1024) minimig_set_extrom(preset_rom_path(CDTV_EXT_ROM));
+		minimig_config.autofire = 0; // Digital joystick
+		minimig_config.cd32_drive.cfg = 0;
+		minimig_config.cdtv_drive.cfg = 1;
+		minimig_config.ide_cfg = 0;
+		break;
+
+	case CONFIG_PRESET_A500:
+		minimig_config.cpu = 0; // 68000
+		minimig_config.chipset = (0 << 2); // OCS
+		minimig_config.memory = 0; // ChipRAM 512KB, FastRAM 0MB
+		minimig_set_kickstart(preset_rom_path(A500_MAIN_ROM));
+		minimig_config.autofire = 0; // Digital joystick
+		minimig_config.cd32_drive.cfg = 0;
+		minimig_config.cdtv_drive.cfg = 0;
+		minimig_config.ide_cfg = 0;
+		break;
+
+	case CONFIG_PRESET_A600:
+		minimig_config.cpu = 0; // 68000
+		minimig_config.chipset = (2 << 2); // ECS
+		minimig_config.memory = 1; // ChipRAM 1MB, FastRAM 0MB
+		minimig_set_kickstart(preset_rom_path(A600_MAIN_ROM));
+		minimig_config.autofire = 0; // Digital joystick
+		minimig_config.cd32_drive.cfg = 0;
+		minimig_config.cdtv_drive.cfg = 0;
+		minimig_config.ide_cfg = 0;
+		break;
+
+	case CONFIG_PRESET_A1200:
+		minimig_config.cpu = 3; // 68020, d-cache off;
+		minimig_config.chipset = (6 << 2); // AGA
+		minimig_config.memory = 3; // ChipRAM 2MB, FastRAM 0MB
+		minimig_set_kickstart(preset_rom_path(A1200_MAIN_ROM));
+		minimig_config.autofire = 0; // Digital joystick
+		minimig_config.cd32_drive.cfg = 0;
+		minimig_config.cdtv_drive.cfg = 0;
+		minimig_config.ide_cfg = 0;
+		break;
+	}
+}
+
+bool minimig_cfg_available(int preset)
+{
+	switch (preset)
+	{
+	case CONFIG_PRESET_CD32:
+		if (is_minimig() == 2)
+		{
+			uint64_t sz = getFileSize(preset_rom_path(CD32_MAIN_ROM));
+			return (sz >= 1024 * 1024) || ((sz >= 512 * 1024) && getFileSize(preset_rom_path(CD32_EXT_ROM)) >= 512 * 1024);
+		}
+		break;
+
+	case CONFIG_PRESET_CDTV:
+		if (is_minimig() == 2)
+		{
+			uint64_t sz = getFileSize(preset_rom_path(CDTV_MAIN_ROM));
+			return (sz >= 1024 * 1024) || ((sz >= 256 * 1024) && getFileSize(preset_rom_path(CDTV_EXT_ROM)) >= 256 * 1024);
+		}
+		break;
+
+	case CONFIG_PRESET_A500:
+		return getFileSize(preset_rom_path(A500_MAIN_ROM)) >= 256 * 1024;
+
+	case CONFIG_PRESET_A600:
+		return getFileSize(preset_rom_path(A600_MAIN_ROM)) >= 512 * 1024;
+
+	case CONFIG_PRESET_A1200:
+		return getFileSize(preset_rom_path(A1200_MAIN_ROM)) >= 512 * 1024;
+	}
+
+	return 0;
+}
+
+static drive_t cd32_drive = {};
+static drive_t cdtv_drive = {};
+
+int minimig_cd_drive_open(int slot, const char *filename)
+{
+	static fileTYPE cd_drive_file[2] = {};
+
+	drive_t *drv = slot ? &cdtv_drive : &cd32_drive;
+	drv->cd = 1;
+
+	const char *res = cd_drive_parse(drv, slot, filename);
+
+	int present = res ? ide_img_mount(&cd_drive_file[slot], res, 0) : 0;
+	drv->f = present ? &cd_drive_file[slot] : NULL;
+
+	const char *full = present ? res : "";
+	if (slot) cdtv_cd_set_cd_path(full);
+	else akiko_cd32_set_cd_path(full);
+
+	return present;
+}
+
+drive_t* minimig_cd_drive_get(int slot)
+{
+	drive_t *drive = slot ? &cdtv_drive : &cd32_drive;
+	if (drive->cd && (drive->chd_f || drive->f)) return drive;
+	return NULL;
 }

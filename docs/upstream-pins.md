@@ -9,12 +9,27 @@ against. Re-verify line numbers after moving off these.
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
-| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `748eb1d` "cd-da fixes" | 2026-08-03 |
+| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `de40622` "Merge PR #9, remount on savestate" | 2026-08-23 |
+| ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
+| ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
 | `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
 | ^ our core's fork point | | `3ab91cd` "Release 20260220." | 2026-02-20 |
 
 `52625a4` is merged into this repo's `master` as the working tree.
+
+**A newer userspace line exists and we are not on it.** `origin/amigacd-userspace`
+is the rebased successor to `amiga-console`, the same move we already made on the
+core side. It is a content superset, and it contains `7317947` — the
+physical-disc fork's own base, which our line predates by four months. See
+[userspace-branch-move.md](userspace-branch-move.md) for the gained/lost
+analysis and why moving first makes the physical-disc merge much smaller.
+
+**Check what your local clone is actually on.** As of 2026-08-07 the
+`upstream/main-cd32-cdtv` working tree was checked out on `master` — the branch
+this document warns contains none of the CD32 work — even though
+`scripts/fetch-upstream.sh` checks out `amiga-console`. Anything read out of it
+in that state was read against the wrong branch.
 
 ## Branch trap
 
@@ -117,6 +132,22 @@ came from.
 
 `cd32-cdtv-floppy-ipf`, `dual-mouse` in both repos; `vrakiko-cd32`,
 `dual-mouse-pr` in the core repo only.
+
+## The pin that was written down but not taken
+
+This table said `ab2f602` from 2026-08-07 until 2026-08-24, and the module on
+disk was `748eb1d` the whole time — checked byte for byte. The doc moved and the
+re-extract did not follow, so for two and a half weeks the pin described code
+that was not there.
+
+Worth a habit rather than an apology: move the pin in the same commit as the
+files, and if they ever have to be separate, verify with
+
+```bash
+git show <pin>:support/physical_disc/physical_disc.cpp | diff - support/physical_disc/physical_disc.cpp
+```
+
+which is the whole check, because the module is a verbatim copy by design.
 
 ## Syncing the physical_disc module
 

@@ -67,6 +67,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "ide.h"
 #include "support/physical_disc/physical_disc.h"
 #include "support/physical_disc/physical_disc_autoboot.h"
+#include "support/minimig/minimig_ssdiag.h"
 #include "profiling.h"
 #include "str_util.h"
 #include "autofire.h"
@@ -162,9 +163,13 @@ enum MENU
 	// Generic
 	MENU_GENERIC_MAIN1,
 	MENU_GENERIC_MAIN2,
+	MENU_GENERIC_MAIN3,
 	MENU_GENERIC_FILE_SELECTED,
 	MENU_GENERIC_IMAGE_SELECTED,
-	MENU_GENERIC_SAVE_WAIT,
+	MENU_CORES1,
+	MENU_CORES2,
+	MENU_SAVE_CHECK,
+	MENU_SAVE_WAIT,
 
 	// Arcade
 	MENU_ARCADE_DIP1,
@@ -180,6 +185,10 @@ enum MENU
 	MENU_MINIMIG_DISK1,
 	MENU_MINIMIG_DISK2,
 	MENU_MINIMIG_HDFFILE_SELECTED,
+	MENU_MINIMIG_CD32FILE_SELECTED,
+	MENU_MINIMIG_CDTVFILE_SELECTED,
+	MENU_MINIMIG_CD32FILE_START,
+	MENU_MINIMIG_CDTVFILE_START,
 	MENU_MINIMIG_ADFFILE_SELECTED,
 	MENU_MINIMIG_ROMFILE_SELECTED,
 	MENU_MINIMIG_EXTROMFILE_SELECTED,
@@ -187,6 +196,8 @@ enum MENU
 	MENU_MINIMIG_LOADCONFIG2,
 	MENU_MINIMIG_SAVECONFIG1,
 	MENU_MINIMIG_SAVECONFIG2,
+	MENU_MINIMIG_PRESET1,
+	MENU_MINIMIG_PRESET2,
 
 	// AmigaCD — simplified "console" Minimig variant
 	MENU_AMIGACD_MAIN1,
@@ -196,6 +207,7 @@ enum MENU
 	MENU_AMIGACD_ADVANCED1,
 	MENU_AMIGACD_ADVANCED2,
 	MENU_AMIGACD_CDFILE_SELECTED,
+	MENU_AMIGACD_HDFFILE_SELECTED,
 	MENU_AMIGACD_ADFFILE_SELECTED,
 	MENU_AMIGACD_ROMFILE_SELECTED,
 	MENU_AMIGACD_EXTROMFILE_SELECTED,
@@ -264,6 +276,11 @@ const char *config_autofire_msg[] = { "        AUTOFIRE OFF", "        AUTOFIRE 
 // Which df unit the AmigaCD floppy browser was opened for, so
 // MENU_AMIGACD_ADFFILE_SELECTED inserts into the row that asked.
 static int amigacd_fdd_unit = 0;
+// Which hardfile slot the Hard Disk browser is filling: 1 for Hard Disk 0
+// (IDE0 slave) and 2 for Hard Disk 1 (IDE1 master). The browser returns on
+// its own menustate long after the row that opened it has gone, the same
+// reason amigacd_fdd_unit above exists.
+static int amigacd_hdf_slot = 1;
 
 const char *config_joystick_mode[] = { "Digital", "Analog", "CD32", "Analog" };
 const char *config_button_turbo_msg[] = { "OFF", "FAST", "MEDIUM", "SLOW" };
@@ -276,6 +293,114 @@ const char *config_midilink_mode[] = {"Local", "Local", "  USB", "  UDP", "-----
 const char *config_afilter_msg[] = { "Internal","Custom" };
 const char *config_smask_msg[] = { "None", "1x", "2x", "1x Rotated", "2x Rotated" };
 const char *config_scale[] = { "Normal", "V-Integer", "HV-Integer-", "HV-Integer+", "HV-Integer", "???", "???", "???" };
+
+// Save state slots. Four, matching the four DDR3 windows process_ss() maps at
+// the core's advertised base (Minimig.sv CONF_STR "SS3C000000:C00000"), and
+// matching the four .ss1-.ss4 files FileGenerateSavestatePath() names. Labelled
+// 1-4 for the user; the wire value in status[53:52] is 0-3.
+static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
+
+// Save states are refused in two configurations. The OSD greys the rows out so
+// the user is told, rather than pressing SELECT and having nothing happen:
+//
+//  - Z3 fast RAM. The savestate windows start at DDR3 0x3C000000, which is
+//    inside the region ddram_ctrl.v hands to Z3 fast RAM, so the two cannot
+//    coexist. Moving the windows does not help: Z3_1 covers the whole of
+//    0x30000000-0x3FFFFFFF. Z2 fast RAM is a different matter -- it sits at
+//    0x30000000-0x307FFFFF, clear of the windows, and IS carried in the save
+//    state. Fast RAM index >= 4 means a Z3 board (cpu_wrapper.v ac_memcard[2]
+//    selects the 128/256 MB Z3 autoconfig entries). The index is decoded here
+//    exactly as the FastRAM row itself decodes it.
+//  - 68000. cpu_wrapper exports TG68K state only -- fx68k has no equivalent --
+//    so Minimig.sv gates the request on `ss_supported = |cpucfg`, and userio.v
+//    takes cpucfg from the low two bits of the CPU config byte, i.e.
+//    minimig_config.cpu & 3. Without this the request would be silently
+//    swallowed in RTL.
+// Name the save state after the mounted disc.
+//
+// hardfile[0].filename cannot be used directly: for a physical disc it holds
+// PHYSICAL_DISC_SENTINEL, "*PHYSICAL_DISC*". That has no '.', which used to
+// segfault FileGenerateSavestatePath outright, and even with that fixed the
+// '*' is not a legal exfat filename character, so the state could never be
+// written. Use the same identity per-game NVRAM already uses -- the ISO9660
+// volume label, or a TOC-geometry UUID for discs without one.
+static const char *amigacd_ss_name()
+{
+	static char name[256];
+	const char *f = minimig_config.hardfile[0].filename;
+
+	// No CD: name the state after the hard disk instead. The A1200 profile has
+	// no CD drive at all, and its software lives in the HDF -- without this a
+	// machine that can be saved has nothing to name the file after, and
+	// process_ss is never armed, so the save is captured into DDR3 and never
+	// reaches the card.
+	if (!f[0]) return minimig_config.hardfile[1].filename;
+
+	if (strcmp(f, PHYSICAL_DISC_SENTINEL)) return f;   // an image path: use it
+
+	if (physical_disc_save_name(PHYSICAL_DISC_DISC_NONE, name, sizeof(name)) &&
+	    name[0])
+	{
+		return name;
+	}
+
+	// No label and no geometry to hash: still needs a name a file can carry.
+	strcpy(name, "PhysicalDisc");
+	return name;
+}
+
+static int minimig_ss_blocked()
+{
+	int fastram = ((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5);
+	return (fastram >= 4) || !(minimig_config.cpu & 0x03);
+}
+
+// Ask the core for a save, from either menu.
+//
+// Both save rows used to raise status[51] themselves, and only the AmigaCD one
+// armed process_ss() first. The other did not, so a save pressed from the
+// Minimig System page was captured into the DDR3 window by the core, announced
+// as "Save state: saved" -- that toast is the CORE's, and it means the capture
+// finished, not that anything reached the card -- and then never written,
+// because the host poller only writes when the window's counter word differs
+// from the last one it saw and nothing had reset that. Measured on hardware:
+// core says saved at t=2453, no "Saving the state" from the writer ever
+// follows, no file on the card, and the next restore quietly loads the
+// PREVIOUS save and looks like it worked.
+//
+// Arming is also what resets ss_cnt[] to 0xFFFFFFFF, so it is not optional
+// even when the poller is already enabled from an earlier save this session.
+//
+// Returns 0 without asking the core for anything when there is no name to save
+// under, because a capture nothing can write is worse than a refusal: it looks
+// like it worked.
+static int minimig_ss_request_save()
+{
+	const char *name = amigacd_ss_name();
+	if (!name || !name[0])
+	{
+		Info("No disc or HDF - cannot name the save", 2500);
+		return 0;
+	}
+
+	// Idempotent: re-maps the same four windows, reloads them from the file on
+	// disk and re-stamps the counter word.
+	process_ss(name, 1);
+
+	// The core reports "saved" long before the file exists -- the poller writes
+	// it. Ask that poller to hurry, so a reset straight after the toast cannot
+	// leave the previous save on the card pretending to be this one.
+	ss_expect_save();
+
+	// The core edge-detects this in RTL (Minimig.sv ss_save_edge), so a
+	// set/clear pair is one save and a bit left high cannot re-arm. Clearing it
+	// again is housekeeping on the persisted status word, not a safety
+	// property.
+	user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+	user_io_status_set("[51]", 1);
+	user_io_status_set("[51]", 0);
+	return 1;
+}
 
 #define DPAD_NAMES 4
 #define DPAD_BUTTON_NAMES 12  //DPAD_NAMES + 6 buttons + start/select
@@ -332,6 +457,7 @@ static uint32_t fs_ExtLen = 0;
 static uint32_t fs_Options;
 static uint32_t fs_MenuSelect;
 static uint32_t fs_MenuCancel;
+static int fs_RecentIdx = -1;
 
 static advancedButtonMap abm_edit_map = {};
 static advancedButtonMap *abm_edit_ptr = NULL;
@@ -360,6 +486,8 @@ static char SelectedLabel[1024] = {};
 static char Selected_F[16][1024] = {};
 static char Selected_S[16][1024] = {};
 static char Selected_tmp[1024] = {};
+static char Selected_CD32[1024] = {};
+static char Selected_CDTV[1024] = {};
 
 void StoreIdx_F(int idx, const char *path)
 {
@@ -434,7 +562,7 @@ static char filter[256] = {};
 static unsigned long filter_typing_timer = 0;
 
 // this function displays file selection menu
-void SelectFile(const char* path, const char* pFileExt, int Options, unsigned char MenuSelect, unsigned char MenuCancel)
+void SelectFile(const char* path, const char* pFileExt, int Options, unsigned char MenuSelect, unsigned char MenuCancel, int recent_idx)
 {
 	static char tmp[1024];
 	printf("pFileExt = %s\n", pFileExt);
@@ -492,6 +620,7 @@ void SelectFile(const char* path, const char* pFileExt, int Options, unsigned ch
 	fs_Options = Options & ~SCANO_NOENTER;
 	fs_MenuSelect = MenuSelect;
 	fs_MenuCancel = MenuCancel;
+	fs_RecentIdx = recent_idx;
 
 	menustate = MENU_FILE_SELECT1;
 }
@@ -1617,7 +1746,7 @@ void HandleUI(void)
 			menusub = 0;
 			if(!is_menu() && (get_key_mod() & (LALT | RALT))) //Alt+Menu
 			{
-				SelectFile("", 0, SCANO_CORES, MENU_CORE_FILE_SELECTED1, MENU_NONE1);
+				menustate = MENU_CORES1;
 			}
 			else if (saved_menustate)
 			{
@@ -1822,6 +1951,7 @@ void HandleUI(void)
 			case 4:  // Load ROM
 				if (select)
 				{
+					ioctl_index = 0;
 					SelectFile(Selected_F[menusub], "ROM", 0, MENU_ARCHIE_MAIN_FILE_SELECTED, MENU_ARCHIE_MAIN1);
 				}
 				break;
@@ -1901,7 +2031,13 @@ void HandleUI(void)
 		}
 		break;
 
-	case MENU_GENERIC_MAIN1: {
+	case MENU_GENERIC_MAIN1:
+	case MENU_CORES1:
+		parentstate = menustate;
+		menustate = MENU_SAVE_CHECK;
+		break;
+
+	case MENU_GENERIC_MAIN2: {
 		hdmask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 		user_io_read_confstr();
 		uint32_t s_entry = 0;
@@ -2233,7 +2369,7 @@ void HandleUI(void)
 		}
 
 		parentstate = menustate;
-		menustate = MENU_GENERIC_MAIN2;
+		menustate = MENU_GENERIC_MAIN3;
 
 		// set helptext with core display on top of basic info
 		sprintf(helptext_custom, HELPTEXT_SPACER);
@@ -2249,9 +2385,30 @@ void HandleUI(void)
 
 	} break;
 
-	case MENU_GENERIC_SAVE_WAIT:
+	case MENU_CORES2:
+		SelectFile("", 0, SCANO_CORES, MENU_CORE_FILE_SELECTED1, MENU_NONE1);
+		break;
+
+	case MENU_SAVE_CHECK:
 		menumask = 0;
-		parentstate = menustate;
+		if (is_arcade() && spi_uio_cmd(UIO_CHK_UPLOAD))
+		{
+			menu_save_timer = GetTimer(500);
+			arcade_nvm_save();
+		}
+
+		if (menu_save_timer && !CheckTimer(menu_save_timer))
+		{
+			for (int i = 0; i < 16; i++) OsdWrite(m++);
+			OsdWrite(8, "          Saving...");
+			menustate = MENU_SAVE_WAIT;
+			break;
+		}
+
+		menustate = parentstate+1;
+		break;
+
+	case MENU_SAVE_WAIT:
 		if (menu)
 		{
 			menu_save_timer = 0;
@@ -2260,11 +2417,11 @@ void HandleUI(void)
 		else if (menu_save_timer && CheckTimer(menu_save_timer))
 		{
 			menu_save_timer = 0;
-			menustate = MENU_GENERIC_MAIN1;
+			menustate = parentstate + 1;
 		}
 		break;
 
-	case MENU_GENERIC_MAIN2:
+	case MENU_GENERIC_MAIN3:
 		saved_menustate = MENU_GENERIC_MAIN1;
 
 		// F/S option not found -> deactivate mgl.
@@ -2274,18 +2431,7 @@ void HandleUI(void)
 			mgl->state = 3;
 		}
 
-		if (menu_save_timer && !CheckTimer(menu_save_timer))
-		{
-			for (int i = 0; i < 16; i++) OsdWrite(m++);
-			OsdWrite(8, "          Saving...");
-			menustate = MENU_GENERIC_SAVE_WAIT;
-		}
-		else if (is_arcade() && spi_uio_cmd(UIO_CHK_UPLOAD))
-		{
-			menu_save_timer = GetTimer(1000);
-			arcade_nvm_save();
-		}
-		else if (menu)
+		if (menu)
 		{
 			menustate = MENU_NONE1;
 		}
@@ -3258,7 +3404,7 @@ void HandleUI(void)
 			fs_MenuCancel = parentstate;
 			strcpy(fs_pFileExt, "INI");
 			if (!FileExists(Selected_F[15])) snprintf(Selected_F[15], sizeof(Selected_F[15]), PRESET_DIR);
-			if (select) SelectFile(Selected_F[15], fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel);
+			if (select) SelectFile(Selected_F[15], fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel, 15);
 			else if (recent_init(15)) menustate = MENU_RECENT1;
 			break;
 		}
@@ -4686,7 +4832,7 @@ void HandleUI(void)
 				fs_MenuSelect = MENU_ST_FDD_FILE_SELECTED;
 				fs_MenuCancel = MENU_ST_MAIN1;
 				strcpy(fs_pFileExt, "ST");
-				if (select) SelectFile(Selected_F[menusub], "ST", fs_Options, fs_MenuSelect, fs_MenuCancel);
+				if (select) SelectFile(Selected_F[menusub], "ST", fs_Options, fs_MenuSelect, fs_MenuCancel, menusub);
 				else if (recent_init(menusub)) menustate = MENU_RECENT1;
 			}
 		}
@@ -4715,7 +4861,7 @@ void HandleUI(void)
 						fs_MenuSelect = MENU_ST_SYSTEM_FILE_SELECTED;
 						fs_MenuCancel = MENU_ST_MAIN1;
 						strcpy(fs_pFileExt, "STC");
-						if (select) SelectFile(Selected_F[menusub], fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel);
+						if (select) SelectFile(Selected_F[menusub], fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel, menusub);
 						else if (recent_init(menusub)) menustate = MENU_RECENT1;
 					}
 				}
@@ -4914,7 +5060,7 @@ void HandleUI(void)
 				fs_MenuSelect = MENU_ST_HDD_FILE_SELECTED;
 				fs_MenuCancel = MENU_ST_SYSTEM1;
 				strcpy(fs_pFileExt, "VHD");
-				if (select) SelectFile(Selected_S[menusub], "VHD", fs_Options, fs_MenuSelect, fs_MenuCancel);
+				if (select) SelectFile(Selected_S[menusub], "VHD", fs_Options, fs_MenuSelect, fs_MenuCancel, menusub + 500);
 				else if (recent_init(menusub + 500)) menustate = MENU_RECENT1;
 			}
 		}
@@ -5288,7 +5434,7 @@ void HandleUI(void)
 			if (is_minimig())
 			{
 				menustate = MENU_MINIMIG_MAIN1;
-				menusub = 8;
+				menusub = 10;
 			}
 			else
 			{
@@ -5427,7 +5573,7 @@ void HandleUI(void)
 			helptext_idx = 0;
 		}
 
-		if (recent && recent_init((fs_Options & SCANO_CORES) ? -1 : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500 : ioctl_index))
+		if (recent && recent_init((fs_RecentIdx >= 0) ? fs_RecentIdx : (fs_Options & SCANO_CORES) ? -1 : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500 : ioctl_index))
 		{
 			menustate = MENU_RECENT1;
 		}
@@ -5886,33 +6032,47 @@ void HandleUI(void)
 						strcat(s, "* active after reset *");
 					}
 					else
+					{
 						strcpy(s, "");
+					}
 					MenuWrite(i, s, menusub == (uint32_t)i, (i > drives) || (i > minimig_config.floppy.drives));
 				}
 			}
 
 			m = 4;
+			if (is_minimig() == 2)
+			{
+				if (minimig_cfg_available(CONFIG_PRESET_CD32)) menumask |= 0x10;
+				if (minimig_cfg_available(CONFIG_PRESET_CDTV)) menumask |= 0x20;
+
+				MenuWrite(m++, " Start CD32 Game", menusub == 4, !(menumask & 0x10));
+				MenuWrite(m++, " Start CDTV Game", menusub == 5, !(menumask & 0x20));
+				MenuWrite(m++);
+			}
+
 			strcpy(s,      " Joystick Swap:          ");
-			strcat(s, (minimig_config.autofire & 0x8) ? " ON" : "OFF");
-			MenuWrite(m++, s, menusub == 4, 0);
+			strcat(s, (minimig_config.autofire & 0x8) ? " On" : "Off");
+			MenuWrite(m++, s, menusub == 6, 0);
 			MenuWrite(m++),
 
-			MenuWrite(m++, " Drives                    \x16", menusub == 5, 0);
-			MenuWrite(m++, " System                    \x16", menusub == 6, 0);
-			MenuWrite(m++, " Audio & Video             \x16", menusub == 7, 0);
+			MenuWrite(m++, " CD & HDD                  \x16", menusub == 7, 0);
+			MenuWrite(m++, " System                    \x16", menusub == 8, 0);
+			MenuWrite(m++, " Audio & Video             \x16", menusub == 9, 0);
 			if (spi_uio_cmd16(UIO_GET_OSDMASK, 0) & 1)
 			{
-				menumask |= 0x100;
-				MenuWrite(m++, " MT32-pi                   \x16", menusub == 8);
+				menumask |= 0x400;
+				MenuWrite(m++, " MT32-pi                   \x16", menusub == 10);
 			}
 
 			MenuWrite(m++);
-			MenuWrite(m++, " Save configuration        \x16", menusub == 9, 0);
-			MenuWrite(m++, " Load configuration        \x16", menusub == 10, 0);
+			MenuWrite(m++, " Load preset               \x16", menusub == 11, 0);
+			MenuWrite(m++, " Load configuration        \x16", menusub == 12, 0);
+			MenuWrite(m++, " Save configuration        \x16", menusub == 13, 0);
+			MenuWrite(m++);
 
 			while (m < 14) MenuWrite(m++);
-			MenuWrite(m++, " Reset", menusub == 11, 0);
-			MenuWrite(m, STD_EXIT, menusub == 12, 0);
+			MenuWrite(m++, " Reset", menusub == 14, 0);
+			MenuWrite(m, STD_EXIT, menusub == 15, 0);
 
 			if (!adjvisible) break;
 			firstmenu += adjvisible;
@@ -5964,11 +6124,45 @@ void HandleUI(void)
 					fs_MenuSelect = MENU_MINIMIG_ADFFILE_SELECTED;
 					fs_MenuCancel = MENU_MINIMIG_MAIN1;
 					strcpy(fs_pFileExt, "ADF");
-					if (select) SelectFile(Selected_F[menusub], "ADF", fs_Options, fs_MenuSelect, fs_MenuCancel);
+					if (select) SelectFile(Selected_F[menusub], "ADF", fs_Options, fs_MenuSelect, fs_MenuCancel, 0);
 					else if (recent_init(0)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 4)
+			else if (menusub == 4 && (menumask & 0x10))
+			{
+				if (select || recent)
+				{
+					fs_Options = SCANO_DIR | SCANO_UMOUNT;
+					fs_MenuSelect = MENU_MINIMIG_CD32FILE_START;
+					fs_MenuCancel = MENU_MINIMIG_MAIN1;
+					strcpy(fs_pFileExt, "ISOCUECHDIMG");
+					if (select)
+					{
+						if (!Selected_CD32[0]) memcpy(Selected_CD32, minimig_config.cd32_drive.filename, sizeof(Selected_CD32));
+						SelectFile(Selected_CD32, fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel, 501);
+					}
+					else if (recent_init(501)) menustate = MENU_RECENT1;
+					break;
+				}
+			}
+			else if (menusub == 5 && (menumask & 0x20))
+			{
+				if (select || recent)
+				{
+					fs_Options = SCANO_DIR | SCANO_UMOUNT;
+					fs_MenuSelect = MENU_MINIMIG_CDTVFILE_START;
+					fs_MenuCancel = MENU_MINIMIG_MAIN1;
+					strcpy(fs_pFileExt, "ISOCUECHDIMG");
+					if (select)
+					{
+						if (!Selected_CDTV[0]) memcpy(Selected_CDTV, minimig_config.cdtv_drive.filename, sizeof(Selected_CDTV));
+						SelectFile(Selected_CDTV, fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel, 502);
+					}
+					else if (recent_init(502)) menustate = MENU_RECENT1;
+					break;
+				}
+			}
+			else if (menusub == 6)
 			{
 				minimig_config.autofire ^= 0x8;
 				menustate = MENU_MINIMIG_CHIPSET1;
@@ -5977,42 +6171,47 @@ void HandleUI(void)
 			}
 			else if (select)
 			{
-				if (menusub == 5)
+				if (menusub == 7)
 				{
 					menustate = MENU_MINIMIG_DISK1;
 					menusub = 0;
 				}
-				else if (menusub == 6)
+				else if (menusub == 8)
 				{
 					menustate = MENU_MINIMIG_CHIPSET1;
 					menusub = 0;
 				}
-				else if (menusub == 7)
+				else if (menusub == 9)
 				{
 					menustate = MENU_MINIMIG_VIDEO1;
 					menusub = 0;
 				}
-				else if (menusub == 8)
+				else if (menusub == 10)
 				{
 					menusub = 0;
 					menustate = MENU_MT32PI_MAIN1;
 				}
-				else if (menusub == 9)
+				else if (menusub == 11)
 				{
 					menusub = 0;
-					menustate = MENU_MINIMIG_SAVECONFIG1;
+					menustate = MENU_MINIMIG_PRESET1;
 				}
-				else if (menusub == 10)
+				else if (menusub == 12)
 				{
 					menusub = 0;
 					menustate = MENU_MINIMIG_LOADCONFIG1;
 				}
-				else if (menusub == 11)
+				else if (menusub == 13)
+				{
+					menusub = 0;
+					menustate = MENU_MINIMIG_SAVECONFIG1;
+				}
+				else if (menusub == 14)
 				{
 					menustate = MENU_NONE1;
 					minimig_reset();
 				}
-				else if (menusub == 12)
+				else if (menusub == 15)
 				{
 					menustate = MENU_NONE1;
 				}
@@ -6125,13 +6324,13 @@ void HandleUI(void)
 			else
 			{
 				menustate = MENU_MINIMIG_MAIN1;
-				menusub = 10;
+				menusub = 12;
 			}
 		}
 		if (menu || left)
 		{
 			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 10;
+			menusub = 12;
 		}
 		break;
 
@@ -6213,36 +6412,115 @@ void HandleUI(void)
 				minimig_mgl_save();
 			}
 			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 9;
+			menusub = 13;
 		}
 		else
 		if (menu || left) // exit menu
 		{
 			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 9;
+			menusub = 13;
+		}
+		break;
+
+	case MENU_MINIMIG_PRESET1:
+		helptext_idx = 0;
+		menumask = 0x100;
+		parentstate = menustate;
+		OsdSetTitle("Load preset", 0);
+
+		if (minimig_cfg_available(CONFIG_PRESET_A500)) menumask |= 1;
+		if (minimig_cfg_available(CONFIG_PRESET_A600)) menumask |= 2;
+		if (minimig_cfg_available(CONFIG_PRESET_A1200)) menumask |= 4;
+		if (minimig_cfg_available(CONFIG_PRESET_CDTV)) menumask |= 8;
+		if (minimig_cfg_available(CONFIG_PRESET_CD32)) menumask |= 16;
+
+		m = 0;
+		OsdWrite(m++, "", 0, 0);
+		OsdWrite(m++, " A500  OCS ChipRAM 512KB", menusub == 0, !(menumask & 1));
+		OsdWrite(m++, " A600  ECS ChipRAM 1MB", menusub == 1, !(menumask & 2));
+		OsdWrite(m++, " A1200 AGA ChipRAM 2MB", menusub == 2, !(menumask & 4));
+		OsdWrite(m++, "", 0, 0);
+		OsdWrite(m++, " CDTV  ECS ChipRAM 1MB", menusub == 3, !(menumask & 8));
+		OsdWrite(m++, " CD32  AGA ChipRAM 2MB", menusub == 4, !(menumask & 16));
+
+		while (m < OsdGetSize() - 1) OsdWrite(m++);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 8, 0);
+		menustate = MENU_MINIMIG_PRESET2;
+		break;
+
+	case MENU_MINIMIG_PRESET2:
+		if (select)
+		{
+			if (menusub < 8)
+			{
+				switch (menusub)
+				{
+				case 0:
+					minimig_cfg_set(CONFIG_PRESET_A500);
+					break;
+
+				case 1:
+					minimig_cfg_set(CONFIG_PRESET_A600);
+					break;
+
+				case 2:
+					minimig_cfg_set(CONFIG_PRESET_A1200);
+					break;
+
+				case 3:
+					minimig_cfg_set(CONFIG_PRESET_CDTV);
+					break;
+
+				case 4:
+					minimig_cfg_set(CONFIG_PRESET_CD32);
+					break;
+				}
+				minimig_reset();
+				menustate = MENU_MINIMIG_MAIN1;
+				menusub = 0;
+			}
+			else if (menusub == 8)
+			{
+				menustate = MENU_MINIMIG_MAIN1;
+				menusub = 11;
+			}
+		}
+		if (menu || left)
+		{
+			menustate = MENU_MINIMIG_MAIN1;
+			menusub = 11;
 		}
 		break;
 
 	case MENU_MINIMIG_CHIPSET1:
 		helptext_idx = HELPTEXT_CHIPSET;
-		// 13 selectable rows: 0..10 from this fork, 11 = upstream's A2065
-		// Ethernet row (menusub 9 upstream, renumbered on merge), 12 = Back.
-		menumask = 0x1FFF;
+		// 15 selectable rows: 0..10 from this fork, 11..12 save states,
+		// 13 = upstream's A2065 Ethernet row (menusub 9 upstream, renumbered
+		// twice on merge), 14 = Back.
+		menumask = 0x7FFF;
 		OsdSetTitle("System");
 		parentstate = menustate;
 
+		// *** THIS PAGE IS EXACTLY FULL ***
+		// The core's OSD is 16 lines (sys/osd.v OSD_HEIGHT 64 at highres, and
+		// OsdUpdate() only transmits OsdGetSize() == 16 of them), Back occupies
+		// the last one, so there are 15 lines for 14 rows. The blank separators
+		// this page used to carry between groups are gone: with them, m ran to
+		// 17 even BEFORE the save state rows, which put the Ethernet row on
+		// line 16 where OsdUpdate never sent it and let Back overwrite the
+		// blank on line 15. That row has been invisible since this fork added
+		// D-Cache and CPU Speed. Anything added here from now on has to
+		// displace something.
 		m = 0;
-		OsdWrite(m++, "", 0, 0);
-		strcpy(s, " CPU       : ");
+		strcpy(s, " CPU      : ");
 		strcat(s, config_cpu_msg[minimig_config.cpu & 0x03]);
 		OsdWrite(m++, s, menusub == 0, 0);
-		strcpy(s, " D-Cache   : ");
-		strcat(s, (minimig_config.cpu & 16) ? "ON" : "OFF");
+		strcpy(s, " D-Cache  : ");
+		strcat(s, (minimig_config.cpu & 16) ? "On" : "Off");
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
 		strcpy(s, " CPU Speed : ");
 		strcat(s, (minimig_config.cpu & 0x20) ? "14 MHz" : "Full");
 		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " Chipset   : ");
 		strcat(s, config_chipset_msg[(minimig_config.chipset >> 2) & 7]);
 		OsdWrite(m++, s, menusub == 3, 0);
@@ -6256,19 +6534,17 @@ void HandleUI(void)
 		strcat(s, config_memory_slow_msg[(minimig_config.memory >> 2) & 0x03]);
 		OsdWrite(m++, s, menusub == 6, 0);
 
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " Joystick  : ");
 		strcat(s, config_joystick_mode[(minimig_config.autofire & 6) >> 1]);
 		OsdWrite(m++, s, menusub == 7, 0);
 
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " ROM    : ");
 		{
 			char *path = HomeDir();
 			int len = strlen(path);
 			char *name = minimig_config.kickstart;
 			if (!strncasecmp(name, path, len))  name += len + 1;
-			strncat(&s[3], name, 24);
+			strncat(s, name, 20);
 		}
 
 		OsdWrite(m++, s, menusub == 8, 0);
@@ -6281,23 +6557,42 @@ void HandleUI(void)
 				strcat(s, "<none>");
 			} else {
 				if (!strncasecmp(name, path, len)) name += len + 1;
-				strncat(&s[3], name, 24);
+				strncat(s, name, 20);
 			}
 		}
 		OsdWrite(m++, s, menusub == 9, 0);
 		strcpy(s, " HRTmon : ");
 		strcat(s, (minimig_config.memory & 0x40) ? "enabled " : "disabled");
 		OsdWrite(m++, s, menusub == 10, 0);
+		sprintf(s, " FDD Turbo: %s", minimig_config.floppy.speed ? "On" : "Off");
+		MenuWrite(m++, s, menusub == 11, 0);
 
-		OsdWrite(m++, "", 0, 0);
+		// Save states. The core is the active party in the protocol: these rows
+		// only pick a slot and raise a request bit, the capture itself is
+		// entirely in RTL and the host's process_ss() poller notices the
+		// finished window within a second and writes it to disk.
+		//
+		// Both rows grey out together -- see minimig_ss_blocked() for the two
+		// reasons. A greyed row is still reachable with the cursor (same as the
+		// D-Cache row above), so the handlers re-test the condition.
+		{
+			int ss_blocked = minimig_ss_blocked();
+
+			strcpy(s, " Save slot : ");
+			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
+			OsdWrite(m++, s, menusub == 11, ss_blocked);
+
+			OsdWrite(m++, " Save state", menusub == 12, ss_blocked);
+		}
+
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		// Upstream renders this at menusub 9; this fork has two extra rows
-		// ahead of it, so it lands at 11 and Back moves to 12.
-		OsdWrite(m++, s, menusub == 11, 0);
+		// Upstream renders this at menusub 9; this fork has four extra rows
+		// ahead of it, so it lands at 13 and Back moves to 14.
+		OsdWrite(m++, s, menusub == 13, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 12, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 14, 0);
 
 		menustate = MENU_MINIMIG_CHIPSET2;
 		break;
@@ -6375,8 +6670,8 @@ void HandleUI(void)
 					}
 				}
 
+				minimig_ConfigChipset(&minimig_config);
 				menustate = MENU_MINIMIG_CHIPSET1;
-				minimig_ConfigChipset(minimig_config.chipset);
 			}
 			else if (menusub == 4)
 			{
@@ -6427,6 +6722,7 @@ void HandleUI(void)
 			else if (menusub == 8 && select)
 			{
 				ioctl_index = 1;
+				strcpy(Selected_F[4], minimig_config.kickstart);
 				SelectFile(Selected_F[4], "ROM", SCANO_DIR, MENU_MINIMIG_ROMFILE_SELECTED, MENU_MINIMIG_CHIPSET1);
 			}
 			else if (menusub == 9)
@@ -6440,6 +6736,7 @@ void HandleUI(void)
 				else if (select)
 				{
 					ioctl_index = 1;
+					strcpy(Selected_F[5], minimig_config.kickstart + strlen(minimig_config.kickstart) + 1);
 					SelectFile(Selected_F[5], "ROM", SCANO_DIR | SCANO_UMOUNT, MENU_MINIMIG_EXTROMFILE_SELECTED, MENU_MINIMIG_CHIPSET1);
 				}
 			}
@@ -6448,7 +6745,29 @@ void HandleUI(void)
 				minimig_config.memory ^= 0x40;
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
-			else if (menusub == 11)
+			else if (menusub == 11 && !minimig_ss_blocked())
+			{
+				// Save slot 1..4, stored 0..3. Kept in minimig_config so it
+				// survives "Save settings"; it is NOT pushed to status[53:52]
+				// here. The core samples slot_base continuously for the whole
+				// ~0.2 s dump, so writing the slot only immediately before the
+				// request (menusub 12 below) makes it impossible for a slot
+				// change to redirect a save that is already in flight.
+				int slot = minimig_config.ss_slot & 3;
+				slot = minus ? (slot + 3) & 3 : (slot + 1) & 3;
+				minimig_config.ss_slot = (unsigned char)slot;
+				menustate = MENU_MINIMIG_CHIPSET1;
+			}
+			else if (menusub == 12 && select && !minimig_ss_blocked())
+			{
+				// Everything this needs -- arming the writer included -- is in
+				// the shared helper. This row used to do the raise on its own
+				// and skip the arm, which is how a save could be announced and
+				// never written.
+				minimig_ss_request_save();
+				menustate = MENU_MINIMIG_CHIPSET1;
+			}
+			else if (menusub == 13)
 			{
 				// A2065 ethernet: OFF -> eth0 -> eth1 -> macvlan -> tap0,
 				// skipping anything this box cannot support (no second NIC,
@@ -6465,11 +6784,11 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
 			// Back. Upstream puts the A2065 row at menusub 9 and Back at 10;
-			// this fork has two extra rows ahead of them, so both shift up.
-			else if (menusub == 12)
+			// this fork has four extra rows ahead of them, so both shift up.
+			else if (menusub == 14)
 			{
 				menustate = MENU_MINIMIG_MAIN1;
-				menusub = 6;
+				menusub = 8;
 			}
 		}
 
@@ -6480,7 +6799,7 @@ void HandleUI(void)
 		else if (back || left)
 		{
 			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 6;
+			menusub = 8;
 		}
 		break;
 
@@ -6497,7 +6816,8 @@ void HandleUI(void)
 		break;
 
 	// ===================== AmigaCD console variant (simplified menu) =========
-	// Top level: CD / Floppy(df0) / System(CD32|CDTV) / Settings / Reset / Exit.
+	// Top level: CD / Real CD / Floppy x2 / Hard Disk / System / Settings /
+	// Advanced / Save / Reset / Exit.
 	// ChipRAM/CPU/chipset/HDD/video/config complexity is hidden; Settings exposes
 	// only FastRAM, D-Cache (020 only) and Main/Ext ROM browse. See
 	// research/docs/amiga-console-design-2026-06-13.md.
@@ -6508,10 +6828,19 @@ void HandleUI(void)
 		// the core menu itself is reskinned, the MiSTer menu stays reachable.
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 		helptext_idx = 0;
-		menumask = 0x3FF;           // CD, Real CD, DF0, DF1, System, Settings, Advanced, Save, Reset, Exit
+		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
+		// Reset, Exit -- twelve rows.
+		menumask = 0xFFF;
+
+		// The A1200 profile has no CD drive at all, so its two rows are dead.
+		// Greyed out rather than removed: the row positions are shared with
+		// every other system and menusub indices below them would all shift,
+		// and a row that vanishes reads as a bug where a greyed one reads as
+		// "not on this machine".
+		const int amigacd_has_cd = (amigacd_system() != AMIGACD_SYS_A1200);
+		if (!amigacd_has_cd) menumask &= ~0x003;
 		parentstate = menustate;
 
-		int cdtv = amigacd_is_cdtv();
 		// mister_floppy_status rides in the core's OSD mask: bit 6 board
 		// detected, bit 7 IBM/PC vs Shugart, bit 8 cable straight vs crossed.
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
@@ -6524,7 +6853,8 @@ void HandleUI(void)
 		// load, and ide_open then returns 0. Render the real mount state
 		// (drive[0].phys) so the row cannot claim a disc that is not there.
 		strcpy(s, " CD       : ");
-		if (!strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
+		if (!amigacd_has_cd) strcat(s, "* no drive *");
+		else if (!strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
 		{
 			strcat(s, ide_inst[0].drive[0].phys ? "* physical drive *" : "* no disc *");
 		}
@@ -6535,15 +6865,16 @@ void HandleUI(void)
 			strncat(s, p ? p + 1 : name, 24);
 		}
 		else strcat(s, "* no disc *");
-		OsdWrite(m++, s, menusub == 0, 0);
+		OsdWrite(m++, s, menusub == 0, !amigacd_has_cd);
 
 		// Physical CD-ROM drive attached to the MiSTer. Mounting parks the
 		// sentinel in hardfile[0].filename, which is what ide_open matches on.
 		// Re-selecting while mounted re-reads the TOC, i.e. disc swap.
 		{
 			strcpy(s, " Real CD  : ");
-			strcat(s, ide_inst[0].drive[0].phys ? "re-read TOC" : "mount drive");
-			OsdWrite(m++, s, menusub == 1, 0);
+			if (!amigacd_has_cd) strcat(s, "-");
+			else strcat(s, ide_inst[0].drive[0].phys ? "re-read TOC" : "mount drive");
+			OsdWrite(m++, s, menusub == 1, !amigacd_has_cd);
 		}
 
 		// df0 and df1. The core has always presented two drives -- floppy.drives
@@ -6587,22 +6918,62 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == (uint32_t)(2 + fu), 0);
 		}
 
+		// Two hard disks. HD0 is hardfile[1], the IDE0 slave, so it sits beside
+		// the CD slot (hardfile[0]) rather than displacing it -- a machine can
+		// boot from an HDF with a disc still mounted. HD1 is hardfile[2], the
+		// IDE1 master.
+		//
+		// Two rather than one because a single HDF is not how the software that
+		// wants them ships. AmigaVision keeps its saves and settings on a second
+		// volume, and with nowhere to mount it the system boots and then forgets
+		// everything on reset. ApplyConfiguration already opens all four IDE
+		// units, so the rows were the only part missing.
+		for (int hu = 0; hu < 2; hu++)
+		{
+			const int hslot = hu + 1;    // hardfile[1] and hardfile[2]
+			sprintf(s, " Hard Disk %d: ", hu);
+			if (minimig_config.hardfile[hslot].cfg && minimig_config.hardfile[hslot].filename[0])
+			{
+				char *hname = minimig_config.hardfile[hslot].filename;
+				char *hp = strrchr(hname, '/');
+				strncat(s, hp ? hp + 1 : hname, 22);
+			}
+			else strcat(s, "* none *");
+			OsdWrite(m++, s, menusub == (uint32_t)(4 + hu), 0);
+		}
+
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " System   : ");
-		strcat(s, cdtv ? "CDTV" : "CD32");
-		OsdWrite(m++, s, menusub == 4, 0);
+		strcat(s, amigacd_system_name(amigacd_system()));
+		OsdWrite(m++, s, menusub == 6, 0);
 
 		OsdWrite(m++, "", 0, 0);
-		OsdWrite(m++, " Settings                 \x16", menusub == 5, 0);
+		OsdWrite(m++, " Settings                 \x16", menusub == 7, 0);
 		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
 		// page so the everyday options stay a short list.
-		OsdWrite(m++, " Advanced                 \x16", menusub == 6, 0);
-		OsdWrite(m++, " Save settings", menusub == 7, 0);
+		OsdWrite(m++, " Advanced                 \x16", menusub == 8, 0);
+		OsdWrite(m++, " Save settings", menusub == 9, 0);
+
+		// Eject is BACKSPACE, which on a controller is A and B pressed together
+		// -- input.cpp synthesises JOY_BTN3 from that pair and maps it to
+		// BACKSPACE. Neither is written down anywhere the user would look, and
+		// with no hint the only discoverable way to change a mounted disc or
+		// disk was to mount a different one. Shown only while the cursor is on
+		// a row that can actually be ejected, so it reads as a property of the
+		// row rather than as decoration.
+		if (menusub <= 5 && !(menusub <= 1 && !amigacd_has_cd))
+		{
+			int occupied = (menusub == 0) ? (minimig_config.hardfile[0].filename[0] != 0)
+			             : (menusub == 1) ? 0
+			             : (menusub <= 3) ? ((df[menusub - 2].status & DSK_INSERTED) != 0)
+			                              : (minimig_config.hardfile[menusub - 3].filename[0] != 0);
+			if (occupied && m < OsdGetSize() - 2) OsdWrite(m++, " Eject: Backspace / A+B", 0, 1);
+		}
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 8, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 9, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 10, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 11, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 		break;
@@ -6795,47 +7166,117 @@ void HandleUI(void)
 					else if (recent_init(fu)) menustate = MENU_RECENT1;
 				}
 			}
-			else if (menusub == 4) // System: toggle CD32 <-> CDTV
+			else if (menusub == 4 || menusub == 5) // Hard Disk 0 / 1: select an HDF
+			{
+				if (select || recent)
+				{
+					// Which row is being filled has to survive the file
+					// browser, which comes back on its own menustate long
+					// after this branch has returned.
+					amigacd_hdf_slot = (menusub - 4) + 1;   // hardfile[1] or [2]
+					fs_Options = SCANO_DIR | SCANO_UMOUNT;
+					fs_MenuSelect = MENU_AMIGACD_HDFFILE_SELECTED;
+					fs_MenuCancel = MENU_AMIGACD_MAIN1;
+					strcpy(fs_pFileExt, "HDFVHDIMGDSK");
+					if (select)
+					{
+						if (!Selected_S[amigacd_hdf_slot][0])
+							memcpy(Selected_S[amigacd_hdf_slot],
+							       minimig_config.hardfile[amigacd_hdf_slot].filename,
+							       sizeof(Selected_S[amigacd_hdf_slot]));
+						SelectFile(Selected_S[amigacd_hdf_slot], fs_pFileExt, fs_Options,
+						           fs_MenuSelect, fs_MenuCancel);
+					}
+					else if (recent_init(500)) menustate = MENU_RECENT1;
+				}
+			}
+			else if (menusub == 6) // System: cycle CD32 -> CDTV -> A500 -> A1200
 			{
 				if (select || minus || plus)
 				{
-					amigacd_apply_system(amigacd_is_cdtv() ? 0 : 1);
-					// Refresh the active bridge with the mounted CD, if any.
-					if (minimig_config.hardfile[0].filename[0])
-						ide_open(0, minimig_config.hardfile[0].filename);
+					// minus steps backwards so the row behaves like every
+					// other multi-value row in this menu.
+					int old_sys = amigacd_system();
+					int sys = minus ? (old_sys + AMIGACD_SYS_COUNT - 1) % AMIGACD_SYS_COUNT
+					                : (old_sys + 1) % AMIGACD_SYS_COUNT;
+
+					// Each machine keeps its own settings. The machine being
+					// left is written out first, then the one arriving is read
+					// back if it has ever been configured -- so the discs, hard
+					// disks, RAM and ROM of both survive a round trip through
+					// the row.
+					if (!amigacd_switch_system(old_sys, sys))
+					{
+						// First time on this machine: build it from the
+						// profile. A missing default ROM is worth saying out
+						// loud -- the machine still boots, but as whatever
+						// Amiga the old ROM makes it, and the only other clue
+						// is the Main ROM row two menus away.
+						if (!amigacd_apply_system(sys))
+						{
+							const char *mname = 0;
+							amigacd_default_rom_names(sys, &mname, 0);
+							char msg[128];
+							snprintf(msg, sizeof(msg), "%s ROM %s not found",
+							         amigacd_system_name(sys), mname);
+							Info(msg, 2500);
+						}
+
+						// The A1200 has no CD drive, so a disc mounted under a
+						// previous system has to go with it -- otherwise the
+						// row keeps naming a disc that nothing can read.
+						if (sys == AMIGACD_SYS_A1200)
+						{
+							minimig_config.hardfile[0].filename[0] = 0;
+							ide_open(0, "");
+						}
+						// Refresh the active bridge with the mounted CD, if any.
+						else if (minimig_config.hardfile[0].filename[0])
+							ide_open(0, minimig_config.hardfile[0].filename);
+					}
 					menustate = MENU_AMIGACD_MAIN1;
 				}
 			}
-			else if (menusub == 5 && select) // Settings submenu
+			else if (menusub == 7 && select) // Settings submenu
 			{
 				menusub = 0;
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 6 && select) // Advanced submenu
+			else if (menusub == 8 && select) // Advanced submenu
 			{
 				menusub = 0;
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 7 && select) // Save settings -> default config slot 0
+			else if (menusub == 9 && select) // Save settings -> default config slot 0
 			{
 				// Persists the whole minimig_config: mounted CD (hardfile[0]),
-				// RAM (memory), CPU/chipset (System profile), D-Cache and ROMs.
-				// minimig_cfg_load(0) restores it on the next core load, and
-				// ApplyConfiguration()->hdd_open(0) re-mounts the saved CD.
-				minimig_cfg_save(0);
+				// the two hard disks, RAM, CPU/chipset (System profile),
+				// D-Cache and ROMs. minimig_cfg_load(0) restores it on the next
+				// core load, and ApplyConfiguration()->hdd_open() re-mounts
+				// everything. Also updates this machine's own file, so the
+				// System row hands back these settings rather than older ones.
+				amigacd_cfg_save_current();
 				minimig_mgl_save();
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 8 && select) // Reset
+			else if (menusub == 10 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 9 && select) // Exit
+			else if (menusub == 11 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
+		}
+		else if (c == KEY_BACKSPACE && (menusub == 4 || menusub == 5)) // eject a hard disk
+		{
+			const int hslot = (menusub - 4) + 1;
+			minimig_config.hardfile[hslot].filename[0] = 0;
+			minimig_config.hardfile[hslot].cfg = 0;
+			ide_open(hslot, "");
+			menustate = MENU_AMIGACD_MAIN1;
 		}
 		else if (c == KEY_BACKSPACE && (menusub == 2 || menusub == 3)) // eject floppy
 		{
@@ -6860,7 +7301,9 @@ void HandleUI(void)
 	{
 		OsdSetTitle("Settings", 0);
 		helptext_idx = 0;
-		menumask = 0x1F;           // FastRAM, D-Cache, Main ROM, Ext ROM, Back
+		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
+		// Save state(5), Restore state(6), Back(7) -- eight rows, so 0xFF.
+		menumask = 0xFF;
 		parentstate = menustate;
 
 		m = 0;
@@ -6903,8 +7346,28 @@ void HandleUI(void)
 		}
 		OsdWrite(m++, s, menusub == 3, 0);
 
+		// Save states. These rows were originally added to MENU_MINIMIG_CHIPSET1,
+		// which the AmigaCD console variant never reaches -- menu.cpp:5859 sends
+		// it straight to MENU_AMIGACD_MAIN1 and its own menu tree. The rows
+		// existed but were unreachable on the only variant that wanted them.
+		//
+		// All three grey out together on minimig_ss_blocked(): a restore is
+		// refused in exactly the configurations a save is (see that function),
+		// and the core enforces the same lockout in RTL regardless.
+		OsdWrite(m++, "", 0, 0);
+		{
+			int ss_blocked = minimig_ss_blocked();
+
+			strcpy(s, " Save slot: ");
+			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
+			OsdWrite(m++, s, menusub == 4, ss_blocked);
+
+			OsdWrite(m++, " Save state", menusub == 5, ss_blocked);
+			OsdWrite(m++, " Restore state", menusub == 6, ss_blocked);
+		}
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 4, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 7, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -6967,7 +7430,99 @@ void HandleUI(void)
 					SelectFile(Selected_F[5], "ROM", SCANO_DIR | SCANO_UMOUNT, MENU_AMIGACD_EXTROMFILE_SELECTED, MENU_AMIGACD_SETTINGS1);
 				}
 			}
-			else if (menusub == 4 && select) // Back
+			else if (menusub == 4 && !minimig_ss_blocked()) // Save slot 1-4
+			{
+				int slot = minimig_config.ss_slot & 3;
+				slot = minus ? (slot + 3) & 3 : (slot + 1) & 3;
+				minimig_config.ss_slot = (unsigned char)slot;
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 5 && select && !minimig_ss_blocked()) // Save state
+			{
+				// Arming the host poller happens here and nowhere earlier.
+				//
+				// process_ss() only ever armed itself from
+				// user_io_file_tx(..., opensave) or the arcade MRA path.
+				// Minimig uploads its Kickstart by a different route and
+				// reaches neither, so the poller's enabled flag stayed 0 and a
+				// state the core wrote into its DDR3 window was never
+				// persisted. Arming from the CD mount path instead was tried
+				// and the core would not boot -- that path runs during core
+				// init. The user's explicit save press is the latest possible
+				// moment, when everything is up.
+				//
+				// See minimig_ss_request_save(): it arms, asks, and refuses
+				// rather than pressing on when there is no name to save under.
+				minimig_ss_request_save();
+				// Close the OSD rather than returning to the Settings page.
+				//
+				// The outcome arrives as a toast ~250 ms later, and Info()
+				// draws only while menustate <= MENU_INFO (== 2). Staying on
+				// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
+				// far above it, so every toast this feature produces was
+				// silently discarded -- measured on hardware: "Save state:
+				// saved" and "Save state: FAILED" both logged as DROPPED at
+				// menustate=98, and the video-mode toasts with them.
+				//
+				// Closing also matches what the press means. The user asked
+				// the machine to do something and wants to watch it happen,
+				// not sit in a menu while it does.
+				menustate = MENU_NONE1;
+			}
+			else if (menusub == 6 && select && !minimig_ss_blocked()) // Restore state
+			{
+				// This is not housekeeping, it is the load. process_ss() maps
+				// the four DDR3 windows AND reads the four .ss files off disk
+				// into them (user_io.cpp:1988-2028). Nothing else on this core
+				// ever calls it -- the save row above is the only other caller
+				// -- so without this the window the core is about to validate
+				// holds whatever was there, and a restore after a power cycle,
+				// which is the whole point of the feature, could never work.
+				//
+				// It re-reads all four slots every press, ~16 MB. That is the
+				// cost of always validating the freshest file on disk rather
+				// than a stale window, on a keypress the user made deliberately.
+				// It also resets the poller's counters, so it cannot itself
+				// trigger a spurious write back to disk.
+				if (amigacd_ss_name()[0])
+					process_ss(amigacd_ss_name(), 1);
+
+				// status[54], edge-detected in RTL (Minimig.sv ss_load_edge)
+				// exactly as status[51] is. A level here would restore over and
+				// over -- ss_ctrl re-arms out of idle on any cycle load_req is
+				// high -- and the bit being cleared by userspace must not be
+				// what stands between the user and a machine that never runs
+				// again. The set/clear pair below is housekeeping on the
+				// persisted status word, not the safety property.
+				//
+				// Everything after this is the core's: it validates the window
+				// with the Amiga still running, refuses without freezing if any
+				// gate fails, and reports the outcome as an OSD toast either
+				// way (Minimig.sv's ss_info_* block).
+				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+				// The drive travels beside the payload rather than in it: where
+				// the head is and what was playing are userspace state that the
+				// core cannot see. Applied here so the restored machine's first
+				// sector request is served from the position it was saved at.
+				ss_apply_host_state(minimig_config.ss_slot & 3);
+				user_io_status_set("[54]", 1);
+				user_io_status_set("[54]", 0);
+				// Close the OSD rather than returning to the Settings page.
+				//
+				// The outcome arrives as a toast ~250 ms later, and Info()
+				// draws only while menustate <= MENU_INFO (== 2). Staying on
+				// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
+				// far above it, so every toast this feature produces was
+				// silently discarded -- measured on hardware: "Save state:
+				// saved" and "Save state: FAILED" both logged as DROPPED at
+				// menustate=98, and the video-mode toasts with them.
+				//
+				// Closing also matches what the press means. The user asked
+				// the machine to do something and wants to watch it happen,
+				// not sit in a menu while it does.
+				menustate = MENU_NONE1;
+			}
+			else if (menusub == 7 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 5;   // Settings row
@@ -6982,18 +7537,20 @@ void HandleUI(void)
 	{
 		OsdSetTitle("Advanced", 0);
 		helptext_idx = 0;
-		menumask = 0x7;             // User Port, Ethernet, Back
+		int snac = (minimig_config.userport == mmup_snacpsx);
+		menumask = snac ? 0x1F : 0x7;   // User Port[, Port 1, Port 2], Ethernet, Back
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 
 		m = 0;
 		OsdWrite(m++, "", 0, 0);
 
-		// The SNAC user port is shared with MT32-pi: Minimig.sv muxes USER_OUT
-		// on this and resets mt32pi when it changes, so the two are mutually
-		// exclusive by construction.
+		// The SNAC user port is shared with MT32-pi and MiSTer Floppy:
+		// Minimig.sv muxes USER_OUT on this and resets mt32pi when it changes,
+		// so the three tenants are mutually exclusive by construction.
 		strcpy(s, " User Port: ");
-		strcat(s, (minimig_config.userport == mmup_misterfloppy) ? "MiSTer Floppy" : "MT32-Pi");
+		strcat(s, snac                                           ? "PSX SNAC" :
+		          (minimig_config.userport == mmup_misterfloppy) ? "MiSTer Floppy" : "MT32-Pi");
 		OsdWrite(m++, s, menusub == 0, 0);
 
 		// Board detection, straight from mister_floppy_status in Minimig.sv:
@@ -7011,6 +7568,24 @@ void HandleUI(void)
 			OsdWrite(m++, s, 0, 1);
 		}
 
+		// Per-port SNAC mode. Pad and mouse are independent signals in
+		// userio.v, so both at once is deliberate: mouse in port 1, joystick
+		// in port 2, the classic Amiga arrangement.
+		if (snac)
+		{
+			// Sized to the full 3-bit field the RTL reads, not just the enum's
+			// defined range: a hand-edited or corrupted config reaches here
+			// through the raw memcpy in the full-size load path, and an
+			// out-of-range value must render as text rather than read past the end.
+			static const char *modes[8] = { "Off", "Pad", "Mouse", "Pad + Mouse", "Light Gun",
+			                                "Invalid", "Invalid", "Invalid" };
+			for (int p = 0; p < 2; p++)
+			{
+				sprintf(s, "   Port %d  : %s", p + 1, modes[minimig_config.snac[p] & 0x07]);
+				OsdWrite(m++, s, menusub == (uint32_t)(1 + p), 0);
+			}
+		}
+
 		OsdWrite(m++, "", 0, 0);
 
 		// A2065 ZorroII Ethernet. Mirrors the row on the full Minimig Chipset
@@ -7018,14 +7593,14 @@ void HandleUI(void)
 		// drift apart in behaviour.
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		OsdWrite(m++, s, menusub == 1, 0);
+		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 3 : 1), 0);
 
 		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
 		OsdWrite(m++, " is always present either way.", 0, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 2, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 4 : 2), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -7043,14 +7618,26 @@ void HandleUI(void)
 		}
 		else if (select || minus || plus)
 		{
-			if (menusub == 0) // User Port: MiSTer Floppy <-> MT32-pi
+			// Two SNAC port rows only exist while SNAC is the tenant, so
+			// Ethernet and Back slide down the menusub list when it is.
+			int      snac     = (minimig_config.userport == mmup_snacpsx);
+			uint32_t eth_row  = snac ? 3 : 1;
+			uint32_t back_row = snac ? 4 : 2;
+
+			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
-				minimig_config.userport = (minimig_config.userport == mmup_misterfloppy)
-				                        ? mmup_mp32pi : mmup_misterfloppy;
-				minimig_ConfigUserPort(minimig_config.userport);
+				minimig_config.userport = (mm_userportMode)((minimig_config.userport + 1) % 3);
+				minimig_ConfigSnac();
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 1) // Ethernet interface
+			else if (snac && (menusub == 1 || menusub == 2)) // SNAC port 1/2 mode
+			{
+				uint32_t p = menusub - 1;
+				minimig_config.snac[p] = (minimig_config.snac[p] + 1) % 5;
+				minimig_ConfigSnac();
+				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == eth_row) // Ethernet interface
 			{
 				// OFF -> eth0 -> eth1 -> macvlan -> tap0, skipping anything this
 				// box cannot support (no second NIC, no tun driver, no macvlan).
@@ -7065,7 +7652,7 @@ void HandleUI(void)
 				a2065_set_iface(m2);
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 2 && select) // Back
+			else if (menusub == back_row && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 6;   // Advanced row
@@ -7085,6 +7672,28 @@ void HandleUI(void)
 		minimig_config.hardfile[0].cfg = 2;
 		ide_open(0, minimig_config.hardfile[0].filename);
 		menusub = 0;
+		menustate = MENU_AMIGACD_MAIN1;
+		break;
+
+	case MENU_AMIGACD_HDFFILE_SELECTED:
+		// amigacd_hdf_slot was set by the row that opened the browser: 1 for
+		// Hard Disk 0 (IDE0 slave) and 2 for Hard Disk 1 (IDE1 master).
+		memcpy(Selected_S[amigacd_hdf_slot], selPath, sizeof(Selected_S[0]));
+		recent_update(SelectedDir, selPath, SelectedLabel, 500);
+		{
+			uint len = strlen(selPath);
+			if (len > sizeof(minimig_config.hardfile[amigacd_hdf_slot].filename) - 1)
+				len = sizeof(minimig_config.hardfile[amigacd_hdf_slot].filename) - 1;
+			memcpy(minimig_config.hardfile[amigacd_hdf_slot].filename, selPath, len);
+			minimig_config.hardfile[amigacd_hdf_slot].filename[len] = 0;
+		}
+		minimig_config.hardfile[amigacd_hdf_slot].cfg = 1;   // fixed disk, not a removable slot
+		// The drive is invisible unless the IDE controller is on. A CD32
+		// profile already has it; CDTV and A500 do not, and mounting an HDF is
+		// an unambiguous request for one -- an A590 sidecar in A500 terms.
+		minimig_config.ide_cfg |= 1;
+		ide_open(amigacd_hdf_slot, minimig_config.hardfile[amigacd_hdf_slot].filename);
+		menusub = 4 + (amigacd_hdf_slot - 1);
 		menustate = MENU_AMIGACD_MAIN1;
 		break;
 
@@ -7221,7 +7830,7 @@ void HandleUI(void)
 						minimig_config.ide_cfg &= ~1;
 						minimig_config.chipset |= CONFIG_CDTV;
 					}
-					minimig_ConfigChipset(minimig_config.chipset);
+					minimig_ConfigChipset(&minimig_config);
 					menustate = MENU_MINIMIG_DISK1;
 				}
 			}
@@ -7291,12 +7900,11 @@ void HandleUI(void)
 			menusub = 5;
 		}
 		break;
-
 	case MENU_MINIMIG_HDFFILE_SELECTED:
 		{
-			memcpy(Selected_S[(menusub - 2) / 2], selPath, sizeof(Selected_S[(menusub - 2) / 2]));
+			memcpy(Selected_S[(menusub - 7) / 2], selPath, sizeof(Selected_S[(menusub - 2) / 2]));
 			recent_update(SelectedDir, selPath, SelectedLabel, 500);
-			int num = (menusub - 2) / 2;
+			int num = (menusub - 7) / 2;
 			uint len = strlen(selPath);
 			if (len > sizeof(minimig_config.hardfile[num].filename) - 1) len = sizeof(minimig_config.hardfile[num].filename) - 1;
 			if(len) memcpy(minimig_config.hardfile[num].filename, selPath, len);
@@ -7308,6 +7916,80 @@ void HandleUI(void)
 			}
 
 			menustate = MENU_MINIMIG_DISK1;
+		}
+		break;
+
+	case MENU_MINIMIG_CD32FILE_SELECTED:
+		{
+			memcpy(Selected_CD32, selPath, sizeof(Selected_CD32));
+			recent_update(SelectedDir, selPath, SelectedLabel, 501);
+
+			uint len = strlen(selPath);
+			if (len > sizeof(minimig_config.cd32_drive.filename) - 1) len = sizeof(minimig_config.cd32_drive.filename) - 1;
+			if (len) memcpy(minimig_config.cd32_drive.filename, selPath, len);
+			minimig_config.cd32_drive.filename[len] = 0;
+			minimig_cd_drive_open(0, minimig_config.cd32_drive.filename);
+			menustate = MENU_MINIMIG_DISK1;
+		}
+		break;
+
+	case MENU_MINIMIG_CD32FILE_START:
+		{
+			if (!selPath[0])
+			{
+				minimig_config.cd32_drive.filename[0] = 0;
+				minimig_cd_drive_open(0, "");
+				menustate = MENU_MINIMIG_MAIN1;
+				break;
+			}
+			memcpy(Selected_CD32, selPath, sizeof(Selected_CD32));
+			recent_update(SelectedDir, selPath, SelectedLabel, 501);
+
+			uint len = strlen(selPath);
+			if (len > sizeof(minimig_config.cd32_drive.filename) - 1) len = sizeof(minimig_config.cd32_drive.filename) - 1;
+			if (len) memcpy(minimig_config.cd32_drive.filename, selPath, len);
+			minimig_config.cd32_drive.filename[len] = 0;
+			minimig_cfg_set(CONFIG_PRESET_CD32);
+			minimig_cd_drive_open(0, minimig_config.cd32_drive.filename);
+			menustate = MENU_NONE1;
+			minimig_reset();
+		}
+		break;
+
+	case MENU_MINIMIG_CDTVFILE_SELECTED:
+		{
+			memcpy(Selected_CDTV, selPath, sizeof(Selected_CDTV));
+			recent_update(SelectedDir, selPath, SelectedLabel, 502);
+
+			uint len = strlen(selPath);
+			if (len > sizeof(minimig_config.cdtv_drive.filename) - 1) len = sizeof(minimig_config.cdtv_drive.filename) - 1;
+			if (len) memcpy(minimig_config.cdtv_drive.filename, selPath, len);
+			minimig_config.cdtv_drive.filename[len] = 0;
+			minimig_cd_drive_open(1, minimig_config.cdtv_drive.filename);
+			menustate = MENU_MINIMIG_DISK1;
+		}
+		break;
+
+	case MENU_MINIMIG_CDTVFILE_START:
+		{
+			if (!selPath[0])
+			{
+				minimig_config.cdtv_drive.filename[0] = 0;
+				minimig_cd_drive_open(1, "");
+				menustate = MENU_MINIMIG_MAIN1;
+				break;
+			}
+			memcpy(Selected_CDTV, selPath, sizeof(Selected_CDTV));
+			recent_update(SelectedDir, selPath, SelectedLabel, 502);
+
+			uint len = strlen(selPath);
+			if (len > sizeof(minimig_config.cdtv_drive.filename) - 1) len = sizeof(minimig_config.cdtv_drive.filename) - 1;
+			if (len) memcpy(minimig_config.cdtv_drive.filename, selPath, len);
+			minimig_config.cdtv_drive.filename[len] = 0;
+			minimig_cfg_set(CONFIG_PRESET_CDTV);
+			minimig_cd_drive_open(1, minimig_config.cdtv_drive.filename);
+			menustate = MENU_NONE1;
+			minimig_reset();
 		}
 		break;
 
@@ -7373,7 +8055,7 @@ void HandleUI(void)
 			{
 			case 0:
 				minimig_config.chipset ^= CONFIG_NTSC;
-				minimig_ConfigChipset(minimig_config.chipset);
+				minimig_ConfigChipset(&minimig_config);
 				break;
 
 			case 1:
@@ -7456,7 +8138,7 @@ void HandleUI(void)
 				if (select)
 				{
 					menustate = MENU_MINIMIG_MAIN1;
-					menusub = 7;
+					menusub = 9;
 				}
 				break;
 			}
@@ -7468,7 +8150,7 @@ void HandleUI(void)
 		else if (back || left)
 		{
 			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 7;
+			menusub = 9;
 		}
 		break;
 
@@ -8061,272 +8743,280 @@ void HandleUI(void)
 
 	case MENU_ADVANCED_MAP_LIST1:
 	{
-						OsdSetTitle("Advanced");
-						menu_parse_buttons();
-						menustate = MENU_ADVANCED_MAP_LIST2;
-						parentstate = MENU_ADVANCED_MAP_LIST1;
-						while(1)
-						{
-							if (!menusub) firstmenu = 0;
-							adjvisible = 0;
+		OsdSetTitle("Advanced");
+		menu_parse_buttons();
+		menustate = MENU_ADVANCED_MAP_LIST2;
+		parentstate = MENU_ADVANCED_MAP_LIST1;
+		while (1)
+		{
+			if (!menusub) firstmenu = 0;
+			adjvisible = 0;
 
-							advancedButtonMap *abms = get_advanced_map_defs(abm_dev_num);
-							menumask = 0x1;
-							uint32_t menucnt = 1;
-							MenuWrite(0, " New                       \x16", menusub == menucnt++, 0);
+			advancedButtonMap *abms = get_advanced_map_defs(abm_dev_num);
+			menumask = 0x1;
+			uint32_t menucnt = 1;
+			MenuWrite(0, " New                       \x16", menusub == menucnt++, 0);
 
-							int n = 1;
-							size_t map_cnt = 0;
-							for(size_t i = 0; i < ADVANCED_MAP_MAX; i++)
-							{
-								advancedButtonMap *abm = abms+i;
-								if (!abm->input_codes[0]) break;
-								map_cnt++;
-								build_advanced_map_summary(abm, s, sizeof(s));
-								s[27] = '\x16';
-								s[28] = 0;
-								menumask |= 1<<(i+1);
-								MenuWrite(n++, s, menusub == i+1, 0);
-							}
-							MenuWrite(0, " New                       \x16", menusub == 0, map_cnt >= ADVANCED_MAP_MAX);
-							if (map_cnt >= ADVANCED_MAP_MAX)
-								menumask &= ~0x1;
-							for (; n < OsdGetSize(); n++) MenuWrite(n, "", 0, 0);
-							if (!adjvisible) break;
-							firstmenu += adjvisible;
-						}
-						break;
-				}
+			int n = 1;
+			size_t map_cnt = 0;
+			for (size_t i = 0; i < ADVANCED_MAP_MAX; i++)
+			{
+				advancedButtonMap *abm = abms + i;
+				if (!abm->input_codes[0]) break;
+				map_cnt++;
+				build_advanced_map_summary(abm, s, sizeof(s));
+				s[27] = '\x16';
+				s[28] = 0;
+				menumask |= 1 << (i + 1);
+				MenuWrite(n++, s, menusub == i + 1, 0);
+			}
+			MenuWrite(0, " New                       \x16", menusub == 0, map_cnt >= ADVANCED_MAP_MAX);
+			if (map_cnt >= ADVANCED_MAP_MAX)
+				menumask &= ~0x1;
+			for (; n < OsdGetSize(); n++) MenuWrite(n, "", 0, 0);
+			if (!adjvisible) break;
+			firstmenu += adjvisible;
+		}
+		break;
+	}
 
-			case MENU_ADVANCED_MAP_LIST2:
+	case MENU_ADVANCED_MAP_LIST2:
+	{
+		if (select)
+		{
+			advancedButtonMap *abms = get_advanced_map_defs(abm_dev_num);
+			memset(&abm_edit_map, 0, sizeof(abm_edit_map));
+			menustate = MENU_ADVANCED_MAP_EDIT1;
+			parentstate = MENU_ADVANCED_MAP_LIST1;
+			if (menusub == 0) {
+				abm_edit_ptr = &abm_edit_map;
+			}
+			else {
+				abm_edit_ptr = &abms[menusub - 1];
+			}
+			menusub = 0;
+		}
+
+		if (left || back || menu)
+		{
+			menustate = MENU_COMMON1;
+			input_advanced_save(abm_dev_num);
+			parentstate = 0;
+			menusub = 3;
+		}
+		break;
+	}
+
+	case MENU_ADVANCED_MAP_EDIT1:
+	{
+		menustate = MENU_ADVANCED_MAP_EDIT2;
+		parentstate = MENU_ADVANCED_MAP_EDIT1;
+		menumask = 0;
+		firstmenu = 0;
+		adjvisible = 0;
+		bool dev_kbd = false;
+		if (abm_edit_ptr->input_codes[0] && abm_edit_ptr->input_codes[0] <= 256)
+			dev_kbd = true;
+		menu_parse_buttons();
+
+		char bname[32] = {};
+		build_advanced_map_core_btn_str(abm_edit_ptr, bname, sizeof(bname));
+		bool keyboard_only = dev_kbd && (user_io_get_kbdemu() == EMU_NONE);
+
+		uint32_t n = 0;
+		char code_str[256] = {};
+
+		build_advanced_map_code_str(abm_edit_ptr->input_codes, sizeof(abm_edit_ptr->input_codes), code_str, sizeof(code_str));
+		snprintf(s, sizeof(s), " Input Hotkey(s) %-20s\x16", code_str);
+		MenuWrite(n, s, menusub == n, 0);
+		menumask |= 1 << n++;
+
+		code_str[0] = 0;
+		snprintf(s, sizeof(s), " Core Button(s): %-17s\x10 \x11", bname);
+		MenuWrite(n, s, keyboard_only ? 0 : menusub == n, keyboard_only);
+		if (!keyboard_only) menumask |= 1 << n;
+		n++;
+
+		build_advanced_map_code_str(abm_edit_ptr->output_codes, sizeof(abm_edit_ptr->output_codes), code_str, sizeof(code_str));
+		snprintf(s, sizeof(s), " Output(s): %-20s\x16", code_str);
+		MenuWrite(n, s, menusub == n, 0);
+		menumask |= 1 << n++;
+
+		const char *af_label = get_autofire_rate_hz(abm_edit_ptr->autofire_idx);
+		snprintf(s, sizeof(s), " Autofire : %-20s\x16", af_label);
+		MenuWrite(n, s, menusub == n, 0);
+		menumask |= 1 << n++;
+
+
+		MenuWrite(n, " Delete", menusub == n, 0);
+		menumask |= 1 << n++;
+		MenuWrite(n, " Done", menusub == n, 0);
+		menumask |= 1 << n++;
+		for (int i = n; i < OsdGetSize(); i++) MenuWrite(i, "", 0, 0);
+		break;
+	}
+
+	case MENU_ADVANCED_MAP_EDIT2:
+	{
+		if (select || left || right || plus || minus)
+		{
+			menustate = MENU_ADVANCED_MAP_EDIT1;
+			char bname[32] = { 0 };
+			switch (menusub)
+			{
+			case 1:
+			{
+				int mapped_button_cnt = 0;
+				int first_map_idx = -1;
+				for (uint bn = 0; bn < sizeof(abm_edit_ptr->button_mask) * 8; bn++)
 				{
-					if (select)
+					if (abm_edit_ptr->button_mask & 1 << bn)
 					{
-						advancedButtonMap *abms = get_advanced_map_defs(abm_dev_num);
-						memset(&abm_edit_map, 0, sizeof(abm_edit_map));
-						menustate = MENU_ADVANCED_MAP_EDIT1;
-						parentstate = MENU_ADVANCED_MAP_LIST1;
-						if (menusub == 0) {
-							abm_edit_ptr = &abm_edit_map;
-						} else {
-							abm_edit_ptr = &abms[menusub-1];
-						}
-						menusub = 0;
+						mapped_button_cnt++;
+						if (first_map_idx == -1) first_map_idx = bn;
 					}
+				}
+				if (select)
+				{
+					menustate = MENU_ADVANCED_MAP_EDIT3;
+					menusub = 0;
+				}
+				else if (mapped_button_cnt <= 1 && (left || right)) {
+					menu_button_name(first_map_idx, bname, sizeof(bname));
+					do {
+						if (right) first_map_idx++;
+						if (left) first_map_idx--;
+						if (first_map_idx < 0) first_map_idx = joy_bcount + 3;
+						if (first_map_idx - 4 >= joy_bcount) first_map_idx = 0;
+						menu_button_name(first_map_idx, bname, sizeof(bname));
+					} while (!strncmp("-", bname, sizeof(bname)));
+					abm_edit_ptr->button_mask = 1 << first_map_idx;
+				}
+				break;
+			}
+			case 0:
+			case 2:
+				if (select) {
+					menustate = MENU_ADVANCED_MAP_CAPTURE1;
+					start_map_setting(1, menusub ? 2 : 1, abm_edit_ptr);
+				}
+				break;
 
-					if (left || back || menu)
-					{
-						menustate = MENU_COMMON1;
-						input_advanced_save(abm_dev_num);
-						parentstate = 0;
-						menusub = 3;
-					}
+			case 3:
+				if (select || plus)
+				{
+					abm_edit_ptr->autofire_idx++;
+				}
+				else if (minus) {
+					abm_edit_ptr->autofire_idx--;
+				}
+				if (abm_edit_ptr->autofire_idx >= get_autofire_rate_count())
+					abm_edit_ptr->autofire_idx = 0;
+				if (abm_edit_ptr->autofire_idx < 0)
+					abm_edit_ptr->autofire_idx = get_autofire_rate_count() - 1;
+				break;
+			case 4:
+				if (select)
+				{
+					menustate = MENU_ADVANCED_MAP_LIST1;
+					menusub = 0;
+					input_advanced_delete(abm_edit_ptr, abm_dev_num);
+				}
+				break;
+			}
+		}
+
+		if (back || menu || (menusub == 5 && select))
+		{
+			input_advanced_save_entry(abm_edit_ptr, abm_dev_num);
+			menustate = MENU_ADVANCED_MAP_LIST1;
+			menusub = 0;
+		}
+		break;
+	}
+
+	case MENU_ADVANCED_MAP_EDIT3:
+	{
+		menustate = MENU_ADVANCED_MAP_EDIT4;
+		parentstate = MENU_ADVANCED_MAP_EDIT3;
+		while (1) {
+			menumask = 0;
+			uint32_t n = 0;
+			if (!menusub) firstmenu = 0;
+			adjvisible = 0;
+			for (int i = 0; i < joy_bcount + 4; i++)
+			{
+				char bname[32];
+				menu_button_name(i, bname, sizeof(bname));
+				if (!strcmp("-", bname)) continue;
+				bool b_used = abm_edit_ptr->button_mask & 1 << i;
+				sprintfz(s, "%s %s", b_used ? "*" : " ", bname);
+				MenuWrite(n, s, menusub == n, 0);
+				menumask |= 1 << n;
+				n++;
+			}
+			if (!adjvisible) break;
+			firstmenu += adjvisible;
+		}
+		break;
+	}
+
+	case MENU_ADVANCED_MAP_EDIT4:
+	{
+		if (back || menu)
+		{
+			menustate = MENU_ADVANCED_MAP_EDIT1;
+			menusub = 1;
+		}
+		else if (select) {
+			menustate = MENU_ADVANCED_MAP_EDIT3;
+			uint32_t btn_cnt = 0;
+			for (int i = 0; i < joy_bcount + 4; i++)
+			{
+				char bname[32];
+				menu_button_name(i, bname, sizeof(bname));
+				if (!strcmp("-", bname)) continue;
+				if (menusub == btn_cnt)
+				{
+					abm_edit_ptr->button_mask ^= 1 << i;
 					break;
 				}
+				btn_cnt++;
+			}
+		}
+		break;
+	}
 
-			case MENU_ADVANCED_MAP_EDIT1:
-				{
-					menustate = MENU_ADVANCED_MAP_EDIT2;
-					parentstate = MENU_ADVANCED_MAP_EDIT1;
-				  menumask = 0;
-					firstmenu = 0;
-					adjvisible = 0;
-				  bool dev_kbd = false;
-					if (abm_edit_ptr->input_codes[0] && abm_edit_ptr->input_codes[0] <= 256)
-						dev_kbd = true;
-					menu_parse_buttons();
+	case MENU_ADVANCED_MAP_CAPTURE1:
+	{
+		OsdSetTitle("Set Hotkey", 0);
+		for (int i = 0; i < 4; i++) OsdWrite(i, "", 0, 0);
+		OsdWrite(4, info_top, 0, 0);
+		if (get_map_set() == 1 || abm_edit_ptr->input_codes[0] > 256)
+		{
+			infowrite(5, "Press button(s) on joypad");
+			infowrite(6, "or key(s) on keyboard");
+		}
+		else {
+			infowrite(5, "");
+			infowrite(6, "Press Keyboard key(s)");
+		}
+		infowrite(7, "");
+		infowrite(8, "Esc \x16 Clear");
+		infowrite(9, "Menu-hold \x16 Clear");
+		OsdWrite(10, info_bottom, 0, 0);
+		char code_str[256] = {};
+		build_advanced_map_code_str((get_map_set() == 2) ? abm_edit_ptr->output_codes : abm_edit_ptr->input_codes, sizeof(abm_edit_ptr->input_codes), code_str, sizeof(code_str), 14);
+		OsdWrite(11, get_map_cancel() ? "          Clearing" : code_str, 0, 0);
 
-					char bname[32] = {};
-					build_advanced_map_core_btn_str(abm_edit_ptr, bname, sizeof(bname));
-				  bool keyboard_only = dev_kbd && (user_io_get_kbdemu() == EMU_NONE);
+		if (get_map_finish() || get_map_cancel())
+		{
+			menustate = MENU_ADVANCED_MAP_EDIT1;
+			finish_map_setting(get_map_cancel());
+		}
+		break;
+	}
 
-					uint32_t n = 0;
-					char code_str[256] = {};
-
-					build_advanced_map_code_str(abm_edit_ptr->input_codes, sizeof(abm_edit_ptr->input_codes), code_str, sizeof(code_str));
-					snprintf(s, sizeof(s), " Input Hotkey(s) %-20s\x16",code_str);
-					MenuWrite(n, s, menusub == n, 0);
-				  menumask |= 1 << n++;
-
-					code_str[0] = 0;
-					snprintf(s, sizeof(s), " Core Button(s): %-17s\x10 \x11", bname);
-					MenuWrite(n, s, keyboard_only ? 0 : menusub == n, keyboard_only );
-				  if(!keyboard_only) menumask |= 1 << n;
-				  n++;
-
-					build_advanced_map_code_str(abm_edit_ptr->output_codes, sizeof(abm_edit_ptr->output_codes), code_str, sizeof(code_str));
-					snprintf(s, sizeof(s), " Output(s): %-20s\x16", code_str);
-					MenuWrite(n, s, menusub == n, 0);
-				  menumask |= 1 << n++;
-
-					const char *af_label = get_autofire_rate_hz(abm_edit_ptr->autofire_idx);
-					snprintf(s, sizeof(s), " Autofire : %-20s\x16", af_label);
-					MenuWrite(n, s, menusub == n, 0);
-				  menumask |= 1 << n++;
-
-
-					MenuWrite(n, " Delete", menusub == n, 0);
-				  menumask |= 1 << n++;
-					MenuWrite(n, " Done", menusub == n, 0);
-				  menumask |= 1 << n++;
-					for (int i = n; i < OsdGetSize(); i++) MenuWrite(i, "", 0, 0);
-					break;
-				}
-
-			case MENU_ADVANCED_MAP_EDIT2:
-				{
-					if (select || left || right || plus || minus)
-					{
-						menustate = MENU_ADVANCED_MAP_EDIT1;
-            char bname[32] = {0};
-						switch(menusub)
-							{
-								case 1:
-									{
-										int mapped_button_cnt = 0;
-										int first_map_idx = -1;
-										for (uint bn = 0; bn < sizeof(abm_edit_ptr->button_mask)*8; bn++)
-										{
-											if (abm_edit_ptr->button_mask & 1<<bn)
-											{
-												mapped_button_cnt++;
-												if (first_map_idx == -1) first_map_idx = bn;
-											}
-										}
-										if (select)
-										{
-											menustate = MENU_ADVANCED_MAP_EDIT3;
-                      menusub = 0;
-										} else if (mapped_button_cnt <= 1 && (left || right)) {
-											menu_button_name(first_map_idx, bname, sizeof(bname));
-											do {
-												if (right) first_map_idx++;
-												if (left) first_map_idx--;
-												if (first_map_idx < 0) first_map_idx = joy_bcount +3;
-												if (first_map_idx-4 >= joy_bcount) first_map_idx = 0;
-												menu_button_name(first_map_idx, bname, sizeof(bname));
-											} while (!strncmp("-", bname, sizeof(bname) ));
-											abm_edit_ptr->button_mask = 1<<first_map_idx;
-										}
-										break;
-									}
-								case 0:
-								case 2:
-									if (select) {
-										menustate = MENU_ADVANCED_MAP_CAPTURE1;
-										start_map_setting(1, menusub ? 2 : 1, abm_edit_ptr);
-									}
-									break;
-
-							case 3:
-								if (select || plus)
-								{
-									abm_edit_ptr->autofire_idx++;
-							  } else if (minus) {
-									abm_edit_ptr->autofire_idx--;
-							  }
-								if (abm_edit_ptr->autofire_idx >= get_autofire_rate_count())
-									abm_edit_ptr->autofire_idx = 0;
-								if (abm_edit_ptr->autofire_idx < 0)
-									abm_edit_ptr->autofire_idx = get_autofire_rate_count()-1;
-								break;
-							case 4:
-									if (select)
-									{
-										menustate = MENU_ADVANCED_MAP_LIST1;
-										menusub = 0;
-										input_advanced_delete(abm_edit_ptr, abm_dev_num);
-									}
-									break;
-							}
-					}
-
-					if (back || menu || (menusub == 5 && select))
-					{
-						input_advanced_save_entry(abm_edit_ptr, abm_dev_num);
-						menustate = MENU_ADVANCED_MAP_LIST1;
-						menusub = 0;
-					}
-					break;
-				}
-			case MENU_ADVANCED_MAP_EDIT3:
-				{
-					menustate = MENU_ADVANCED_MAP_EDIT4;
-					parentstate = MENU_ADVANCED_MAP_EDIT3;
-					while (1) {
-						menumask = 0;
-						uint32_t n = 0;
-						if (!menusub) firstmenu = 0;
-						adjvisible = 0;
-						for (int i = 0; i < joy_bcount+4; i++)
-						{
-							char bname[32];
-							menu_button_name(i, bname, sizeof(bname));
-							if (!strcmp("-", bname)) continue;
-							bool b_used = abm_edit_ptr->button_mask & 1<<i;
-							sprintfz(s, "%s %s", b_used ? "*":" ", bname);
-							MenuWrite(n, s, menusub == n, 0);
-							menumask |= 1<<n;
-							n++;
-						}
-						if (!adjvisible) break;
-						firstmenu += adjvisible;
-					}
-					break;
-				}
-			case MENU_ADVANCED_MAP_EDIT4:
-				{
-					if (back || menu)
-					{
-						menustate = MENU_ADVANCED_MAP_EDIT1;
-						menusub = 1;
-					} else if (select) {
-						menustate = MENU_ADVANCED_MAP_EDIT3;
-            uint32_t btn_cnt = 0;
-            for(int i = 0; i < joy_bcount+4; i++)
-            {
-              char bname[32];
-              menu_button_name(i, bname, sizeof(bname));
-              if (!strcmp("-", bname)) continue;
-              if (menusub == btn_cnt)
-              {
-                abm_edit_ptr->button_mask ^= 1<<i;
-                break;
-              }
-              btn_cnt++;
-            }
-					}
-					break;
-				}
-
-			case MENU_ADVANCED_MAP_CAPTURE1:
-				{
-					OsdSetTitle("Set Hotkey", 0);
-					for (int i = 0; i < 4; i++) OsdWrite(i, "", 0, 0);
-					OsdWrite(4, info_top, 0, 0);
-					if (get_map_set() == 1 || abm_edit_ptr->input_codes[0] > 256)
-					{
-					  infowrite(5, "Press button(s) on joypad");
-					  infowrite(6, "or key(s) on keyboard");
-					} else {
-					  infowrite(5, "");
-					  infowrite(6, "Press Keyboard key(s)");
-					}
-					infowrite(7, "");
-				  infowrite(8, "Esc \x16 Clear");
-				  infowrite(9, "Menu-hold \x16 Clear");
-					OsdWrite(10, info_bottom, 0, 0);
-					char code_str[256] = {};
-					build_advanced_map_code_str((get_map_set() == 2) ? abm_edit_ptr->output_codes : abm_edit_ptr->input_codes, sizeof(abm_edit_ptr->input_codes), code_str, sizeof(code_str), 14);
-					OsdWrite(11, get_map_cancel() ? "          Clearing" : code_str, 0, 0);
-
-					if (get_map_finish() || get_map_cancel())
-					{
-						menustate = MENU_ADVANCED_MAP_EDIT1;
-						finish_map_setting(get_map_cancel());
-					}
-					break;
-				}
 	case MENU_ATARI8BIT_CART1:
 		helptext_idx = 0;
 		menumask = 0;
@@ -8721,8 +9411,37 @@ int menu_present()
 	return (menustate != MENU_NONE1) && (menustate != MENU_NONE2);
 }
 
-void Info(const char *message, int timeout, int width, int height, int frame)
+void Info(const char *message, int timeout, int width, int height, int frame, int priority)
 {
+	// A priority message owns the slot until it expires. Without this the video
+	// mode popup overwrites save state results -- reported from hardware, where
+	// the "Save state: saved" toast was replaced by a resolution readout before
+	// it could be read, and the restore's own result likewise.
+	static uint32_t info_priority_until = 0;
+
+	if (priority)
+	{
+		info_priority_until = GetTimer(timeout);
+	}
+	else if (info_priority_until && !CheckTimer(info_priority_until))
+	{
+		return;
+	}
+
+	// Diagnostic for the save state toast, which has never once appeared on
+	// hardware even though the log shows the core raising the request, the host
+	// reading it back and resolving it to a non-empty string, and this function
+	// being called with it. The gate below is the next candidate: MENU_INFO is
+	// 2, so anything from MENU_SYSTEM1 upward -- every real menu page, the
+	// AmigaCD settings page included -- drops the call without a word.
+	//
+	// Logging menustate here separates "the gate dropped it" from "it was drawn
+	// and not visible", which no amount of reading either file can settle.
+	// A no-op off Minimig; see support/minimig/minimig_ssdiag.cpp.
+	minimig_ss_diag_log("host Info(\"%s\") menustate=%u gate=%s",
+	                    message, menustate,
+	                    (menustate <= MENU_INFO) ? "open" : "DROPPED");
+
 	if (menustate <= MENU_INFO)
 	{
 		OSD_PrintInfo(message, &width, &height, frame);
@@ -8745,7 +9464,14 @@ int menu_lightgun_cb(int idx, uint16_t type, uint16_t code, int value)
 
 	if (type == EV_KEY)
 	{
-		if ((code == 0x130 || code == 0x131 || code == 0x120 || code == 0x110) && menustate == MENU_LGCAL1)
+		// 0x133 is BTN_NORTH, which is where this kernel's guncon2 driver puts a
+		// GunCon 2's trigger -- confirmed on hardware, forty logged presses. It
+		// was missing here, so the one button a user naturally reaches for did
+		// nothing on the calibration screen: coordinates moved, no edge was ever
+		// confirmed, and the flow never reached input_lightgun_save(). That
+		// leaves the gun on built-in defaults that do not match the display,
+		// which is its own hard-to-read bug.
+		if ((code == 0x130 || code == 0x131 || code == 0x133 || code == 0x120 || code == 0x110) && menustate == MENU_LGCAL1)
 		{
 			gun_idx = idx;
 			if (value == 1) gun_ok = 1;
@@ -8773,7 +9499,7 @@ int menu_allow_cfg_switch()
 			if (is_menu() && (fs_Options & SCANO_CORES)) return 1;
 			break;
 
-		case MENU_GENERIC_MAIN2:
+		case MENU_GENERIC_MAIN3:
 			if (!page) return 1;
 			break;
 		}

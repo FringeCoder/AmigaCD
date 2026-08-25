@@ -113,6 +113,8 @@ typedef struct {
 	uint8_t spd_quirk;
 	uint16_t hdmi_off;
 	uint32_t keyboard_as_joystick[256];
+	uint8_t snac_psx;
+	uint8_t sanity_check;
 } cfg_t;
 
 extern cfg_t cfg;

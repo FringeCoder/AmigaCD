@@ -21,12 +21,20 @@
 #define LANE_SECTORS        (RING_SECTORS / LANE_COUNT)
 #define ENTRY_SIZE          (PHYSICAL_DISC_RAW + PHYSICAL_DISC_SUB)
 #define LOOKAHEAD_SPAN      96
+#define AUDIO_LOOKAHEAD     224
 #define IO_BURST            16
+#define AUDIO_SYNC_BURST    4
 #define WARMUP_SECTORS      768
+#define STARTUP_PRIME_SECTORS 32
+#define INDEX00_ENTRY_PROBES 4
+#define MAX_PREGAP_SECTORS   750
+#define NEIGHBOR_PREWARM_SECTORS 128
+#define NEIGHBOR_ENTRY_SPAN 32
 #define STATS_PERIOD_MS     5000
 #define SWAP_POLL_MS        500
 #define SYNC_IO_BURST       8
 #define SYNC_IO_TIMEOUT_MS  3000
+#define AUDIO_SYNC_WAIT_MS  900
 #define BG_IO_TIMEOUT_MS    3000
 #define CAPPED_SPEED_NX     4
 #define IDLE_KEEPALIVE_MS   15000
@@ -83,11 +91,15 @@ typedef struct {
 	volatile int warmup_end;
 	volatile int swap_out;
 	volatile int want_native_speed;
+	volatile int rush_lane;
+	volatile int rush_lba;
+	volatile int neighbor_lba;
+	volatile int neighbor_end;
 } drive_state_t;
 
 static drive_state_t drv = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0, -1, -1, -1, 0 };
 
 #define SWAP_MARKER_PATH "/tmp/physical_disc_swapped"
 
@@ -260,20 +272,21 @@ static int refill_ring(int lba, int count, int sync)
 
 	int t = span_index(lba);
 	if (t >= 0 && lba + count > drv.span[t].hi) count = drv.span[t].hi - lba;
-	uint8_t flags = (t >= 0 && drv.span[t].is_audio) ? 0x10 : 0xF8;
+	int audio = (t >= 0 && drv.span[t].is_audio);
+	if (sync && audio && count > AUDIO_SYNC_BURST) count = AUDIO_SYNC_BURST;
+	uint8_t flags = audio ? 0x10 : 0xF8;
+	int timeout_ms = sync && audio ? AUDIO_SYNC_WAIT_MS : (sync ? SYNC_IO_TIMEOUT_MS : BG_IO_TIMEOUT_MS);
 
 	int with_sub = (drv.subch_ok == 1);
 
 	double io0 = clock_ms();
 	pthread_mutex_lock(&drv.io_lock);
-	int r = scsi_read_cd(lba, count, flags, with_sub, burst,
-		sync ? SYNC_IO_TIMEOUT_MS : BG_IO_TIMEOUT_MS);
+	int r = scsi_read_cd(lba, count, flags, with_sub, burst, timeout_ms);
 	pthread_mutex_unlock(&drv.io_lock);
 
 	if (r && with_sub && count > 1) {
 		pthread_mutex_lock(&drv.io_lock);
-		int r2 = scsi_read_cd(lba, count, flags, 0, burst,
-			sync ? SYNC_IO_TIMEOUT_MS : BG_IO_TIMEOUT_MS);
+		int r2 = scsi_read_cd(lba, count, flags, 0, burst, timeout_ms);
 		pthread_mutex_unlock(&drv.io_lock);
 		if (!r2) {
 			printf("DISC: drive rejects multi-sector subchannel reads, disabling subchannel\n");
@@ -281,6 +294,12 @@ static int refill_ring(int lba, int count, int sync)
 			with_sub = 0;
 			r = 0;
 		}
+	}
+
+	if (r && sync) {
+		double dt = clock_ms() - io0;
+		if (dt > drv.worst_io_ms) drv.worst_io_ms = dt;
+		return -1;
 	}
 
 	if (r) {
@@ -412,6 +431,8 @@ static void *ring_worker_main(void *arg)
 
 	while (drv.alive) {
 		int target = -1;
+		int rushed = 0;
+		int neighbor_fill = 0;
 
 		if (drv.watching) {
 			if (clock_ms() - last_watch >= 2000) {
@@ -538,11 +559,23 @@ static void *ring_worker_main(void *arg)
 		}
 
 		pthread_mutex_lock(&drv.ring_lock);
+		if (drv.rush_lba >= 0 && drv.rush_lane >= 0) {
+			int rlba = drv.rush_lba;
+			int rlane = drv.rush_lane;
+			if (rlba < drv.leadout_lba && lane_of(rlba) == rlane && entry_for(rlba)->lba != rlba) {
+				target = rlba;
+				rushed = 1;
+			} else {
+				drv.rush_lba = -1;
+				drv.rush_lane = -1;
+			}
+		}
 		for (int n = 0; n < LANE_COUNT && target < 0; n++) {
-			int w = (rr + n) % LANE_COUNT;
+			int w = (drv.active_lane >= 0 && n == 0) ? drv.active_lane : (rr + n) % LANE_COUNT;
 			if (!drv.lane_active[w]) continue;
 			int pos = drv.lane_cursor[w];
-			for (int i = 0; i < LOOKAHEAD_SPAN; i++) {
+			int span = w ? AUDIO_LOOKAHEAD : LOOKAHEAD_SPAN;
+			for (int i = 0; i < span; i++) {
 				int lba = pos + i;
 				if (lba >= drv.leadout_lba) break;
 				if (lane_of(lba) != w) break;
@@ -569,6 +602,15 @@ static void *ring_worker_main(void *arg)
 			else drv.fail_streak = 0;
 		}
 
+		if (target < 0 && drv.neighbor_lba >= 0) {
+			if (drv.neighbor_lba >= drv.neighbor_end || drv.leadout_lba <= 0) {
+				drv.neighbor_lba = -1;
+			} else {
+				target = drv.neighbor_lba;
+				neighbor_fill = 1;
+			}
+		}
+
 		if (target < 0) {
 			int lw = drv.active_lane;
 			int klba = (lw >= 0) ? drv.lane_cursor[lw] : (drv.leadout_lba > 0 ? drv.lane_cursor[0] : -1);
@@ -589,6 +631,11 @@ static void *ring_worker_main(void *arg)
 			continue;
 		}
 		refill_ring(target, IO_BURST, 0);
+		if (rushed) {
+			drv.rush_lba = -1;
+			drv.rush_lane = -1;
+		}
+		if (neighbor_fill) drv.neighbor_lba += IO_BURST;
 		last_io = clock_ms();
 	}
 	return NULL;
@@ -756,6 +803,45 @@ static int scsi_read_raw_subq(int lba, uint8_t *sub)
 	return 0;
 }
 
+/* Read a contiguous block of raw P-W subchannel in one READ CD command.
+ * This is much cheaper than issuing one SG_IO request per probe LBA and is
+ * used by PSX pregap discovery to avoid repeated physical seeks.
+ */
+static int scsi_read_raw_subq_block(int lba, int count, uint8_t *sub)
+{
+	if (count <= 0 || count > 0xFFFFFF) return -1;
+
+	uint8_t cdb[12] = { 0 };
+	uint8_t sense[32];
+	struct sg_io_hdr io;
+
+	cdb[0] = 0xBE;
+	cdb[2] = (lba >> 24) & 0xFF;
+	cdb[3] = (lba >> 16) & 0xFF;
+	cdb[4] = (lba >> 8) & 0xFF;
+	cdb[5] = lba & 0xFF;
+	cdb[6] = (count >> 16) & 0xFF;
+	cdb[7] = (count >> 8) & 0xFF;
+	cdb[8] = count & 0xFF;
+	cdb[10] = 0x01;
+
+	memset(&io, 0, sizeof(io));
+	io.interface_id = 'S';
+	io.cmd_len = 12;
+	io.cmdp = cdb;
+	io.dxfer_direction = SG_DXFER_FROM_DEV;
+	io.dxfer_len = count * PHYSICAL_DISC_SUB;
+	io.dxferp = sub;
+	io.sbp = sense;
+	io.mx_sb_len = sizeof(sense);
+	io.timeout = BG_IO_TIMEOUT_MS;
+
+	if (ioctl(drv.dev_fd, SG_IO, &io) < 0) return -1;
+	if (io.status || io.host_status || io.driver_status) return -1;
+	return 0;
+}
+
+
 static void raw_subq_decode(const uint8_t *raw, uint8_t *q)
 {
 	for (int b = 0; b < 12; b++) {
@@ -774,89 +860,430 @@ static int bcd_value(uint8_t v)
 	return hi * 10 + lo;
 }
 
-static int physical_disc_q_index00(int lba, int track)
+static uint16_t subq_crc16(const uint8_t *q)
 {
-	if (lba < 0 || drv.dev_fd < 0) return 0;
+	uint16_t crc = 0;
+	for (int i = 0; i < 10; i++) {
+		crc ^= (uint16_t)q[i] << 8;
+		for (int b = 0; b < 8; b++)
+			crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+	}
+	return (uint16_t)~crc;
+}
 
-	uint8_t raw[PHYSICAL_DISC_SUB];
-	uint8_t q[12];
-	pthread_mutex_lock(&drv.io_lock);
-	int r = scsi_read_raw_subq(lba, raw);
-	pthread_mutex_unlock(&drv.io_lock);
-	if (r) return -1;
+static int subq_crc_valid(const uint8_t *q)
+{
+	uint16_t expected = ((uint16_t)q[10] << 8) | q[11];
+	return subq_crc16(q) == expected;
+}
 
-	raw_subq_decode(raw, q);
-	if ((q[0] & 0x0F) != 1) return 0;
+/*
+ * Probe one physical LBA for trustworthy ADR=1 position Q.  For INDEX 00,
+ * the relative MSF is a countdown to INDEX 01, so it must agree with the
+ * requested distance from the drive-reported INDEX 01.  This gives us a
+ * strong guard against stale Q returned while the drive is repositioning.
+ *
+ * Return: 1 = requested track / INDEX 00 at this LBA
+ *         0 = trustworthy positional Q, but not that INDEX 00
+ *         2 = no trustworthy positional Q after retries
+ *        -1 = drive/read unavailable
+ */
+static int physical_disc_psx_q_probe(int lba, int track, int index1, int *rel_sectors, int attempts)
+{
+	if (lba < 0 || drv.dev_fd < 0) return -1;
 
-	int am = bcd_value(q[7]);
-	int as = bcd_value(q[8]);
-	int af = bcd_value(q[9]);
-	if (am < 0 || as < 0 || af < 0 || as >= 60 || af >= 75) return 0;
-	int q_lba = (am * 60 + as) * 75 + af - 150;
-	if (q_lba < lba - 1 || q_lba > lba + 1) return 0;
+	for (int attempt = 0; attempt < attempts; attempt++) {
+		uint8_t raw[PHYSICAL_DISC_SUB];
+		uint8_t q[12];
+		int r = scsi_read_raw_subq(lba, raw);
+		if (r) {
+			if (!attempt) return -1;
+			continue;
+		}
 
-	return bcd_value(q[1]) == track && bcd_value(q[2]) == 0;
+		raw_subq_decode(raw, q);
+		if (!subq_crc_valid(q) || (q[0] & 0x0F) != 1) continue;
+
+		int am = bcd_value(q[7]);
+		int as = bcd_value(q[8]);
+		int af = bcd_value(q[9]);
+		if (am < 0 || as < 0 || af < 0 || as >= 60 || af >= 75) continue;
+		int q_lba = (am * 60 + as) * 75 + af - 150;
+		if (q_lba < lba - 1 || q_lba > lba + 1) continue;
+
+		int q_track = bcd_value(q[1]);
+		int q_index = bcd_value(q[2]);
+		if (q_track < 0 || q_index < 0) continue;
+
+		if (q_track == track && q_index == 0) {
+			int rm = bcd_value(q[3]);
+			int rs = bcd_value(q[4]);
+			int rf = bcd_value(q[5]);
+			if (rm < 0 || rs < 0 || rf < 0 || rs >= 60 || rf >= 75) continue;
+			int rel = (rm * 60 + rs) * 75 + rf;
+			int expected = index1 - lba;
+			if (rel < expected - 1 || rel > expected + 1) continue;
+			if (rel_sectors) *rel_sectors = rel;
+			return 1;
+		}
+
+		return 0;
+	}
+
+	return 2;
+}
+
+static int physical_disc_psx_q_probe_near(int lba, int track, int index1,
+	int min_lba, int max_lba, int *hit_lba, int *rel_sectors)
+{
+	static const int delta[] = { 0, -1, 1, -2, 2 };
+	int saw_outside = 0;
+	int outside_lba = lba;
+	for (unsigned i = 0; i < sizeof(delta) / sizeof(delta[0]); i++) {
+		int qlba = lba + delta[i];
+		if (qlba < min_lba || qlba > max_lba) continue;
+		int rel = 0;
+		int state = physical_disc_psx_q_probe(qlba, track, index1, &rel, 1);
+		if (state < 0) return -1;
+		if (state == 1) {
+			if (hit_lba) *hit_lba = qlba;
+			if (rel_sectors) *rel_sectors = rel;
+			return 1;
+		}
+		if (state == 0) {
+			saw_outside = 1;
+			outside_lba = qlba;
+		}
+	}
+	if (saw_outside) {
+		if (hit_lba) *hit_lba = outside_lba;
+		return 0;
+	}
+	return 2;
+}
+
+/*
+ * Fast path: fetch up to 256 sectors immediately preceding INDEX 01 in one
+ * READ CD command and inspect their Q frames in memory.  Most PSX pregaps fit
+ * entirely in this window, turning several seek-heavy probes into one command
+ * per track.
+ *
+ * Return: 1 = complete INDEX 00 start found, *pregap receives its length
+ *         0 = block was readable but did not fully bracket the pregap
+ *        -1 = block read unavailable/failed
+ */
+static int physical_disc_psx_q_bulk_pregap(int track, int index1, int limit, int *pregap)
+{
+	const int window = limit < 256 ? limit : 256;
+	if (window <= 0) return 0;
+	const int first_lba = index1 - window;
+
+	uint8_t *raw = (uint8_t *)malloc((size_t)window * PHYSICAL_DISC_SUB);
+	if (!raw) return -1;
+	int r = scsi_read_raw_subq_block(first_lba, window, raw);
+	if (r) {
+		free(raw);
+		return -1;
+	}
+
+	int earliest_inside = -1;
+	int saw_outside_before = 0;
+	for (int n = 0; n < window; n++) {
+		uint8_t q[12];
+		raw_subq_decode(raw + (size_t)n * PHYSICAL_DISC_SUB, q);
+		if (!subq_crc_valid(q) || (q[0] & 0x0F) != 1) continue;
+
+		int am = bcd_value(q[7]);
+		int as = bcd_value(q[8]);
+		int af = bcd_value(q[9]);
+		if (am < 0 || as < 0 || af < 0 || as >= 60 || af >= 75) continue;
+		int lba = first_lba + n;
+		int q_lba = (am * 60 + as) * 75 + af - 150;
+		if (q_lba < lba - 1 || q_lba > lba + 1) continue;
+
+		int q_track = bcd_value(q[1]);
+		int q_index = bcd_value(q[2]);
+		if (q_track < 0 || q_index < 0) continue;
+
+		if (q_track == track && q_index == 0) {
+			int rm = bcd_value(q[3]);
+			int rs = bcd_value(q[4]);
+			int rf = bcd_value(q[5]);
+			if (rm < 0 || rs < 0 || rf < 0 || rs >= 60 || rf >= 75) continue;
+			int rel = (rm * 60 + rs) * 75 + rf;
+			int expected = index1 - lba;
+			if (rel < expected - 1 || rel > expected + 1) continue;
+			if (earliest_inside < 0) earliest_inside = lba;
+		} else if (earliest_inside < 0) {
+			saw_outside_before = 1;
+		}
+	}
+
+	free(raw);
+	if (earliest_inside >= 0 && saw_outside_before) {
+		*pregap = index1 - earliest_inside;
+		return *pregap > 0 ? 1 : 0;
+	}
+	return 0;
+}
+
+/*
+ * Slow fallback used only when the fast discovery path fails for one track.
+ * Retry a small set of useful distances with multiple reads and a wider
+ * neighborhood. This keeps normal disc recognition fast while still giving
+ * difficult boundaries (notably DATA -> AUDIO) a second chance.
+ */
+static int physical_disc_psx_q_fallback(int track, int index1, int min_lba,
+	int max_dist, int *best_inside)
+{
+	static const int dist_list[] = { 16, 24, 32, 48, 64, 96, 128, 150, 192, 256 };
+	static const int delta[] = { 0, -1, 1, -2, 2, -4, 4 };
+	int best = 0;
+
+	for (unsigned d = 0; d < sizeof(dist_list) / sizeof(dist_list[0]); d++) {
+		int dist = dist_list[d];
+		if (dist > max_dist) continue;
+		int base = index1 - dist;
+		for (unsigned j = 0; j < sizeof(delta) / sizeof(delta[0]); j++) {
+			int lba = base + delta[j];
+			if (lba < min_lba || lba >= index1) continue;
+			int rel = 0;
+			int state = physical_disc_psx_q_probe(lba, track, index1, &rel, 4);
+			if (state < 0) return -1;
+			if (state == 1) {
+				int confirmed = index1 - lba;
+				if (rel > 0 && (rel == confirmed || rel == confirmed - 1 || rel == confirmed + 1))
+					confirmed = rel;
+				if (confirmed > best) best = confirmed;
+				/* Once we have a strong sample, the normal bracketing code can refine it. */
+				if (best >= 32) {
+					*best_inside = best;
+					return 1;
+				}
+			}
+		}
+	}
+
+	if (best > 0) {
+		*best_inside = best;
+		return 1;
+	}
+	return 0;
 }
 
 int physical_disc_psx_enrich_toc(toc_t *toc)
 {
 	if (!toc || !toc->phys || toc->last < 2 || drv.dev_fd < 0) return 0;
 
+	/*
+	 * PSX physical discs often have INDEX 00 pregaps which are absent from the
+	 * normal drive TOC (that TOC reports INDEX 01 starts).  Avoid crawling every
+	 * sector backwards: probe exponentially farther from INDEX 01 until a
+	 * trustworthy Q frame proves we have left Track N / INDEX 00, then refine
+	 * only that small bracket.  INDEX 00 relative Q is also checked against the
+	 * requested distance, rejecting stale drive-position samples.
+	 */
 	int found = 0;
 	int q_supported = 0;
 
-	for (int i = 1; i < toc->last; i++) {
-		int index1 = toc->tracks[i].start;
-		int track = i + 1;
-		int state = physical_disc_q_index00(index1 - 1, track);
-		if (state < 0) {
-			if (!q_supported && !found)
-				printf("DISC: PSX pregap scan unavailable on this drive, using basic TOC\n");
-			break;
+	pthread_mutex_lock(&drv.io_lock);
+
+	/*
+	 * Adaptive fast path for discs with a repeated mastering pregap.  Measuring
+	 * every INDEX 00 boundary is expensive on real optical drives because each
+	 * boundary normally requires a reposition.  Sample the first few boundaries;
+	 * when three consecutive tracks share the same pregap, verify that candidate
+	 * at several positions across the remaining disc.  Only then reuse it for the
+	 * unmeasured tracks.  Any disagreement leaves those tracks to the normal
+	 * per-track discovery below.
+	 */
+	int *known_pregap = (int *)calloc((size_t)toc->last, sizeof(int));
+	int pattern_start = -1;
+	int pattern_gap = 0;
+	if (known_pregap && toc->last >= 4) {
+		int sample_last = toc->last - 1;
+		if (sample_last > 4) sample_last = 4;
+		for (int i = 1; i <= sample_last; i++) {
+			const int index1 = toc->tracks[i].start;
+			const int lower = toc->tracks[i - 1].start;
+			const int max_gap = index1 - (lower + 1);
+			const int limit = max_gap < MAX_PREGAP_SECTORS ? max_gap : MAX_PREGAP_SECTORS;
+			int gap = 0;
+			if (limit > 0 && physical_disc_psx_q_bulk_pregap(i + 1, index1, limit, &gap) > 0)
+				known_pregap[i] = gap;
 		}
-		q_supported = 1;
-		if (!state) continue;
 
-		int lower = toc->tracks[i - 1].start;
-		int last_inside = index1 - 1;
-		int first_outside = lower - 1;
-		int distance = 2;
+		/* Prefer a run beginning with Track 2; Ridge Racer instead settles from Track 3. */
+		if (known_pregap[1] > 0 && known_pregap[1] == known_pregap[2] && known_pregap[2] == known_pregap[3]) {
+			pattern_start = 1;
+			pattern_gap = known_pregap[1];
+		} else if (toc->last > 4 && known_pregap[2] > 0 && known_pregap[2] == known_pregap[3] && known_pregap[3] == known_pregap[4]) {
+			pattern_start = 2;
+			pattern_gap = known_pregap[2];
+		}
 
-		while (index1 - distance >= lower) {
-			int probe = index1 - distance;
-			state = physical_disc_q_index00(probe, track);
-			if (state != 1) {
-				first_outside = probe;
+		if (pattern_start >= 0) {
+			int checks[4];
+			int check_count = 0;
+			const int last = toc->last - 1;
+			const int span = last - pattern_start;
+			for (int q = 1; q <= 3; q++) {
+				int idx = pattern_start + (span * q) / 4;
+				if (idx <= pattern_start || idx >= last) continue;
+				int duplicate = 0;
+				for (int n = 0; n < check_count; n++) if (checks[n] == idx) duplicate = 1;
+				if (!duplicate) checks[check_count++] = idx;
+			}
+			if (last > pattern_start) checks[check_count++] = last;
+
+			int verified = 1;
+			for (int n = 0; n < check_count; n++) {
+				int i = checks[n];
+				if (known_pregap[i] == pattern_gap) continue;
+				const int index1 = toc->tracks[i].start;
+				const int lower = toc->tracks[i - 1].start;
+				const int max_gap = index1 - (lower + 1);
+				const int limit = max_gap < MAX_PREGAP_SECTORS ? max_gap : MAX_PREGAP_SECTORS;
+				int gap = 0;
+				if (limit <= 0 || physical_disc_psx_q_bulk_pregap(i + 1, index1, limit, &gap) <= 0 || gap != pattern_gap) {
+					verified = 0;
+					break;
+				}
+				known_pregap[i] = gap;
+			}
+
+			if (verified) {
+				for (int i = pattern_start; i < toc->last; i++)
+					if (!known_pregap[i]) known_pregap[i] = pattern_gap;
+				printf("DISC: PSX repeated INDEX 00 pattern verified from track %02d (%d sectors); reused for remaining tracks\n",
+					pattern_start + 1, pattern_gap);
+			} else {
+				printf("DISC: PSX repeated INDEX 00 candidate changed later on disc; using measured/per-track discovery\n");
+			}
+		}
+	}
+
+	for (int i = 1; i < toc->last; i++) {
+		const int index1 = toc->tracks[i].start;
+		const int track = i + 1;
+		const int lower = toc->tracks[i - 1].start;
+		const int max_gap = index1 - (lower + 1);
+		const int limit = max_gap < MAX_PREGAP_SECTORS ? max_gap : MAX_PREGAP_SECTORS;
+		if (limit <= 0) continue;
+
+		/* Common case: use an adaptively prefetched/inferred pregap, otherwise read one contiguous Q block. */
+		int bulk_pregap = known_pregap ? known_pregap[i] : 0;
+		int bulk_state = bulk_pregap > 0 ? 1 : physical_disc_psx_q_bulk_pregap(track, index1, limit, &bulk_pregap);
+		if (bulk_state > 0) {
+			const int start = index1 - bulk_pregap;
+			if (start > lower) {
+				toc->tracks[i].start = start;
+				toc->tracks[i].indexes[1] = bulk_pregap;
+				toc->tracks[i - 1].end = start;
+				drv.span[i].lo = start;
+				drv.span[i - 1].hi = start;
+				found++;
+				q_supported = 1;
+				printf("DISC: PSX track %02d INDEX 00 at LBA %d, INDEX 01 at %d (%d sectors, bulk Q)\n",
+					track, start, index1, bulk_pregap);
+				continue;
+			}
+		}
+
+		int best_inside = 0;   /* largest confirmed distance before INDEX 01 */
+		int first_outside = 0; /* confirmed distance outside INDEX 00 */
+
+		for (int dist = 1; dist <= limit; dist = (dist < 8) ? dist * 2 : dist * 2) {
+			int lba = index1 - dist;
+			int hit = lba;
+			int rel = 0;
+			int state = physical_disc_psx_q_probe_near(lba, track, index1,
+				index1 - limit, index1 - 1, &hit, &rel);
+			if (state < 0) {
+				if (!q_supported && !found)
+					printf("DISC: PSX pregap scan unavailable on this drive, using basic TOC\n");
 				break;
 			}
-			last_inside = probe;
-			if (probe == lower) break;
-			if (distance > (index1 - lower) / 2) distance = index1 - lower;
-			else distance *= 2;
-			if (!distance) break;
+			if (state == 1) {
+				q_supported = 1;
+				int confirmed = index1 - hit;
+				if (rel > 0 && (rel == confirmed || rel == confirmed - 1 || rel == confirmed + 1))
+					confirmed = rel;
+				if (confirmed > best_inside) best_inside = confirmed;
+			} else if (state == 0) {
+				q_supported = 1;
+				int outdist = index1 - hit;
+				if (best_inside > 0 && outdist > best_inside) {
+					first_outside = outdist;
+					break;
+				}
+			}
+
+			if (dist > limit / 2) break;
 		}
 
-		int lo = first_outside + 1;
-		int hi = last_inside;
-		while (lo < hi) {
+		if (best_inside <= 0) {
+			int fallback_best = 0;
+			int fr = physical_disc_psx_q_fallback(track, index1, index1 - limit,
+				limit, &fallback_best);
+			if (fr > 0) {
+				best_inside = fallback_best;
+				printf("DISC: PSX track %02d fast Q scan missed; fallback recovered INDEX 00 sample at -%d\n",
+					track, best_inside);
+			} else {
+				continue;
+			}
+		}
+
+		/* If exponential probing did not find an outside point, cap at the limit. */
+		if (!first_outside) first_outside = limit + 1;
+
+		/* Refine the distance bracket.  Unknown samples do not move either edge. */
+		int lo = best_inside;
+		int hi = first_outside;
+		while (hi - lo > 1) {
 			int mid = lo + (hi - lo) / 2;
-			state = physical_disc_q_index00(mid, track);
-			if (state == 1) hi = mid;
-			else lo = mid + 1;
+			if (mid > limit) mid = limit;
+			int lba = index1 - mid;
+			int hit = lba;
+			int rel = 0;
+			int state = physical_disc_psx_q_probe_near(lba, track, index1,
+				index1 - limit, index1 - 1, &hit, &rel);
+			if (state < 0) break;
+			if (state == 1) {
+				int confirmed = index1 - hit;
+				if (rel > 0 && (rel == confirmed || rel == confirmed - 1 || rel == confirmed + 1))
+					confirmed = rel;
+				if (confirmed > lo) lo = confirmed;
+				else lo = mid;
+			} else if (state == 0) {
+				hi = index1 - hit;
+				if (hi <= lo) hi = mid;
+			} else {
+				/* Try adjacent distance on the next iteration without a long crawl. */
+				if (mid + 1 < hi) mid++;
+				else break;
+				/* Conservative split: keep the known-inside edge unchanged. */
+				hi = mid;
+			}
 		}
 
-		if (lo >= index1 || physical_disc_q_index00(lo, track) != 1) continue;
+		const int pregap = lo;
+		const int start = index1 - pregap;
+		if (pregap <= 0 || pregap > MAX_PREGAP_SECTORS || start <= lower) continue;
 
-		int pregap = index1 - lo;
-		toc->tracks[i].start = lo;
+		toc->tracks[i].start = start;
 		toc->tracks[i].indexes[1] = pregap;
-		toc->tracks[i - 1].end = lo;
-		drv.span[i].lo = lo;
-		drv.span[i - 1].hi = lo;
+		toc->tracks[i - 1].end = start;
+		drv.span[i].lo = start;
+		drv.span[i - 1].hi = start;
 		found++;
 		printf("DISC: PSX track %02d INDEX 00 at LBA %d, INDEX 01 at %d (%d sectors)\n",
-			track, lo, index1, pregap);
+			track, start, index1, pregap);
 	}
+
+	free(known_pregap);
+	pthread_mutex_unlock(&drv.io_lock);
 
 	if (found && drv.ring) {
 		pthread_mutex_lock(&drv.ring_lock);
@@ -938,6 +1365,10 @@ int physical_disc_load_toc(toc_t *toc)
 	for (int w = 0; w < LANE_COUNT; w++) { drv.lane_cursor[w] = 0; drv.lane_active[w] = 0; }
 	drv.lane_cursor[0] = toc->tracks[0].start;
 	drv.active_lane = -1;
+	drv.rush_lane = -1;
+	drv.rush_lba = -1;
+	drv.neighbor_lba = -1;
+	drv.neighbor_end = 0;
 	drv.hit_count = drv.miss_count = drv.bad_count = drv.bad_logged = 0;
 	drv.worst_wait_ms = drv.worst_io_ms = 0.0;
 
@@ -945,6 +1376,13 @@ int physical_disc_load_toc(toc_t *toc)
 
 	drv.warmup_lba = -1;
 	if (!drv.mid_swap && drv.track_count) {
+		int prime = STARTUP_PRIME_SECTORS;
+		int available = drv.span[0].hi - toc->tracks[0].start;
+		if (prime > available) prime = available;
+		if (prime > 0) {
+			int pr = refill_ring(toc->tracks[0].start, prime, 1);
+			printf("DISC: startup prime %s (%d sectors)\n", pr ? "incomplete" : "ready", prime);
+		}
 		int pw_end = toc->tracks[0].start + WARMUP_SECTORS;
 		if (pw_end > drv.span[0].hi) pw_end = drv.span[0].hi;
 		if (pw_end > drv.leadout_lba) pw_end = drv.leadout_lba;
@@ -1032,11 +1470,31 @@ void physical_disc_prewarm_blocking(void)
 
 void physical_disc_seek_hint(int lba)
 {
-	if (lba < 0 || !drv.track_count) return;
+	if (lba < 0 || !drv.track_count || lba >= drv.leadout_lba) return;
 
 	int w = lane_of(lba);
 	drv.lane_cursor[w] = lba;
 	drv.lane_active[w] = 1;
+	drv.active_lane = w;
+	drv.rush_lane = w;
+	drv.rush_lba = lba;
+
+	int t = span_index(lba);
+	if (t >= 0 && drv.span[t].is_audio && (lba - drv.span[t].lo) < NEIGHBOR_ENTRY_SPAN) {
+		int nt = t + 1;
+		if (nt >= drv.track_count || !drv.span[nt].is_audio) {
+			nt = -1;
+			for (int i = 0; i < drv.track_count; i++) {
+				if (drv.span[i].is_audio) { nt = i; break; }
+			}
+		}
+		if (nt >= 0 && nt != t) {
+			drv.neighbor_lba = drv.span[nt].lo;
+			int end = drv.span[nt].lo + NEIGHBOR_PREWARM_SECTORS;
+			if (end > drv.span[nt].hi) end = drv.span[nt].hi;
+			drv.neighbor_end = end;
+		}
+	}
 }
 
 static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, int mark_active)
@@ -1056,7 +1514,8 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 	pthread_mutex_lock(&drv.ring_lock);
 	cache_entry_t *e = entry_for(lba);
 	int hit = (e->lba == lba);
-	if (hit) {
+	int unreadable = hit && e->unreadable;
+	if (hit && !unreadable) {
 		memcpy(dst, e->data, PHYSICAL_DISC_RAW);
 		if (sub96) memcpy(sub96, e->data + PHYSICAL_DISC_RAW, PHYSICAL_DISC_SUB);
 		if (sub_valid) *sub_valid = e->sub_present;
@@ -1066,12 +1525,18 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 	if (hit) {
 		if (lba >= drv.lane_cursor[w]) drv.lane_cursor[w] = lba + 1;
 		drv.hit_count++;
+		if (unreadable) {
+			memset(dst, 0, PHYSICAL_DISC_RAW);
+			if (sub96) memset(sub96, 0, PHYSICAL_DISC_SUB);
+			return -1;
+		}
 		return 0;
 	}
 
 	double t0 = clock_ms();
 	drv.sync_busy++;
-	int fr = refill_ring(lba, SYNC_IO_BURST, 1);
+	int request_count = w ? AUDIO_SYNC_BURST : SYNC_IO_BURST;
+	int fr = refill_ring(lba, request_count, 1);
 	drv.sync_busy--;
 
 	drv.miss_count++;
@@ -1082,7 +1547,8 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 		pthread_mutex_lock(&drv.ring_lock);
 		e = entry_for(lba);
 		hit = (e->lba == lba);
-		if (hit) {
+		unreadable = hit && e->unreadable;
+		if (hit && !unreadable) {
 			memcpy(dst, e->data, PHYSICAL_DISC_RAW);
 			if (sub96) memcpy(sub96, e->data + PHYSICAL_DISC_RAW, PHYSICAL_DISC_SUB);
 			if (sub_valid) *sub_valid = e->sub_present;
@@ -1091,6 +1557,11 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 
 		if (hit) {
 			drv.lane_cursor[w] = lba + 1;
+			if (unreadable) {
+				memset(dst, 0, PHYSICAL_DISC_RAW);
+				if (sub96) memset(sub96, 0, PHYSICAL_DISC_SUB);
+				return -1;
+			}
 			return 0;
 		}
 	}
@@ -1099,7 +1570,7 @@ static int fetch_sector(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, i
 	if (sub96) memset(sub96, 0, PHYSICAL_DISC_SUB);
 	drv.bad_count++;
 	drv.lane_cursor[w] = lba;
-	return 0;
+	return -1;
 }
 
 int physical_disc_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
@@ -1567,11 +2038,27 @@ void physical_disc_close()
 	pthread_join(drv.io_thread, NULL);
 	free(drv.ring);
 	drv.ring = NULL;
+
+	// A Linux optical-device open or a previous filesystem mount may have
+	// asserted the kernel tray lock. Every completed physical-disc session
+	// must leave the drive ejectable. Ignore ENOTTY/unsupported bridges.
+	ioctl(drv.dev_fd, CDROM_LOCKDOOR, 0);
 	close(drv.dev_fd);
 	drv.dev_fd = -1;
 	drv.leadout_lba = 0;
 	drv.track_count = 0;
 	drv.data_lba0 = -1;
 	drv.want_native_speed = 0;
+	drv.subch_ok = -1;
+	drv.sync_busy = 0;
+	drv.fail_streak = 0;
+	drv.active_lane = -1;
+	drv.warmup_lba = -1;
+	drv.warmup_end = 0;
+	drv.rush_lane = -1;
+	drv.rush_lba = -1;
+	drv.neighbor_lba = -1;
+	drv.neighbor_end = 0;
+	for (int w = 0; w < LANE_COUNT; w++) { drv.lane_cursor[w] = 0; drv.lane_active[w] = 0; }
 	active_dev[0] = 0;
 }

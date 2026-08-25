@@ -104,6 +104,17 @@
 #define UIO_MM2_FLPEX01 0xFA
 #define UIO_MM2_FLPEX23 0xFB
 #define UIO_MM2_USRPORT 0xFC
+// PSX SNAC: write. Plan 1 (Menu core) uses this as a one-bit enable
+// (cfg.snac_psx). Plan 2 (AmigaCD) widens its use to port modes / light-pen
+// latch.
+#define UIO_MM2_SNAC    0xFD
+#define UIO_MM2_SNACRD  0xFE  // PSX SNAC: read pad state
+
+// Light-pen latch, AmigaCD only. Two commands because 11 bits of vpos plus 8 of
+// hpos do not fit one word. 0xFD is the Menu core's SNAC enable; the two cores
+// decode independently and never see each other's traffic.
+#define UIO_MM2_LPENV   0xFD  // PSX SNAC: light-pen vertical position
+#define UIO_MM2_LPENH   0xFF  // PSX SNAC: light-pen horizontal position
 
 #define JOY_RIGHT       0x01
 #define JOY_LEFT        0x02
@@ -268,6 +279,12 @@ void user_io_store_filename(char *filename);
 int user_io_use_cheats();
 
 int process_ss(const char *rom_name, int enable = 1);
+// Applies the host half of a save state -- today, the CD drive position.
+// Call after triggering a restore; a file without a host block is a no-op.
+void ss_apply_host_state(int slot);
+// Tells the save state poller a save is coming, so it writes the file
+// promptly instead of up to a second later. See its definition.
+void ss_expect_save(void);
 
 char is_f12_mod_needed();
 void diskled_on();

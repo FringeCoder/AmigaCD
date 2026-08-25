@@ -28,7 +28,7 @@
 #include <byteswap.h>     // bswap_16 for CDDA big-endian → host conversion
 
 #include "../../spi.h"
-#include "../../fpga_io.h"     // fpga_spi_fast_block_write_8 (M5+ SECTOR_RD fast path)
+#include "../../fpga_io.h"     // fpga_spi_fast / fpga_spi_fast_block_write
 #include "../../user_io.h"
 #include "../../ide.h"
 #include "../../ide_cdrom.h"
@@ -146,6 +146,9 @@ static void akiko_diag(const char *fmt, ...);
 
 // Per-opcode command lengths *excluding* the trailing checksum byte.
 // akiko.cpp:1136 — entries < 0 are "reserved/unsupported".
+#define AKIKO_FILL_CHUNK_WORDS 64
+#define AKIKO_FILL_GAP_US      10
+
 static const int command_lengths[16] = {
 	1, 2, 1, 1, 12, 2, 1, 1, 4, 1, 2, -1, -1, -1, -1, -1
 };
@@ -307,21 +310,26 @@ static int32_t cd_cdda_lba_next = -1;
 static int32_t cd_cdda_lba_end  = -1;
 static drive_t *cd_cdda_drv     = NULL;
 
-// Last mounted state — used to re-arm the auto-init when a disc is swapped.
-static bool     cd_last_mounted     = false;
+typedef enum {
+	CD_MEDIA_UNKNOWN = -1,
+	CD_MEDIA_ABSENT  = 0,
+	CD_MEDIA_PRESENT = 1
+} cd_media_level_t;
 
-// Phase 33-E flag: when set, the next akiko_cd32_poll iteration will call
-// minimig_reset() (deferred from the mediachange handler so the edge-
-// detection code runs to completion first). Used only for the boot-with-
-// no-CD-then-mount recovery path; hot-swaps during gameplay never set it.
-static bool     g_akiko_pending_minimig_reset = false;
-
-// One-shot: push a fresh media-status frame on the next poll *after* INFO
-// has completed. Mimics WinUAE's mediachanged-still-set-after-init quirk
-// (akiko.cpp:1399 fires once cd_initialized reaches 2 if mediachanged was
-// set at boot). Without this, BIOS gets the LED+INFO acks but never sees
-// the second media_status that would unblock its post-init MULTI scan.
-static uint8_t  cd_post_info_media_push_pending = 0;
+static cd_media_level_t cd_media_level = CD_MEDIA_UNKNOWN;
+static bool     cd_media_push_pending = false;
+static bool     cd_media_event        = false;
+// Mounting a disc while one is already in swaps it with no removal in between,
+// which no physical drive can do - the tray has to open. A guest is told
+// present, then present again, and that is not a media change, so AmigaOS
+// keeps serving the old volume from cache and the new disc never appears.
+// Owe the guest the absent edge first.
+static bool     cd_media_swap_absent  = false;
+static uint32_t cd_media_swap_ready_ms = 0;
+// The tray cannot open and shut in the same instant, and the removal has to
+// reach CDFileSystem before the arrival lands or the two collapse back into
+// no change at all.
+#define AKIKO_SWAP_SETTLE_MS 700
 
 // TOC streaming state. After cmd_info completes we proactively push TOC
 // entries (cmd 0x06 / cdrom_return_toc_entry) one per poll until the BIOS
@@ -565,14 +573,15 @@ static inline uint8_t bin_to_bcd(uint8_t v)
 	return (uint8_t)(((v / 10u) << 4) | (v % 10u));
 }
 
-// "Is real CD media inserted?" — matches WinUAE's `cdrom_disk != NULL` semantic.
+// "Is real CD media inserted?" -- matches WinUAE's `cdrom_disk != NULL` semantic.
 // A placeholder drive (cfg=2, no filename) has present=0/cd=1 with chd_f=NULL,
-// f=NULL — that's "drive ready, no media", which WinUAE treats as no-disk for
+// f=NULL -- that's "drive ready, no media", which WinUAE treats as no-disk for
 // cmd_multi/pause/unpause. Checking present+cd alone would let MULTI fall into
 // the scan-TOC branch and then PLAY AUDIO with a junk seekpos, trapping BIOS
 // in the UNPAUSE polling loop and never letting it render the splash.
 static bool cd_is_mounted(void)
 {
+	if (minimig_cd_drive_get(0)) return true;
 	for (int p = 0; p < 2; p++) {
 		for (int d = 0; d < 2; d++) {
 			drive_t *drv = &ide_inst[p].drive[d];
@@ -585,8 +594,15 @@ static bool cd_is_mounted(void)
 }
 
 // Find the first CD drive that has real media. NULL if no drive has media.
+//
+// The dedicated CD32 slot comes first, then the IDE drives. Upstream mounts
+// through the slot; a physical disc and anything mounted through hardfile[0]
+// still land on ide_inst, and that is what autoboot, the per-game NVRAM key
+// and the physical-disc read path all key off.
 static drive_t *cd_find_drive(void)
 {
+	drive_t *slot = minimig_cd_drive_get(0);
+	if (slot) return slot;
 	for (int p = 0; p < 2; p++) {
 		for (int d = 0; d < 2; d++) {
 			drive_t *drv = &ide_inst[p].drive[d];
@@ -598,6 +614,15 @@ static drive_t *cd_find_drive(void)
 	return NULL;
 }
 
+// Read the level the poll last announced to the guest, not the mount state.
+// Between a swap's removal edge and its arrival there IS a drive with media,
+// and telling the guest so at that moment collapses the swap back into no
+// change at all.
+static inline bool cd_media_present(void)
+{
+	return cd_media_level == CD_MEDIA_PRESENT;
+}
+
 // Read the bridge status word. Mirrors ide_check() but kept private to avoid
 // clobbering the IDE poll's read of the same word.
 static uint16_t akiko_read_status(void)
@@ -605,7 +630,7 @@ static uint16_t akiko_read_status(void)
 	uint16_t res;
 	EnableIO();
 	res = spi_w(AKIKO_STATUS_CMD);
-	if (!res) res = (uint8_t)spi_w(0);
+	if (!res) res = spi_w(0);
 	DisableIO();
 	return res;
 }
@@ -843,6 +868,7 @@ static void cmd_info(const uint8_t *cmd)
 	memcpy(&r[2], AKIKO_FIRMWARE, 18);       // exactly 18 chars, no NUL
 	akiko_send_response(r, 20);
 	cd_initialized = 2;
+	cd_media_push_pending = true;
 	akiko_dbg("INFO -> initialized=2\n");
 	// Build TOC eagerly (cheap), but DON'T start streaming. WinUAE's BIOS
 	// asks for TOC via MULTI in PLAY mode with seekpos<0 — see cmd_multi.
@@ -883,7 +909,7 @@ static void cmd_stop(const uint8_t *cmd)
 {
 	uint8_t r[2];
 	r[0] = cmd[0];
-	r[1] = cd_is_mounted() ? 0x00 : (CH_ERR_NODISK | cd_door);
+	r[1] = cd_media_present() ? 0x00 : (CH_ERR_NODISK | cd_door);
 	cd_playing = 0;
 	cd_paused = 0;
 	cd_data_lba_base = -1;                       // cancel any data-mode read
@@ -911,7 +937,7 @@ static void cmd_pause(const uint8_t *cmd)
 {
 	uint8_t r[2];
 	r[0] = cmd[0];
-	if (!cd_is_mounted()) {
+	if (!cd_media_present()) {
 		r[1] = CH_ERR_NODISK | cd_door;
 	} else {
 		r[1] = (cd_playing ? CDS_PLAYING : 0) | cd_door;
@@ -927,7 +953,7 @@ static void cmd_pause(const uint8_t *cmd)
 	toc_push_last_ms = 0;
 	cd_paused = 1;
 	akiko_send_response(r, 2);
-	akiko_dbg("PAUSE (playing=%d, mounted=%d)\n", cd_playing, cd_is_mounted());
+	akiko_dbg("PAUSE (playing=%d, present=%d)\n", cd_playing, cd_media_present());
 }
 
 // 0x03 — UNPAUSE. WinUAE akiko.cpp:1027-1044. Same checkerr() pattern.
@@ -935,14 +961,14 @@ static void cmd_unpause(const uint8_t *cmd)
 {
 	uint8_t r[2];
 	r[0] = cmd[0];
-	if (!cd_is_mounted()) {
+	if (!cd_media_present()) {
 		r[1] = CH_ERR_NODISK | cd_door;
 	} else {
 		r[1] = (cd_playing ? CDS_PLAYING : 0) | cd_door;
 	}
 	cd_paused = 0;
 	akiko_send_response(r, 2);
-	akiko_dbg("UNPAUSE (playing=%d, mounted=%d)\n", cd_playing, cd_is_mounted());
+	akiko_dbg("UNPAUSE (playing=%d, present=%d)\n", cd_playing, cd_media_present());
 }
 
 // 0x04 — PLAY/READ. akiko.cpp:1257ff.
@@ -966,8 +992,8 @@ static void cmd_multi(const uint8_t *cmd)
 		cdrom_speed = new_speed;
 	}
 
-	if (!cd_is_mounted()) {
-		r[1] = 0x01;                         // "no disk" code in the play branch (matches WinUAE akiko.cpp:1059)
+	if (!cd_media_present()) {
+		r[1] = 0x01;
 		akiko_send_response(r, 2);
 		akiko_dbg("PLAY: no disk\n");
 		return;
@@ -1381,6 +1407,27 @@ static uint8_t akiko_read_sec_counter(void)
 // that resets to 0 on cs rising and increments per uio_rd. host_dout has
 // 1-cycle BRAM latency; cs is held many cycles before the first read so
 // the first byte is valid by then.
+static void akiko_ext_block_write(uint16_t addr, const uint8_t *buf, int bytes)
+{
+	static uint16_t words[AKIKO_SECTOR_BYTES / 2];
+	memcpy(words, buf, bytes);
+
+	int total = bytes / 2;
+
+	EnableIO();
+	fpga_spi_fast(UIO_DMA_WRITE);
+	fpga_spi_fast(addr);
+	fpga_spi_fast(0);
+	int off = 0;
+	while (off < total) {
+		int n = total - off < AKIKO_FILL_CHUNK_WORDS ? total - off : AKIKO_FILL_CHUNK_WORDS;
+		fpga_spi_fast_block_write(words + off, n);
+		off += n;
+		if (off < total) usleep(AKIKO_FILL_GAP_US);
+	}
+	DisableIO();
+}
+
 static void akiko_nvram_dump(uint8_t *out_1024)
 {
 	EnableIO();
@@ -1420,24 +1467,25 @@ static bool akiko_nvram_load_from_path(const char *path)
 		return false;
 	}
 
-	// user_io_file_mount → UIO_SET_SDINFO + UIO_SET_SDSTAT over SPI.
-	// hps_io drops a single-cycle img_mounted[0] pulse with img_size set;
-	// Minimig.sv's edge-detect FSM kicks off the LBA-0 read on the next
-	// clk_sys edge.
-	int rc = user_io_file_mount(path, /*index*/0, /*pre*/0, /*pre_size*/0);
-	if (rc != 1) {
-		akiko_diag("[akiko] NVR mount FAIL: user_io_file_mount(%s, slot=0) rc=%d",
-		           path, rc);
+	uint8_t nvr[AKIKO_NVRAM_BYTES];
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		akiko_diag("[akiko] NVR load FAIL: fopen(%s) errno=%d", path, errno);
+		cd_save_load_failed = true;
+		return false;
+	}
+	size_t got = fread(nvr, 1, sizeof(nvr), f);
+	fclose(f);
+	if (got != sizeof(nvr)) {
+		akiko_diag("[akiko] NVR load FAIL: read %u of %d bytes from %s",
+		           (unsigned)got, AKIKO_NVRAM_BYTES, path);
 		cd_save_load_failed = true;
 		return false;
 	}
 
-	// Verify delay: load takes ~10-20 ms over SPI (BLKSZ=3, 1024 B per
-	// LBA, 4 user_io_poll iterations to fire the request once the
-	// !is_minimig() gate in user_io.cpp was lifted). 100 ms is well
-	// past completion while still catching the load before BIOS has
-	// done meaningful FlashFile-bootstrap work.
-	akiko_diag("[akiko] NVR mounted slot 0 (%d bytes from %s) — verify in 100 ms",
+	akiko_ext_block_write(AKIKO_NVRAM_ADDR, nvr, AKIKO_NVRAM_BYTES);
+
+	akiko_diag("[akiko] NVR loaded (%d bytes from %s) — verify in 100 ms",
 	           AKIKO_NVRAM_BYTES, path);
 	cd_save_load_failed = false;
 	strncpy(nvr_verify_path, path, sizeof(nvr_verify_path) - 1);
@@ -1627,43 +1675,13 @@ static bool akiko_nvram_save_to_disk(void)
 	return akiko_nvram_save_to_path(target);
 }
 
-// Push 2352 bytes to the akiko sector_buffer. Two paths coexist:
-//
-//   Default: UIO_SECTOR_RD on slot AKIKO_SEC_SLOT, then
-//   fpga_spi_fast_block_write_8(buf, 2352). hps_io's b_wr<<1 pipeline drives
-//   sd_buff_wr / sd_buff_addr / sd_buff_dout per byte at SPI clock without
-//   needing ACK round-trips. akiko.v captures via sd_ack[AKIKO_SEC_SLOT] gate;
-//   sector_ready latches when sd_buff_addr hits 2351. Measured ~0.95 ms/sector
-//   (hardware A/B, 2026-05-07).
-//
-//   AKIKO_SLOW_PUSH=1 (escape hatch): UIO_DMA_WRITE on 0xF500 (sec sub-channel
-//   of 0xF400). Per-byte SSPI_ACK round-trip → ~2.3 ms/sector. Bridge ends the
-//   transfer with hps_sec_done; akiko.v latches sector_ready iff every byte
-//   landed (sec_wr_ptr == 2352). Kept as a fallback in case a future regression
-//   needs to A/B against the slow path without rebuilding.
-//
-// The fast path needs the matching RTL (Minimig.sv VDNUM=2, akiko_sec_dma_*
-// wiring) — without it, sd_ack[1] never asserts and bytes go nowhere. Bundled
-// shipped RBFs (May 2026 onward) include this RTL.
-#define AKIKO_SEC_SLOT 1   // hps_io disk slot wired to akiko.v's hps_sec_dma_*
-static const bool g_akiko_fast_push = (getenv("AKIKO_SLOW_PUSH") == nullptr);
-
+// Push one sector to the akiko sector_buffer as 1176 16-bit words over the
+// ext bus. The old hps_io disk-slot path (UIO_SECTOR_RD on a dedicated VDNUM
+// slot, ~0.95 ms/sector) is gone: akiko.v takes words now, and the word-wide
+// push is both faster and does not burn a virtual disk slot.
 static void akiko_push_sector(const uint8_t *buf)
 {
-	if (g_akiko_fast_push) {
-		EnableIO();
-		spi_w(UIO_SECTOR_RD | (AKIKO_SEC_SLOT << 8));
-		fpga_spi_fast_block_write_8(buf, AKIKO_SECTOR_BYTES);
-		DisableIO();
-	} else {
-		EnableIO();
-		spi8(UIO_DMA_WRITE);
-		spi32_w(AKIKO_SECTOR_ADDR);
-		for (int i = 0; i < AKIKO_SECTOR_BYTES; i++) {
-			spi_w(buf[i]);
-		}
-		DisableIO();
-	}
+	akiko_ext_block_write(AKIKO_SECTOR_ADDR, buf, AKIKO_SECTOR_BYTES);
 }
 
 // -----------------------------------------------------------------------------
@@ -1688,7 +1706,7 @@ static void akiko_push_sector(const uint8_t *buf)
 static bool cd_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 {
 	if (!drv || !buf2352) return false;
-	if (!drv->chd_f && !drv->phys) return false;
+	if (!drv->chd_f && !drv->phys && !drv->f) return false;
 
 	bool index0 = false;
 	track_t *track = NULL;
@@ -1709,7 +1727,6 @@ static bool cd_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 			break;
 		}
 	}
-	(void)index0;
 
 	if (!track) return false;
 	// attr & 0x40 == 0 → audio (CDDA). Refuse to play data tracks as audio.
@@ -1729,12 +1746,21 @@ static bool cd_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 		return true;
 	}
 
-	uint32_t chd_lba = lba + track->chd_offset;
-	if (mister_chd_read_sector(drv->chd_f, chd_lba, 0, 0,
-	                           AKIKO_CDDA_BYTES, buf2352,
-	                           drv->chd_hunkbuf, &drv->chd_hunknum)
-	    != CHDERR_NONE) {
-		return false;
+	if (drv->chd_f) {
+		return cdrom_read_raw_sector(drv, lba, buf2352) == 0;
+	}
+
+	// Raw cue+bin. The track file holds audio in disc order, so it needs the
+	// same swap the physical path does, just done in place afterwards.
+	track_t *read_track = track;
+	if (index0 && track->number > 1) {
+		read_track = &drv->track[track->number - 2];
+	}
+	if (!cdrom_read_track_raw(read_track, lba, buf2352, AKIKO_CDDA_BYTES)) return false;
+
+	int16_t *samples = (int16_t *)buf2352;
+	for (int i = 0; i < AKIKO_CDDA_BYTES / 2; i++) {
+		samples[i] = (int16_t)bswap_16((uint16_t)samples[i]);
 	}
 	return true;
 }
@@ -2031,7 +2057,7 @@ static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 // hunk decode), (c) push_sector (2352 byte-by-byte SPI w/ ACK). Sum µs spent
 // in each across N sectors and emit one log line per bucket so we can see
 // where the bottleneck actually lives before optimizing.
-static void akiko_handle_sec_req(void)
+static bool akiko_handle_sec_req(void)
 {
 	struct timespec ts0, ts1, ts2, ts3;
 	static int64_t phase_a_us = 0, phase_b_us = 0, phase_c_us = 0;
@@ -2059,17 +2085,13 @@ static void akiko_handle_sec_req(void)
 
 	if (cd_data_lba_base == -1) {
 		akiko_dbg("sec_req but no data read armed (counter=%u)\n", counter);
-		memset(buf, 0, sizeof(buf));
-		akiko_push_sector(buf);
-		return;
+		return false;
 	}
 
 	drive_t *drv = cd_find_drive();
 	if (!drv) {
 		akiko_dbg("sec_req but no CD drive (counter=%u)\n", counter);
-		memset(buf, 0, sizeof(buf));
-		akiko_push_sector(buf);
-		return;
+		return false;
 	}
 
 	// Per-sector pre-gap check. Earlier code skipped the entire burst when
@@ -2092,9 +2114,7 @@ static void akiko_handle_sec_req(void)
 		}
 	}
 	if (signed_lba < 0) {
-		memset(buf, 0, sizeof(buf));
-		akiko_push_sector(buf);
-		return;
+		return false;
 	}
 	uint32_t lba = (uint32_t)signed_lba;
 
@@ -2122,7 +2142,7 @@ static void akiko_handle_sec_req(void)
 		}
 		memset(buf, 0, sizeof(buf));
 		akiko_push_sector(buf);
-		return;
+		return true;
 	}
 
 	// Audio-track guard. WinUAE akiko.cpp:1322,1361-1362,1610-1614 sets
@@ -2172,7 +2192,7 @@ static void akiko_handle_sec_req(void)
 				held_audio_lba = UINT32_MAX;
 				held_count = 0;
 			}
-			return;
+			return false;
 		}
 	}
 
@@ -2195,12 +2215,12 @@ static void akiko_handle_sec_req(void)
 		akiko_diag("[akiko] sec_req lba=%u %s (retry %u/%u)", lba,
 		           (rc == -1) ? "prefetch FAIL" : "cached invalid",
 		           fail_count, MAX_FAIL_RETRIES);
-		if (fail_count < MAX_FAIL_RETRIES) return;
+		if (fail_count < MAX_FAIL_RETRIES) return false;
 		akiko_diag("[akiko] sec_req lba=%u retry cap reached — push silence, advance", lba);
 		fail_lba = UINT32_MAX;
 		memset(buf, 0, sizeof(buf));
 		akiko_push_sector(buf);
-		return;
+		return true;
 	}
 	clock_gettime(CLOCK_MONOTONIC, &ts2);
 
@@ -2233,6 +2253,7 @@ static void akiko_handle_sec_req(void)
 		phase_a_us = phase_b_us = phase_c_us = 0;
 		bucket_count = 0;
 	}
+	return true;
 }
 
 // -----------------------------------------------------------------------------
@@ -2258,6 +2279,8 @@ static void akiko_handle_sec_req(void)
 // running it.
 void akiko_cd32_set_cd_path(const char *path)
 {
+	cd_media_event = true;
+
 	char new_path[256] = {0};
 	if (path && *path) {
 		compute_save_path(path, new_path, sizeof(new_path));
@@ -2348,7 +2371,11 @@ void akiko_cd32_init(void)
 	cd_cdda_lba_next = -1;
 	cd_cdda_lba_end  = -1;
 	cd_cdda_drv      = NULL;
-	cd_last_mounted  = false;
+	cd_media_level   = CD_MEDIA_UNKNOWN;
+	cd_media_push_pending = false;
+	cd_media_event   = false;
+	cd_media_swap_absent   = false;
+	cd_media_swap_ready_ms = 0;
 	toc_point_count  = 0;
 	toc_push_idx     = -1;
 	toc_push_last_ms = 0;
@@ -2360,7 +2387,6 @@ void akiko_cd32_init(void)
 	// same story — a stale "1" here would fire a spurious mediachange
 	// push on the very first poll of the new core.
 	akiko_prefetch_invalidate();
-	cd_post_info_media_push_pending = 0;
 
 	// Phase 32.5.1: a Minimig core reset wipes FPGA BRAM. If we already
 	// have an active per-game save file (set by cdrom_parse before or
@@ -2411,8 +2437,12 @@ static void akiko_diag(const char *fmt, ...)
 // Note hardfile[0].cfg stays 2 with no disc mounted -- ejecting clears the
 // filename, not the slot type -- so this does not disturb autoboot, which
 // depends on the poll continuing to run before anything is inserted.
+// Upstream's dedicated CD32 drive slot is one way to say "this is a CD32"; the
+// CPU/chipset/hardfile test below is the other, and is what every AmigaCD
+// profile uses. Either is enough.
 static inline bool cd32_active(void)
 {
+	if (minimig_config.cd32_drive.cfg != 0) return true;
 	return (minimig_config.cpu & 0x03) == 3
 	    && ((minimig_config.chipset >> 2) & 7) == 6
 	    && minimig_config.hardfile[0].cfg == 2;
@@ -2420,9 +2450,29 @@ static inline bool cd32_active(void)
 
 void akiko_cd32_poll(void)
 {
-	// Nothing here can do useful work on a non-CD32 configuration, and in CDTV
-	// mode cdtv_cd_poll() owns the CD instead. Previously this ran every poll
-	// regardless.
+	const bool mounted = cd32_active() && cd_is_mounted();
+	const cd_media_level_t level = mounted ? CD_MEDIA_PRESENT : CD_MEDIA_ABSENT;
+
+	if (level != cd_media_level || cd_media_event) {
+		const bool swap = cd_media_event && (level == CD_MEDIA_PRESENT)
+		                  && (cd_initialized >= 2);
+		cd_media_event   = false;
+		cd_data_lba_base = -1;
+		akiko_prefetch_invalidate();
+		cd_cdda_lba_next = -1;
+		cd_cdda_lba_end  = -1;
+		cd_cdda_drv      = NULL;
+		toc_point_count  = 0;
+		toc_push_idx     = -1;
+		cd_media_level   = level;
+		cd_media_push_pending = true;
+		if (swap) cd_media_swap_absent = true;
+		if (level == CD_MEDIA_PRESENT) akiko_build_toc();
+		akiko_diag("[akiko] media level -> %s (cd_init=%u, announce pending)",
+		           (level == CD_MEDIA_PRESENT) ? "present" : "absent",
+		           cd_initialized);
+	}
+
 	if (!cd32_active()) return;
 
 	// Phase 32.6 P3 (rolled back): tried replacing the floor with a SEC_REQ-
@@ -2435,30 +2485,6 @@ void akiko_cd32_poll(void)
 	// original known-good value.
 	usleep(20);
 
-	bool mounted = cd_is_mounted();
-
-	// Phase 33-E: deferred minimig_reset for "BIOS stuck on no-CD splash"
-	// recovery. Set by the mediachange handler below when the unmount→mount
-	// edge fires with cd_initialized>=2 and no prior eject in this session.
-	// Fire at the top of the NEXT poll so the edge-detection code runs to
-	// completion first (TOC rebuild + state bookkeeping). Safe because the
-	// previous poll always exits through send_response's
-	// `akiko_wait_status_bit` barrier — no UIO_DMA_WRITE is mid-flight.
-	if (g_akiko_pending_minimig_reset) {
-		g_akiko_pending_minimig_reset = false;
-		akiko_diag("[akiko] mediachange: BIOS was stuck on no-CD splash, "
-		           "triggering minimig_reset() (Phase 33-E)");
-		minimig_reset();
-		return;  // Don't continue this poll — minimig_reset re-init'd everything.
-	}
-
-	// Heartbeat: prove poll loop reached us at all. Writes to a dedicated
-	// log file so it survives any stdout redirection MiSTer does after init.
-	// Phase 32.5.1: NVRAM load is no longer driven from here — it's
-	// scheduled by akiko_cd32_set_cd_path() (CD mount/swap) and
-	// akiko_cd32_init() (post-reconfig BRAM wipe), and serviced below
-	// once `mounted` is true. That way each Minimig load_core re-loads,
-	// not just hardware boots, and per-game saves work correctly.
 	static bool first_poll = true;
 	if (first_poll) {
 		first_poll = false;
@@ -2502,101 +2528,17 @@ void akiko_cd32_poll(void)
 	static int unmounted_dump_throttle = 0;
 	if (!mounted && (unmounted_dump_throttle++ % 60) == 0 && unmounted_dump_throttle < 5*60) {
 		akiko_diag(
-			"[akiko] ide_inst dump: "
-			"[0,0]p=%d/c=%d/chd=%p/f=%p  [0,1]p=%d/c=%d/chd=%p/f=%p",
-			ide_inst[0].drive[0].present, ide_inst[0].drive[0].cd,
-			(void*)ide_inst[0].drive[0].chd_f, (void*)ide_inst[0].drive[0].f,
-			ide_inst[0].drive[1].present, ide_inst[0].drive[1].cd,
-			(void*)ide_inst[0].drive[1].chd_f, (void*)ide_inst[0].drive[1].f
+			"[akiko] no drive with media (slot=%p)",
+			(void*)minimig_cd_drive_get(0)
 		);
 	}
 #endif
 
-	// Mediachange handling. Mirror WinUAE akiko.cpp:1399-1408: insert AFTER
-	// INFO has run (cd_initialized>=2) goes through the dedicated mediachange
-	// path that pushes 0x0a/0x01 + rebuilds TOC WITHOUT regressing FSM state.
-	// Insert BEFORE INFO (cd_initialized<2, e.g. cold boot with CD) goes
-	// through the cold-boot auto-init path below. Eject queues a 0x0a/0x00
-	// push so BIOS sees the disc has gone away.
-	//
-	// Phase 33-D (2026-05-04): the prior version reset cd_initialized=0 on
-	// EVERY mount edge, which broke the boot-with-no-CD-then-mount scenario:
-	// BIOS issues INFO during no-CD state (cd_initialized -> 2), mount drops
-	// it to 0, auto-init bumps it to 1, but BIOS never re-issues INFO so we
-	// never reach 2 again — TOC drip (gated on cd_initialized==2) stays dead
-	// and BIOS sits on no-disc screen forever. WinUAE keeps cd_initialized=2
-	// across mediachange and the mediachange push alone is enough.
-	static bool media_absent_push_pending = false;
-	static bool mediachanged_push_pending = false;
-	// Phase 33-E (2026-05-07): when the user boots with no CD, BIOS issues
-	// 0x07 INFO during the no-disc state (cd_initialized -> 2) then sits
-	// indefinitely on the spinning-CD splash. A subsequent insert produces a
-	// mediachange push (0x0a/0x01) that BIOS ignores — empirically verified
-	// (107-line akiko log, no CMDs after the push). The only thing that
-	// unblocks BIOS is a CPU reset (LCtrl+LAlt+RAlt or OSD->Reset). We
-	// distinguish "no-CD-boot then mount" (BIOS stuck) from "hot-swap during
-	// gameplay" (BIOS handles the push) by tracking whether an eject was
-	// observed earlier in this session.
-	static bool had_prior_unmount = false;
-	if (mounted != cd_last_mounted) {
-		cd_data_lba_base = -1;               // any in-progress read is stale
-		akiko_prefetch_invalidate();         // cache may be from previous disc
-		// Phase 33: a CD swap or eject must abort any in-flight CDDA
-		// pump — the captured cd_cdda_drv pointer would now reference a
-		// closed CHD or read from the new disc otherwise.
-		cd_cdda_lba_next = -1;
-		cd_cdda_lba_end  = -1;
-		cd_cdda_drv      = NULL;
-		toc_point_count  = 0;
-		toc_push_idx     = -1;
-		if (!mounted) {
-			// Just ejected — arm the absent push (gated on rx_idle below).
-			// Preserve cd_initialized so the next insert routes through the
-			// mediachange path (matches WinUAE: cd_initialized only resets
-			// in akiko_reset, never on mediachange).
-			media_absent_push_pending = true;
-			mediachanged_push_pending = false;
-			had_prior_unmount = true;
-		} else {
-			// Just inserted. Rebuild TOC eagerly so it's fresh when BIOS
-			// queries (mirror WinUAE get_cdrom_toc() in mediachange branch
-			// at akiko.cpp:1403; WinUAE calls it twice — first try may fail,
-			// safe to do up front then again in the push branch below).
-			media_absent_push_pending = false;
-			akiko_build_toc();
-			if (cd_initialized >= 2) {
-				if (had_prior_unmount) {
-					// Hot-swap during gameplay: BIOS already handled an eject
-					// in this session, so the mediachange push is sufficient
-					// (mirrors WinUAE's behaviour for the same case).
-					mediachanged_push_pending = true;
-				} else {
-					// Boot-with-no-CD-then-mount (Phase 33-E): BIOS booted
-					// past INFO without ever seeing a CD. Pushing 0x0a/0x01
-					// is empirically a no-op — BIOS ignores it. Defer a
-					// minimig_reset to fire on the NEXT poll iteration; that
-					// re-runs ApplyConfiguration with the CHD already open
-					// via the prior cdrom_parse, so the post-reset boot has
-					// mounted=1 from t=0 and the cold-boot auto-init path
-					// takes over normally.
-					g_akiko_pending_minimig_reset = true;
-					mediachanged_push_pending = false;
-				}
-			}
-			// Else (cd_initialized<2): cold-boot auto-init path will fire.
-		}
-		cd_last_mounted = mounted;
-		akiko_diag("[akiko] media change -> mounted=%d cd_init=%u (absent=%d, mediachanged=%d)",
-		           mounted, cd_initialized,
-		           media_absent_push_pending, mediachanged_push_pending);
-	}
-
-	// 0. Status poll moved up so unsolicited pushes (auto-init, post-INFO,
-	// TOC drip) can be gated on FPGA rx_busy. Phase 18: bit[9] = rx_busy =
-	// (cdrom_receive_length != 0). When set, the RX engine still has a
-	// queued/in-flight response in result_buffer; pushing now would
-	// overwrite it and lose data. Mirror of WinUAE's
-	// cdrom_can_return_data() gate.
+	// Status poll first, so the unsolicited pushes below (auto-init, the
+	// media-status edge, the TOC drip) can be gated on the FPGA's rx_busy
+	// bit: when it is set the RX engine still has a queued or in-flight
+	// response in result_buffer, and pushing now would overwrite it. This is
+	// the mirror of WinUAE's cdrom_can_return_data().
 	uint16_t status = akiko_read_status();
 #if AKIKO_CD32_DEBUG
 	static uint16_t last_status = 0xffff;
@@ -2609,58 +2551,44 @@ void akiko_cd32_poll(void)
 #endif
 	const bool rx_idle = !(status & AKIKO_STATUS_RX_BUSY);
 
-	// 1. Auto-init: WinUAE akiko.cpp:1388-1392 pushes a media-status frame
-	// when cd_initialized == 0 && media-present. BIOS uses this to learn
-	// "media is here" before issuing LED/INFO. Phase 16: re-enabled now
-	// that Phase 14 NVRAM and Phase 15 partial-RX delivery are working.
-	// Without this, our trace shows BIOS doing LED+INFO drains via the
-	// partial-RX path (RXCMP bumped 4 → 30) but never issuing PLAY/MULTI:
-	// it's still in "expecting media-status" mode after INFO.
-	if (mounted && cd_initialized == 0 && rx_idle) {
-		uint8_t r[2];
-		r[0] = 0x0a;                                         // CDS_MEDIA_STATUS opcode
-		r[1] = 0x01;                                         // media present
-		akiko_send_response(r, 2);
+	if (cd_initialized == 0 && rx_idle) {
+		if (cd_media_present()) {
+			uint8_t r[2];
+			r[0] = 0x0a;
+			r[1] = 0x01;
+			akiko_send_response(r, 2);
+			akiko_diag("[akiko] auto-init media-status push: opcode=0x0a status=0x01");
+		}
 		cd_initialized = 1;
-		akiko_diag("[akiko] auto-init media-status push: opcode=0x0a status=0x01 (cd_initialized=1)");
+		return;
 	}
 
-	// Phase 33-D: mediachange push. Fired on insert AFTER INFO has run
-	// (cd_initialized>=2). Mirror of WinUAE akiko.cpp:1399-1408 — pushes
-	// 0x0a/0x01 + rebuilds TOC twice, WITHOUT resetting cd_initialized so
-	// the TOC drip can fire when BIOS responds with MULTI 0x04.
-	if (mediachanged_push_pending && mounted && cd_initialized >= 2 && rx_idle) {
-		uint8_t r[2];
-		r[0] = 0x0a;
-		r[1] = 0x01;
-		akiko_send_response(r, 2);
-		mediachanged_push_pending = false;
-		akiko_build_toc();                                  // WinUAE: "do not remove! first try may fail"
-		akiko_diag("[akiko] mediachange push: opcode=0x0a status=0x01 (TOC rebuilt 2x)");
-	}
-
-	// Phase 32.6: pending eject notification. Fired once per mount->unmount
-	// edge; cleared on send. rx_idle gating same as auto-init.
-	if (media_absent_push_pending && !mounted && rx_idle) {
+	// The removal half of a swap, sent before the arrival even though a disc is
+	// mounted, so cd_media_present() is not the source of the status here.
+	if (cd_media_swap_absent && cd_initialized >= 2 && rx_idle) {
 		uint8_t r[2];
 		r[0] = 0x0a;                                         // CDS_MEDIA_STATUS opcode
 		r[1] = 0x00;                                         // media absent
 		akiko_send_response(r, 2);
-		media_absent_push_pending = false;
-		akiko_diag("[akiko] eject media-status push: opcode=0x0a status=0x00");
+		cd_media_swap_absent   = false;
+		cd_media_swap_ready_ms = (uint32_t)GetTimer(AKIKO_SWAP_SETTLE_MS);
+		akiko_diag("[akiko] swap: media-status push opcode=0x0a status=0x00 "
+		           "(removal edge, arrival held %u ms)", AKIKO_SWAP_SETTLE_MS);
+		return;
 	}
 
-	// Phase 20: post-INFO media-status push DISABLED (was Phase 15-19.x).
-	// Subagent diff vs WinUAE akiko.cpp:1399-1407 shows the post-INFO push
-	// is GATED on `mediachanged == 1`, which the auto-init push at
-	// cd_initialized==0 already CONSUMED (akiko.cpp:1390-1392). On a cold
-	// boot WinUAE therefore fires post-INFO ZERO times. Our unconditional
-	// `cd_post_info_media_push_pending=1` in cmd_info was sending a
-	// duplicate/spurious frame after BIOS had already accepted INFO,
-	// likely racing the BIOS state machine and preventing it from
-	// advancing to LED(1)/PLAY/MULTI. Drop it entirely to match WinUAE's
-	// cold-boot behavior; only the auto-init push above should fire.
-	(void)cd_post_info_media_push_pending;
+	if (cd_media_push_pending && cd_initialized >= 2 && rx_idle
+	    && (!cd_media_swap_ready_ms || CheckTimer(cd_media_swap_ready_ms))) {
+		cd_media_swap_ready_ms = 0;
+		uint8_t r[2];
+		r[0] = 0x0a;
+		r[1] = cd_media_present() ? 0x01 : 0x00;
+		akiko_send_response(r, 2);
+		cd_media_push_pending = false;
+		akiko_build_toc();
+		akiko_diag("[akiko] media-status push: opcode=0x0a status=0x%02x", r[1]);
+		return;
+	}
 
 	// 1.5 Auto-TOC drip: re-enabled in Phase 17, gated on rx_idle in Phase 18.
 	// BIOS RXCMP after INFO+post-INFO goes 4,6,7,...,15,30 — the +15 jump from
@@ -2803,8 +2731,7 @@ void akiko_cd32_poll(void)
 	}
 
 	if (status & AKIKO_STATUS_SEC_REQ) {
-		akiko_handle_sec_req();
-		return;                              // one bridge action per poll
+		if (akiko_handle_sec_req()) return;
 	}
 
 	if (!(status & AKIKO_STATUS_REQ)) return;
@@ -2896,4 +2823,133 @@ void akiko_cd32_poll(void)
 			cmd_bad(cmd, CH_ERR_BADCOMMAND);
 			break;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Save state, host side. See akiko_cd32.h for why this exists at all.
+// ---------------------------------------------------------------------------
+
+// Versioned and fixed-layout. Every field is a fixed-width type and the struct
+// is written and read as raw bytes, so a build that changes the layout has to
+// change the version with it -- akiko_cd32_state_load refuses an unknown one
+// rather than reinterpreting the bytes, because a drive told to seek to a
+// plausible wrong place is worse than one told nothing.
+#define AKIKO_SS_MAGIC   0x414B5353u   // "AKSS"
+#define AKIKO_SS_VERSION 1u
+
+typedef struct
+{
+	uint32_t magic;
+	uint32_t version;
+
+	// Auto-init handshake. 0 = drive cold, 1 = media status sent, 2 = the BIOS
+	// has issued INFO and the drive is up. Restoring this is what stops the
+	// restored machine re-running an init the game finished long ago.
+	uint8_t  initialized;
+	uint8_t  paused;
+	uint8_t  playing;
+	uint8_t  door;
+	uint8_t  led_state;
+	uint8_t  speed;            // 1x or 2x, as cmd_multi last set it
+	uint8_t  pad0;
+	uint8_t  pad1;
+
+	uint32_t play_start_lba;
+	uint32_t play_end_lba;
+
+	// The data read position. cd_data_lba_base pairs with the FPGA's
+	// cdrom_sector_counter, which travels in the core payload: userspace serves
+	// base + counter, so the two only mean anything together.
+	int32_t  data_lba_base;
+
+	// CDDA. q_pos and q_end survive a natural end so SUBQ keeps answering;
+	// lba_next and lba_end are the pump's own cursor.
+	int32_t  cdda_q_pos;
+	int32_t  cdda_q_end;
+	int32_t  cdda_lba_next;
+	int32_t  cdda_lba_end;
+
+	uint8_t  cdda_active;      // whether cd_cdda_drv was non-NULL
+	uint8_t  last_mounted;
+	uint8_t  pad2;
+	uint8_t  pad3;
+} akiko_ss_state_t;
+
+int akiko_cd32_state_size(void)
+{
+	return (int)sizeof(akiko_ss_state_t);
+}
+
+void akiko_cd32_state_save(void *buf)
+{
+	akiko_ss_state_t s;
+	memset(&s, 0, sizeof(s));
+	s.magic          = AKIKO_SS_MAGIC;
+	s.version        = AKIKO_SS_VERSION;
+	s.initialized    = cd_initialized;
+	s.paused         = cd_paused;
+	s.playing        = cd_playing;
+	s.door           = cd_door;
+	s.led_state      = cd_led_state;
+	s.speed          = (uint8_t)cdrom_speed;
+	s.play_start_lba = cd_play_start_lba;
+	s.play_end_lba   = cd_play_end_lba;
+	s.data_lba_base  = cd_data_lba_base;
+	s.cdda_q_pos     = cd_cdda_q_pos;
+	s.cdda_q_end     = cd_cdda_q_end;
+	s.cdda_lba_next  = cd_cdda_lba_next;
+	s.cdda_lba_end   = cd_cdda_lba_end;
+	s.cdda_active    = (cd_cdda_drv != NULL) ? 1 : 0;
+	// The field predates upstream's media-level state machine, which replaced
+	// the cd_last_mounted flag it used to carry. cd_media_level means the same
+	// thing -- what the guest was last told -- so the on-disk .ss format stays
+	// as it was.
+	s.last_mounted   = (cd_media_level == CD_MEDIA_PRESENT) ? 1 : 0;
+	memcpy(buf, &s, sizeof(s));
+}
+
+bool akiko_cd32_state_load(const void *buf, int len)
+{
+	akiko_ss_state_t s;
+	if (len < (int)sizeof(s)) return false;
+	memcpy(&s, buf, sizeof(s));
+	if (s.magic != AKIKO_SS_MAGIC || s.version != AKIKO_SS_VERSION) return false;
+
+	cd_initialized    = s.initialized;
+	cd_paused         = s.paused;
+	cd_playing        = s.playing;
+	cd_door           = s.door;
+	cd_led_state      = s.led_state;
+	cdrom_speed       = s.speed ? s.speed : 1;
+	cd_play_start_lba = s.play_start_lba;
+	cd_play_end_lba   = s.play_end_lba;
+	cd_data_lba_base  = s.data_lba_base;
+	cd_cdda_q_pos     = s.cdda_q_pos;
+	cd_cdda_q_end     = s.cdda_q_end;
+	cd_cdda_lba_next  = s.cdda_lba_next;
+	cd_cdda_lba_end   = s.cdda_lba_end;
+	cd_media_level    = s.last_mounted ? CD_MEDIA_PRESENT : CD_MEDIA_ABSENT;
+
+	// cd_cdda_drv is a POINTER into this run's drive table and cannot be
+	// carried across a core reload. It is re-derived instead: the pump only
+	// needs to know a drive is there, and cd_find_drive answers that for the
+	// disc mounted now. If the user swapped discs between save and restore the
+	// LBAs are meaningless anyway and there is nothing better to do than aim
+	// them at the disc that is actually in.
+	cd_cdda_drv = s.cdda_active ? cd_find_drive() : NULL;
+	if (!cd_cdda_drv) {
+		cd_cdda_lba_next = -1;
+		cd_cdda_lba_end  = -1;
+	}
+
+	// The prefetch windows hold sectors from wherever the drive was before the
+	// restore. They are a cache of the disc, not state of the machine, so the
+	// honest thing is to drop them and let them refill from the restored
+	// position -- keeping them risks serving a sector from the old stream.
+	akiko_prefetch_invalidate();
+
+	akiko_diag("[akiko] state restored: init=%u base=%d cdda=%d..%d speed=%ux",
+	           cd_initialized, cd_data_lba_base,
+	           cd_cdda_lba_next, cd_cdda_lba_end, cdrom_speed);
+	return true;
 }

@@ -37,6 +37,7 @@
 #include "scaler.h"
 #include "ide.h"
 #include "support/minimig/minimig_config.h"
+#include "support/lightpen/amiga_lightpen.h"
 #include "file_io.h"
 
 #define NUMDEV 30
@@ -6063,6 +6064,19 @@ int input_test(int getchar)
 											input[i].lasty = ev.value;
 										}
 									}
+
+									// AmigaCD's light pen, driven from a USB CRT gun (GunCon 2
+									// and friends). Deliberately after the grace-period handling
+									// above, so lastx/lasty are the settled on-screen position
+									// and an off-screen shot holds rather than snapping to an
+									// edge. guncal[2..3] is the X range, guncal[0..1] the Y --
+									// the same split ABS_X/ABS_Y use just above.
+									if (amiga_lightpen_usb_active())
+									{
+										amiga_lightpen_abs(input[i].lastx, input[i].lasty,
+										                   input[i].guncal[2], input[i].guncal[3],
+										                   input[i].guncal[0], input[i].guncal[1]);
+									}
 								}
 
 								if (ev.type == EV_KEY && user_io_osd_is_visible())
@@ -6071,6 +6085,26 @@ int input_test(int getchar)
 									{
 										if (menu_lightgun_cb(i, ev.type, ev.code, ev.value)) continue;
 									}
+								}
+
+								// The gun's trigger, for the Amiga light pen. The position
+								// path above needs no mapping and neither can this: a light
+								// gun is matched by VID/PID and never gets a .map file, so
+								// left to the ordinary button mapping the trigger reaches
+								// nothing at all -- aim works, shooting does not, which is
+								// what a GunCon 2 did on hardware.
+								//
+								// The port is the module's to decide, not this one's: the
+								// pen is wired to a fixed port and a program looking for it
+								// reads that port and no other, so following input[].num
+								// would put fire wherever MiSTer happened to assign the gun.
+								//
+								// Skipped while the OSD is up so a shot aimed at a menu does
+								// not also press fire on the machine behind it.
+								if (ev.type == EV_KEY && !user_io_osd_is_visible()
+								    && amiga_lightpen_usb_active())
+								{
+									amiga_lightpen_button(ev.code, ev.value != 0);
 								}
 
 								// redirect further actions to left joycon in combined mode
@@ -6398,6 +6432,10 @@ int input_poll(int getchar)
 
 	for (int i = 0; i < NUMPLAYERS; i++) {
 		joy_mask[i] = build_joy_mask(i);
+		// A light gun's trigger is an ordinary fire button to the Amiga, but it
+		// arrives outside the mapping that builds the rest of this mask -- see
+		// amiga_lightpen_button(). Zero for every port with no gun on it.
+		joy_mask[i] |= amiga_lightpen_joy_mask(i);
 		autofire_mask[i] = build_autofire_mask(i);
 	}
 

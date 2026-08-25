@@ -37,6 +37,9 @@
 #include "support/minimig/akiko_cd32.h"
 #include "support/physical_disc/physical_disc_autoboot.h"
 #include "support/minimig/cdtv_cd.h"
+#include "support/minimig/minimig_ssdiag.h"
+#include "support/minimig/minimig_savestate.h"
+#include "support/snac/snac_psx.h"
 #ifdef PROFILING
 #include "profiling.h"
 #endif
@@ -227,7 +230,17 @@ char is_menu()
 static int is_x86_type = 0;
 char is_x86()
 {
-	if (!is_x86_type) is_x86_type = strcasecmp(orig_name, "AO486") ? 2 : 1;
+	if (!is_x86_type)
+	{
+		if (!strcasecmp(orig_name, "AO486") ||
+		    !strcasecmp(orig_name, "PC110") ||
+		    !strcasecmp(orig_name, "Z486") ||
+		    !strcasecmp(orig_name, "Z386")
+		   )
+			is_x86_type = 1;
+		else
+			is_x86_type = 2;
+	}
 	return (is_x86_type == 1);
 }
 
@@ -273,12 +286,27 @@ char is_neogeo_cd() {
 static int is_minimig_type = 0;
 char is_minimig()
 {
-	// Prefix-match so renamed CONF_STR variants ("MinimigCD" for our CD32+CDTV
-	// fork, "AmigaCD" for the simplified console variant, etc.) still satisfy
-	// the Minimig-specific code paths gated below.
-	if (!is_minimig_type) is_minimig_type =
-		(!strncasecmp(orig_name, "minimig", 7) || !strncasecmp(orig_name, "amigacd", 7)) ? 1 : 2;
-	return (is_minimig_type == 1);
+	// Two questions in one call. Returns 0 for a non-Minimig core, 1 for a
+	// Minimig-family core, 2 for one that also carries the Akiko/CDTV
+	// hardware.
+	//
+	// Prefix-match on the name so renamed CONF_STR variants ("MinimigCD" for
+	// the CD32+CDTV fork, "AmigaCD" for the console variant) still satisfy the
+	// Minimig-specific code paths. Upstream exact-matches two names, which
+	// would leave every one of ours unrecognised.
+	//
+	// The CD hardware is asked for rather than inferred from the name:
+	// hps_ext.v answers 1 to the first word of UIO_GET_VMODE when the core has
+	// the bridges in it. That is what gates the CD polls, so a core built
+	// without them stays quiet instead of talking to nothing.
+	if (!is_minimig_type)
+	{
+		is_minimig_type =
+			(!strncasecmp(orig_name, "minimig", 7) || !strncasecmp(orig_name, "amigacd", 7)) ? 1 : 2;
+		if (is_minimig_type == 1 && spi_uio_cmd(UIO_GET_VMODE) == 1) is_minimig_type = 3;
+	}
+
+	return (is_minimig_type == 1) ? 1 : (is_minimig_type == 3) ? 2 : 0;
 }
 
 // Bring-up shim, see is_amigacd(). Testing aid; delete the file once running a
@@ -1504,6 +1532,12 @@ void user_io_init(const char *path, const char *xml)
 
 	cfg_parse();
 	cfg_print();
+
+	// Hand the SNAC user port to the PSX pad reader, or leave it with MT32-pi
+	// (the core's default) if the setting is off. Only the Menu core decodes
+	// this command, so gate on core identity rather than sending it blind.
+	if (is_menu()) spi_uio_cmd8(UIO_MM2_SNAC, cfg.snac_psx);
+
 	while (cfg.waitmount[0] && !is_menu())
 	{
 		printf("> > > wait for %s mount < < <\n", cfg.waitmount);
@@ -1738,7 +1772,7 @@ void user_io_init(const char *path, const char *xml)
 		if (xml && isXmlName(xml) == 1) arcade_check_error();
 
 		char cfg_errs[512];
-		if (cfg_check_errors(cfg_errs, sizeof(cfg_errs)))
+		if (cfg.sanity_check && cfg_check_errors(cfg_errs, sizeof(cfg_errs)))
 		{
 			Info(cfg_errs, 5000);
 			sleep(5);
@@ -1959,12 +1993,71 @@ static void kbd_fifo_poll()
 	kbd_fifo_r = (kbd_fifo_r + 1)&(KBD_FIFO_SIZE - 1);
 }
 
+// The four mapped DDR3 save state windows. File scope rather than function
+// static so ss_apply_host_state() below can read one back; process_ss owns
+// them and is the only thing that maps or fills them.
+static void *ss_base_win[4] = {};
+
+// Set when the user asks for a save, cleared when one is written or after the
+// core has had long enough that it is not coming. It speeds the poll below up
+// while a save is in flight -- see there for why that matters -- and it is
+// also what turns a save that never reached the card into a message the user
+// can read, instead of nothing at all.
+static int ss_save_expected = 0;
+static unsigned long ss_save_deadline = 0;
+
+// Twenty seconds, not five. Measured on hardware: the core raises save_ok one
+// second after the request, and the window's counter word -- the only thing the
+// writer below watches -- does not change for another 3.3 s after that. Five
+// seconds from the press left barely a second of margin, and a save that was
+// merely slow got reported as one that never happened.
+//
+// The cost of being generous is only how long a genuinely lost save stays
+// unreported. The cost of being tight is telling the user a save failed while
+// it is still on its way, which is worse: they press again, and now two
+// captures are racing for the same window.
+#define SS_SAVE_DEADLINE_MS 20000
+
+void ss_expect_save(void)
+{
+	ss_save_expected = 1;
+	ss_save_deadline = GetTimer(SS_SAVE_DEADLINE_MS);
+}
+
+// Hands the host half of a save state back to whoever owns it. Only the CD
+// drive has one today -- see akiko_cd32.h for why it cannot live in the core
+// payload.
+//
+// Applied when the restore is TRIGGERED rather than when it finishes. The core
+// validates the file itself and can still refuse, in which case the drive has
+// been aimed at a position the machine never reached -- a cosmetic
+// inconsistency the next drive command corrects. Waiting for the core's verdict
+// instead would cost a poll interval, and the restored machine starts asking
+// for sectors immediately.
+//
+// A file with no host block -- anything saved before this existed -- leaves the
+// drive alone and restores exactly as it used to.
+void ss_apply_host_state(int slot)
+{
+	if (!ss_base_win[slot & 3] || !ss_size) return;
+
+	const uint32_t *win = (const uint32_t *)ss_base_win[slot & 3];
+	ss_header_t h;
+	if (!ss_header_parse(win, ss_size / 4, &h)) return;
+
+	uint32_t bytes = 0;
+	const void *hb = ss_read_host_block(win, &h, &bytes);
+	if (!hb) return;
+
+	if (!akiko_cd32_state_load(hb, (int)bytes))
+		printf("process_ss: slot %d host block not usable\n", (slot & 3) + 1);
+}
+
 int process_ss(const char *rom_name, int enable)
 {
 	static char ss_name[1024] = {};
 	static char *ss_sufx = 0;
 	static uint32_t ss_cnt[4] = {};
-	static void *base[4] = {};
 	static int enabled = 0;
 
 	if (!ss_base) return 0;
@@ -1980,15 +2073,15 @@ int process_ss(const char *rom_name, int enable)
 
 		for (int i = 0; i < 4; i++)
 		{
-			if (!base[i]) base[i] = shmem_map(map_addr, len);
-			if (!base[i])
+			if (!ss_base_win[i]) ss_base_win[i] = shmem_map(map_addr, len);
+			if (!ss_base_win[i])
 			{
 				printf("Unable to mmap (0x%X, %d)!\n", map_addr, len);
 			}
 			else
 			{
 				ss_cnt[i] = 0xFFFFFFFF;
-				memset(base[i], 0, len);
+				memset(ss_base_win[i], 0, len);
 
 				if (!i)
 				{
@@ -2009,12 +2102,12 @@ int process_ss(const char *rom_name, int enable)
 					}
 					else
 					{
-						int ret = FileReadAdv(&f, base[i], len);
+						int ret = FileReadAdv(&f, ss_base_win[i], len);
 						FileClose(&f);
 						printf("process_ss: read %d bytes from file: %s\n", ret, ss_name);
 					}
 				}
-				*(uint32_t*)(base[i]) = 0xFFFFFFFF;
+				*(uint32_t*)(ss_base_win[i]) = 0xFFFFFFFF;
 			}
 
 			map_addr += len;
@@ -2027,17 +2120,45 @@ int process_ss(const char *rom_name, int enable)
 
 	if (!enabled) return 0;
 
+	// Normally once a second. After a save has been asked for, ten times a
+	// second until it lands.
+	//
+	// The core captures into its DDR3 window in a fifth of a second and says
+	// "Save state: saved"; this loop is what actually writes the file, and at
+	// a one-second tick the gap between those two moments is up to a second of
+	// looking finished while nothing is on the card. Resetting in that window
+	// silently keeps the OLD save, and the next restore tests a stale file --
+	// which is exactly what happened on hardware and cost an evening chasing a
+	// fix that had already worked.
 	static unsigned long ss_timer = 0;
 	if (ss_timer && !CheckTimer(ss_timer)) return 0;
-	ss_timer = GetTimer(1000);
+	ss_timer = GetTimer(ss_save_expected ? 100 : 1000);
+
+	// The deadline only expires when no write happened: the writer below
+	// clears ss_save_expected before it opens the file, so a slow write cannot
+	// trip this.
+	//
+	// Saying so matters more than it looks. "Save state: saved" comes from the
+	// CORE and means its capture into the DDR3 window finished; the file is
+	// written here, later, and only when the window's counter word differs
+	// from the last one seen. When that does not happen the user has been told
+	// the save succeeded and nothing is on the card -- and the next restore
+	// silently loads the PREVIOUS state and looks like it worked. Measured on
+	// hardware before this existed.
+	if (ss_save_expected && CheckTimer(ss_save_deadline))
+	{
+		ss_save_expected = 0;
+		printf("process_ss: save was announced but no window updated - nothing written\n");
+		Info("Save state NOT written", 3000);
+	}
 
 	fileTYPE f = {};
 	for (int i = 0; i < 4; i++)
 	{
-		if (base[i])
+		if (ss_base_win[i])
 		{
-			uint32_t curcnt = ((uint32_t*)(base[i]))[0];
-			uint32_t size = ((uint32_t*)(base[i]))[1];
+			uint32_t curcnt = ((uint32_t*)(ss_base_win[i]))[0];
+			uint32_t size = ((uint32_t*)(ss_base_win[i]))[1];
 
 			if (curcnt != ss_cnt[i])
 			{
@@ -2045,19 +2166,88 @@ int process_ss(const char *rom_name, int enable)
 				if (size) size = (size + 2) * 4;
 				if (size > 0 && size <= ss_size)
 				{
+					// Amiga only: this is the one core whose payload format is
+					// defined here rather than in the core alone, in
+					// support/minimig/minimig_savestate.cpp, and validating
+					// before the write is what stops a half-written or foreign
+					// window reaching the disk under a name the user will later
+					// try to load. The core refuses a bad file on the way back
+					// in, but by then the file has replaced a good one.
+					//
+					// Every other core keeps the original behaviour: their
+					// windows are their own business and nothing here knows
+					// their format.
+					if (is_minimig())
+					{
+						ss_header_t h;
+						if (!ss_header_parse((const uint32_t *)ss_base_win[i], ss_size / 4, &h))
+						{
+							printf("process_ss: slot %d failed validation, not written\n", i + 1);
+							Info("Save state not written", 2000);
+							continue;
+						}
+					
+
+						// The drive is host state and the core cannot capture
+						// it. Appended here, where the payload becomes final,
+						// because this is where the host first learns a save
+						// happened -- the core signals it by bumping the
+						// counter word this loop watches.
+						//
+						// That is up to one poll interval after the freeze
+						// lifted, so a save taken mid-stream can pair a drive
+						// position from just after with a sector counter from
+						// just before. They only disagree if the title issued a
+						// fresh READ DATA inside that window. The clean fix is a
+						// "capture complete" signal the host can latch on; this
+						// is a good deal better than restoring no drive at all.
+						uint8_t hb[256];
+						int hbn = akiko_cd32_state_size();
+						if (hbn > 0 && hbn <= (int)sizeof(hb))
+						{
+							akiko_cd32_state_save(hb);
+							if (!ss_write_host_block((uint32_t *)ss_base_win[i], ss_size / 4,
+							                         hb, (uint32_t)hbn))
+								printf("process_ss: slot %d host block did not fit\n", i + 1);
+							else
+								size = (((uint32_t *)ss_base_win[i])[1] + 2) * 4;
+						}
+					}
+
+					ss_save_expected = 0;
 					MenuHide();
 					Info("Saving the state", 500);
 
+					// Say what happened, either way. Until now the only
+					// confirmation a save existed was the CORE's "Save state:
+					// saved", which is raised when its capture finishes and
+					// says nothing about the file -- so a write that never
+					// happened and one that succeeded looked identical from
+					// the couch. A short write counts as a failure: the file
+					// is on the card either way and the next restore would
+					// find a truncated one.
 					*ss_sufx = i + '1';
 					if (FileOpenEx(&f, ss_name, O_CREAT | O_TRUNC | O_RDWR | O_SYNC))
 					{
-						int ret = FileWriteAdv(&f, base[i], size);
+						int ret = FileWriteAdv(&f, ss_base_win[i], size);
 						FileClose(&f);
 						printf("Wrote %d bytes to file: %s\n", ret, ss_name);
+						if (ret == (int)size)
+						{
+							char msg[32];
+							snprintf(msg, sizeof(msg), "Save state %d written", i + 1);
+							Info(msg, 2000);
+						}
+						else
+						{
+							printf("process_ss: short write, %d of %u bytes\n", ret, size);
+							Info("Save state write FAILED", 3000);
+						}
 					}
 					else
 					{
 						printf("Unable to create file: %s\n", ss_name);
+						Info("Save state write FAILED", 3000);
 					}
 				}
 			}
@@ -2665,6 +2855,7 @@ static void check_status_change()
 static void show_core_info(int info_n)
 {
 	int i = 2;
+	int found = 0;
 	user_io_read_confstr();
 
 	while (1)
@@ -2676,10 +2867,24 @@ static void show_core_info(int info_n)
 		{
 			static char str[256];
 			substrcpy(str, p, info_n);
-			if (strlen(str)) Info(str);
+			found = 1;
+			// Diagnostic. A save state toast that never appears has four
+			// possible explanations and only this line separates the last two
+			// from the first two: the core never raised info_req, hps_io never
+			// latched it, the host never read it back, or the host read it back
+			// and resolved it to a string that was empty or wrong. See
+			// support/minimig/minimig_ssdiag.cpp; a no-op off Minimig.
+			minimig_ss_diag_log("host show_core_info n=%d -> \"%s\"", info_n, str);
+			// Priority: this is the outcome of something the user pressed, and
+			// the video mode popup would otherwise cover it.
+			if (strlen(str)) Info(str, 2000, 0, 0, 0, 1);
 			break;
 		}
 	}
+
+	// No 'I' line at all means the info request had nowhere to land. Silent
+	// otherwise, which is indistinguishable from the core never asking.
+	if (!found) minimig_ss_diag_log("host show_core_info n=%d -> no I line in CONF_STR", info_n);
 }
 
 int user_io_file_tx_a(const char* name, uint16_t index)
@@ -3214,13 +3419,22 @@ void user_io_poll()
 		ide_io(1, (sd_req >> 3) & 7);
 		if (sd_req & 0x0100) ide_cdda_send_sector();
 		UpdateDriveStatus();
-		akiko_cd32_poll();
-		cdtv_cd_poll();
-		// Watch the tray when the physical drive is armed: mount on insert,
-		// unmount on eject. Ordered after the bridges so a mount made here is
-		// seen by their mediachange handling on the next poll rather than
-		// mid-iteration.
-		physical_disc_autoboot_poll();
+		if (is_minimig() == 2)
+		{
+			akiko_cd32_poll();
+			cdtv_cd_poll();
+			// Watch the tray when the physical drive is armed: mount on
+			// insert, unmount on eject. Ordered after the bridges so a mount
+			// made here is seen by their mediachange handling on the next poll
+			// rather than mid-iteration.
+			physical_disc_autoboot_poll();
+		}
+
+		// Save state diagnostics. Rate limited and change-gated inside; a
+		// no-op against a core without the 0xF600 window. Ordered after the
+		// bridges only so its log lines interleave with theirs in the order
+		// the poll actually visits them.
+		minimig_ss_diag_poll();
 
 		kbd_fifo_poll();
 
@@ -3738,9 +3952,30 @@ void user_io_poll()
 		}
 	}
 
+	// Diagnostic, once per run. UIO_INFO_GET is polled in exactly one place --
+	// the block below -- and only when !is_menu(). A core that reads as a menu
+	// core would never be asked for an info code at all, and its OSD toasts
+	// would silently never appear with nothing anywhere saying why. This records
+	// which side of that gate we are on before the gate is applied.
+	static int ss_info_gate_logged = 0;
+	if (!ss_info_gate_logged && is_minimig())
+	{
+		ss_info_gate_logged = 1;
+		minimig_ss_diag_log("host info poll gate: is_menu=%d (UIO_INFO_GET is polled only when this is 0)",
+		                    (int)is_menu());
+	}
+
 	if (CheckTimer(led_timer) && !is_menu())
 	{
 		led_timer = GetTimer(LED_FREQ);
+		// And once more from inside, so "the gate is open" and "the poll is
+		// actually running" are separate observations rather than one inference.
+		static int ss_info_poll_logged = 0;
+		if (!ss_info_poll_logged)
+		{
+			ss_info_poll_logged = 1;
+			minimig_ss_diag_log("host UIO_INFO_GET poll is running");
+		}
 		if (!use_ps2ctl)
 		{
 			uint16_t s = user_io_kbdled_get_status();
@@ -3762,7 +3997,15 @@ void user_io_poll()
 		keyboard_leds = leds;
 
 		uint8_t info_n = spi_uio_cmd(UIO_INFO_GET);
-		if (info_n) show_core_info(info_n);
+		if (info_n)
+		{
+			// The core asked for a toast and the host heard it. This is the
+			// line that separates "the core never raised info_req" from "it did
+			// and nothing appeared"; the core-side half of the same question is
+			// the info_reqs / info_last fields of the 0xF600 window.
+			minimig_ss_diag_log("host UIO_INFO_GET returned %u", (unsigned)info_n);
+			show_core_info(info_n);
+		}
 	}
 
 	if (!res_timer)
@@ -3844,6 +4087,7 @@ void user_io_poll()
 		diskled_is_on = 0;
 	}
 
+	snac_psx_poll();
 	if (is_megacd()) mcd_poll();
 	if (is_pce()) pcecd_poll();
 	if (is_saturn()) saturn_poll();

@@ -9,20 +9,103 @@ both stock upstream features.
 
 ## Setup
 
-**1. Put the binary on the SD card** as `/media/fat/MiSTer_AmigaCD`:
+**1. Stage the files.** `./scripts/stage-output.sh --binary` collects everything
+into `output/`, always overwriting — both cores plus the binary from CI. The
+binary comes from CI because the Windows dev machine has no ARM cross-toolchain,
+so `make` cannot run there; `scripts/deploy-from-ci.sh` exists for the same
+reason. To build and push from WSL instead:
 
 ```bash
 ./scripts/wsl-build.sh deploy      # needs ./host or $MISTER_HOST
 ```
 
-**2. Add to `/media/fat/MiSTer.ini`:**
+**2. Copy to the SD card:**
+
+| File | Goes to |
+|---|---|
+| `MiSTer_AmigaCD` | `/media/fat/MiSTer_AmigaCD` |
+| `MiSTer` | `/media/fat/MiSTer` — replaces the stock main binary |
+| `amigacd.rbf` | wherever you keep cores — **on the dev machine that is `/media/fat/_Test/`** |
+| `menu.rbf` | `/media/fat/menu.rbf` |
+
+### Which core file is actually running
+
+The table says "wherever you keep cores" because the answer is per machine and
+getting it wrong is silent: the copy succeeds, the version numbers all look
+right, and the machine keeps running the core it was already running.
+
+On the development MiSTer the live core is `/media/fat/_Test/amigacd.rbf`.
+There is also a `/media/fat/_Computer/Minimig.rbf`, which is an older AmigaCD
+build and is **not** what gets loaded. Ask the machine rather than guessing:
+
+```bash
+ssh root@<mister> "ps aux | grep [M]iSTer_AmigaCD"
+```
+
+The running process shows both the binary and the `.rbf` path it was given:
+
+```
+13989 root  /media/fat/MiSTer_AmigaCD /media/fat/_Test/amigacd.rbf
+```
+
+`_Test/` accumulates `amigacd.rbf.<label>` backups — add one rather than
+overwriting blind, since the previous core is the only way back if the new one
+misbehaves.
+
+### The binary cannot be overwritten while it is running
+
+`scp` straight onto `/media/fat/MiSTer_AmigaCD` fails with a bare
+`dest open "...": Failure` whenever the AmigaCD core is loaded — that is
+ETXTBSY, since the file being written is the running executable. Copy beside it
+and rename:
+
+```bash
+scp output/MiSTer_AmigaCD root@<mister>:/media/fat/MiSTer_AmigaCD.new
+ssh root@<mister> "mv -f /media/fat/MiSTer_AmigaCD.new /media/fat/MiSTer_AmigaCD && chmod +x /media/fat/MiSTer_AmigaCD"
+```
+
+The running process keeps the old image until the core is reloaded, so **a
+deploy is not live until the core is reloaded**.
+
+### Checking what is actually on the card
+
+Both files, against the local copies in `output/`:
+
+```bash
+ssh root@<mister> "md5sum /media/fat/MiSTer_AmigaCD /media/fat/_Test/amigacd.rbf"
+md5sum output/MiSTer_AmigaCD output/amigacd.rbf
+```
+
+The binary also carries a build date — `grep -a -oE "[$]VER:[0-9]+"` prints
+`$VER:YYMMDD` — which is worth a glance but does not identify a commit: two
+builds from the same day share it. The md5 against the artifact
+`stage-output.sh --binary` fetched is what ties the card to a specific CI run,
+and that run's commit is printed by the staging script.
+
+**3. Add to `/media/fat/MiSTer.ini`:**
 
 ```ini
 [AmigaCD]
 main=MiSTer_AmigaCD
+
+snac_psx=1
 ```
 
-That's it. Load the AmigaCD core and it restarts into our binary.
+Load the AmigaCD core and it restarts into our binary.
+
+### Why the binary is installed twice
+
+`MiSTer` and `MiSTer_AmigaCD` are the **same build under two names**, and both
+are needed once PSX SNAC is in play.
+
+`main=` only redirects the core whose section it appears under. Everything else
+— including the **boot menu** — keeps running whatever is at `/media/fat/MiSTer`.
+The Menu core's SNAC pad navigation lives in userspace, so installing only
+`MiSTer_AmigaCD` gives you a pad that works inside AmigaCD and does nothing in
+the menu, with no error to explain the difference.
+
+If you do not use the SNAC pad in the boot menu, the stock `MiSTer` binary is
+fine and only `MiSTer_AmigaCD` is required.
 
 ## Testing with a pre-rename core
 
