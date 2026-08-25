@@ -9464,7 +9464,14 @@ int menu_lightgun_cb(int idx, uint16_t type, uint16_t code, int value)
 
 	if (type == EV_KEY)
 	{
-		if ((code == 0x130 || code == 0x131 || code == 0x120 || code == 0x110) && menustate == MENU_LGCAL1)
+		// 0x133 is BTN_NORTH, which is where this kernel's guncon2 driver puts a
+		// GunCon 2's trigger -- confirmed on hardware, forty logged presses. It
+		// was missing here, so the one button a user naturally reaches for did
+		// nothing on the calibration screen: coordinates moved, no edge was ever
+		// confirmed, and the flow never reached input_lightgun_save(). That
+		// leaves the gun on built-in defaults that do not match the display,
+		// which is its own hard-to-read bug.
+		if ((code == 0x130 || code == 0x131 || code == 0x133 || code == 0x120 || code == 0x110) && menustate == MENU_LGCAL1)
 		{
 			gun_idx = idx;
 			if (value == 1) gun_ok = 1;

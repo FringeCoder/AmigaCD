@@ -196,16 +196,25 @@ void amiga_lightpen_button(int code, int pressed)
 	//
 	// Three code families are accepted because light guns disagree about which
 	// they use: mouse-style BTN_LEFT/RIGHT, joystick-style BTN_TRIGGER/THUMB,
-	// and gamepad-style BTN_SOUTH/EAST. A GunCon 2 reports in the gamepad
-	// range -- its KEY bitmap on hardware has bits at 0x130 and up -- but the
-	// SNAC gun and other USB guns need not agree, and guessing one family
-	// wrong costs another build-and-deploy cycle to find out.
+	// and gamepad-style BTN_SOUTH/EAST.
+	//
+	// BTN_NORTH is on the fire side because that is measured, not guessed: the
+	// /tmp/lpen.log build caught this kernel's guncon2 driver reporting the
+	// GunCon 2's trigger as 0x133 (BTN_NORTH), forty presses, while 0x131 came
+	// from a side button. Reading it off the device settled what two rounds of
+	// guessing at the gamepad family had not.
+	//
+	// So a gun that uses BTN_SOUTH for its trigger will also fire on its
+	// BTN_NORTH side button. That is the right way round to be wrong: one
+	// spurious fire button costs far less than a trigger that reaches nothing,
+	// which is what this cost already.
 	uint32_t bit;
 	switch (code)
 	{
 		case BTN_LEFT:
 		case BTN_TRIGGER:
 		case BTN_SOUTH:
+		case BTN_NORTH:
 			bit = JOY_BTN1;
 			break;
 
@@ -214,7 +223,6 @@ void amiga_lightpen_button(int code, int pressed)
 		case BTN_THUMB:
 		case BTN_THUMB2:
 		case BTN_EAST:
-		case BTN_NORTH:
 		case BTN_WEST:
 			bit = JOY_BTN2;
 			break;
