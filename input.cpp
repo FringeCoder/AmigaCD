@@ -6035,14 +6035,22 @@ int input_test(int getchar)
 									// "events arriving outside the calibration window".
 									if (amiga_lightpen_usb_active())
 									{
+										// Every sample, not every sixteenth, and numbered.
+										// Sampling one in sixteen over several seconds mixes
+										// the settled aim with the approach to it, and those
+										// two look identical afterwards -- a tight cluster
+										// with outliers cannot be told from a sweep. The
+										// sequence number also shows whether the far-end
+										// readings alternate with the good ones or arrive in
+										// runs, which says whether this is a per-frame miss
+										// or a loss of lock.
 										static unsigned rawn;
-										if (!(rawn++ & 15))
+										if (rawn < 600)
 										{
-											amiga_lightpen_log("raw  dev=%d code=%d value=%d cal x[%d..%d] y[%d..%d] timeout=%d\n",
-											                   i, ev.code, ev.value,
-											                   input[i].guncal[2], input[i].guncal[3],
-											                   input[i].guncal[0], input[i].guncal[1],
-											                   crtgun_timeout[i] ? 1 : 0);
+											rawn++;
+											amiga_lightpen_log("raw  #%u %s=%d\n", rawn,
+											                   ev.code == ABS_X ? "X" : (ev.code == ABS_Y ? "Y" : "?"),
+											                   ev.value);
 										}
 									}
 
