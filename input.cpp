@@ -6087,6 +6087,26 @@ int input_test(int getchar)
 									}
 								}
 
+								// The gun's trigger, for the Amiga light pen. The position
+								// path above needs no mapping and neither can this: a light
+								// gun is matched by VID/PID and never gets a .map file, so
+								// left to the ordinary button mapping the trigger reaches
+								// nothing at all -- aim works, shooting does not, which is
+								// what a GunCon 2 did on hardware.
+								//
+								// The port is the module's to decide, not this one's: the
+								// pen is wired to a fixed port and a program looking for it
+								// reads that port and no other, so following input[].num
+								// would put fire wherever MiSTer happened to assign the gun.
+								//
+								// Skipped while the OSD is up so a shot aimed at a menu does
+								// not also press fire on the machine behind it.
+								if (ev.type == EV_KEY && !user_io_osd_is_visible()
+								    && amiga_lightpen_usb_active())
+								{
+									amiga_lightpen_button(ev.code, ev.value != 0);
+								}
+
 								// redirect further actions to left joycon in combined mode
 								if (JOYCON_COMBINED(i))
 								{
@@ -6412,6 +6432,10 @@ int input_poll(int getchar)
 
 	for (int i = 0; i < NUMPLAYERS; i++) {
 		joy_mask[i] = build_joy_mask(i);
+		// A light gun's trigger is an ordinary fire button to the Amiga, but it
+		// arrives outside the mapping that builds the rest of this mask -- see
+		// amiga_lightpen_button(). Zero for every port with no gun on it.
+		joy_mask[i] |= amiga_lightpen_joy_mask(i);
 		autofire_mask[i] = build_autofire_mask(i);
 	}
 

@@ -31,3 +31,19 @@ uint8_t amigacd_profile_memory(uint8_t memory, int sys)
 	uint8_t chip = (sys == AMIGACD_SYS_CDTV) ? MEM_CHIP_1M : MEM_CHIP_2M;
 	return (uint8_t)((memory & ~MEM_CHIP_MASK) | chip);
 }
+
+const char *amigacd_system_name(int sys)
+{
+	switch (sys)
+	{
+		case AMIGACD_SYS_CDTV:  return "CDTV";
+		case AMIGACD_SYS_A500:  return "A500";
+		case AMIGACD_SYS_A1200: return "A1200";
+		default:                return "CD32";
+	}
+}
+
+const char *amigacd_cfg_suffix(int sys)
+{
+	return amigacd_system_name(sys);
+}

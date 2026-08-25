@@ -24,11 +24,15 @@
 #include <stdbool.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 #include <byteswap.h>     // bswap_16 for CDDA big-endian → host conversion
 
 #include "../../spi.h"
+#include "../../fpga_io.h"
 #include "../../user_io.h"
+#include "../../menu.h"
 #include "../../hardware.h"
 #include "../../ide.h"
 #include "../../ide_cdrom.h"
@@ -98,6 +102,17 @@ static void cdtv_diag(const char *fmt, ...)
 #define CDTV_STATUS_CDDA_REQ (1u << 8) // hps_ext.v:218, cdda_req
 #define CDTV_STATUS_CMD    0x63
 #define CDTV_STATUS_REQ    (1u << 6)   // hps_ext.v:197 — cdtv_req
+#define CDTV_STATUS_REQ    (1u << 6)
+#define CDTV_STATUS_NVR_DIRTY (1u << 12)
+
+#define CDTV_NVRAM_ADDR       0xF880
+#define CDTV_NVRAM_BYTES      16384
+#define CDTV_NVRAM_FILE_BYTES 32768
+#define CDTV_NVRAM_DIR        "/media/fat/saves/Minimig"
+
+#define CDTV_CARD_ADDR        0xF8C0
+#define CDTV_CARD_BYTES       8192
+#define CDTV_STATUS_CARD_DIRTY (1u << 13)
 
 // CR-511 command lengths (input bytes). Indexed by full opcode byte. -1
 // means unknown / never accept. Lifted from cdtv.cpp:524-695 by opcode:
@@ -176,35 +191,47 @@ static unsigned long  stch_next_ms  = 0;
 #define STCH_RETRY_BUDGET    40       // 40 × 250 ms = 10 s of cover
 #define STCH_RETRY_PERIOD_MS 250
 
-// Play-end STCH ack tracking — WinUAE do_stch parity (cdtv.cpp:1292). The
+// Play-end STCH ack tracking -- WinUAE do_stch parity (cdtv.cpp:1292). The
 // status-change interrupt fired at CDDA end-of-play must be retried until the
 // BIOS INT2 handler actually TAKES it (reads the TPI AIR register and sees the
 // STCH source code 0x04), then stopped. A single pulse races with the constant
-// scor/sten interrupt churn and is often lost (HW trace: the seg-1 play-end
-// STCH was taken, the seg-2/map STCH was dropped → DotC map stall); a blind
-// heartbeat (the c59266d "two-segment" attempt) over-injects and re-fires INT2
-// into the next screen → the credits stall. Retry-until-acked fixes both.
-// The ack used to be recovered by scanning the cdtv_trace ring for the AIR
-// read. The core now exposes it directly: cdtv_bridge.v keeps a sticky
-// "the BIOS took an STCH interrupt" flag, set when an AIR read acknowledges an
-// in-service interrupt whose source was STCH, and reading the flag clears it.
-// See cdtv_stch_acked(). The trace ring was removed from the RTL, so the scan
-// could no longer see anything and the retry would have run to its backstop
-// on every play-end.
+// scor/sten interrupt churn and is often lost; a blind heartbeat over-injects
+// and re-fires INT2 into the next screen. Retry-until-acked fixes both. The
+// ack comes from cdtv_bridge.v's sticky flag, read via cdtv_stch_acked().
 static bool           stch_wait_ack = false;   // armed at CDDA play-end
-#define STCH_PLAYEND_BUDGET    400             // backstop cap (× period) if never acked
+#define STCH_PLAYEND_BUDGET    400             // backstop cap (x period) if never acked
 #define STCH_PLAYEND_PERIOD_MS 60              // fast cadence to win the int-churn race
 
+// Upstream's play-START STCH, which is what Defender of the Crown waits on
+// before it will leave the park screen. Independent of the play-end retry
+// above: one is armed when a play begins, the other when it ends.
+static bool           stch_playstart_pending = false;
+
+// A disc swapped straight into a loaded drive owes the guest a removal edge
+// before the arrival, and the two cannot land in the same instant.
+static bool           cd_swap_pending   = false;
+static unsigned long  cd_swap_ready_ms  = 0;
+#define CDTV_SWAP_SETTLE_MS 700
+
 // -----------------------------------------------------------------------------
-// Helpers — gate on CDTV mode
+// Helpers -- gate on CDTV mode
 // -----------------------------------------------------------------------------
+// True for either way of configuring a CDTV: upstream's dedicated drive slot,
+// or the chipset bit our own profiles set. Upstream only knows about the
+// first, and taking that alone would leave the bridge switched off on every
+// AmigaCD CDTV profile.
 static inline bool cdtv_active(void)
 {
-	return (minimig_config.chipset & CONFIG_CDTV) != 0;
+	return (minimig_config.cdtv_drive.cfg != 0)
+	    || ((minimig_config.chipset & CONFIG_CDTV) != 0);
 }
 
+// The dedicated CDTV slot first, then the IDE drives -- a physical disc and
+// anything mounted through hardfile[0] still live there.
 static drive_t *cdtv_find_drive(void)
 {
+	drive_t *slot = minimig_cd_drive_get(1);
+	if (slot) return slot;
 	for (int p = 0; p < 2; p++) {
 		for (int d = 0; d < 2; d++) {
 			drive_t *drv = &ide_inst[p].drive[d];
@@ -224,7 +251,7 @@ static uint16_t cdtv_read_status(void)
 	uint16_t res;
 	EnableIO();
 	res = spi_w(CDTV_STATUS_CMD);
-	if (!res) res = (uint8_t)spi_w(0);
+	if (!res) res = spi_w(0);
 	DisableIO();
 	return res;
 }
@@ -398,7 +425,7 @@ static bool cdtv_push_sector(const uint8_t *buf, int len)
 static bool cdtv_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 {
 	if (!drv || !buf2352) return false;
-	if (!drv->chd_f && !drv->phys) return false;
+	if (!drv->chd_f && !drv->phys && !drv->f) return false;
 
 	track_t *track = NULL;
 	int real_tracks = drv->track_cnt > 0 ? drv->track_cnt - 1 : 0;
@@ -422,29 +449,30 @@ static bool cdtv_read_audio_sector(drive_t *drv, uint32_t lba, uint8_t *buf2352)
 		return true;
 	}
 
-	uint32_t chd_lba = lba + track->chd_offset;
-	if (mister_chd_read_sector(drv->chd_f, chd_lba, 0, 0,
-	                           CDTV_CDDA_BYTES, buf2352,
-	                           drv->chd_hunkbuf, &drv->chd_hunknum)
-	    != CHDERR_NONE) {
-		return false;
+	if (drv->chd_f) {
+		uint32_t chd_lba = lba + track->chd_offset;
+		if (mister_chd_read_sector(drv->chd_f, chd_lba, 0, 0,
+		                           CDTV_CDDA_BYTES, buf2352,
+		                           drv->chd_hunkbuf, &drv->chd_hunknum)
+		    != CHDERR_NONE) {
+			return false;
+		}
+		return true;
+	}
+
+	// Raw cue+bin.
+	if (!cdrom_read_track_raw(track, lba, buf2352, CDTV_CDDA_BYTES)) return false;
+
+	int16_t *samples = (int16_t *)buf2352;
+	for (int i = 0; i < CDTV_CDDA_BYTES / 2; i++) {
+		samples[i] = (int16_t)bswap_16((uint16_t)samples[i]);
 	}
 	return true;
 }
 
-static uint16_t cdtv_read_status_full(void)
-{
-	uint16_t hi;
-	EnableIO();
-	hi = spi_w(CDTV_STATUS_CMD);
-	if (!hi) hi = (uint16_t)spi_w(0);
-	DisableIO();
-	return hi;
-}
-
 static bool cdtv_audio_fifo_ready(void)
 {
-	return (cdtv_read_status_full() & CDTV_STATUS_CDDA_REQ) != 0;
+	return (cdtv_read_status() & CDTV_STATUS_CDDA_REQ) != 0;
 }
 
 // 2352 bytes = 588 stereo frames × 2 channels × 2 bytes/sample.
@@ -853,7 +881,8 @@ static int cmd_play(const uint8_t *cmd, uint8_t *out)
 
 	cd_playing = 1;
 	cd_motor   = 1;
-	out[0] = 0x42;        // playing + media (WinUAE cdtv.cpp play_cd return)
+	stch_playstart_pending = true;
+	out[0] = 0x42;
 	return 1;
 }
 
@@ -915,8 +944,8 @@ static void cdtv_dispatch(void)
 			// Data path, not audio. Easy to miss when grepping for the CDDA
 			// chd_f checks, but CDTV data reads fail without it even once
 			// cdtv_find_drive accepts a physical drive.
-			if (!drv || (!drv->chd_f && !drv->phys)) {
-				cdtv_dbg("READ DATA lba=%u nsec=%u — no drive/media", lba, nsec);
+			if (!drv || (!drv->chd_f && !drv->phys && !drv->f)) {
+				cdtv_dbg("READ DATA lba=%u nsec=%u - no drive/media", lba, nsec);
 				cd_error    = 1;
 				cd_finished = 1;
 				rlen        = 0;
@@ -1134,6 +1163,296 @@ static void cdtv_dispatch(void)
 	cmd_need = 0;
 }
 
+static char cd_save_path_active[256] = {0};
+static bool cd_save_load_pending     = false;
+static bool cd_save_dirty_observed   = false;
+static bool cd_save_load_failed      = false;
+
+static char card_save_path_active[256] = {0};
+static bool card_save_dirty_observed   = false;
+
+static uint32_t nvr_verify_due_at_ms = 0;
+static char     nvr_verify_path[256] = {0};
+
+static uint64_t fnv1a_64(const char *s)
+{
+	uint64_t h = 1469598103934665603ull;
+	while (*s) {
+		h ^= (uint8_t)*s++;
+		h *= 1099511628211ull;
+	}
+	return h;
+}
+
+static void cdtv_compute_save_path(const char *cd_path, char *out, size_t outsz)
+{
+	const char *base = strrchr(cd_path, '/');
+	base = base ? base + 1 : cd_path;
+	snprintf(out, outsz, "%s/cdtv-%016" PRIx64 ".nvr", CDTV_NVRAM_DIR, fnv1a_64(base));
+}
+
+static void cdtv_compute_card_path(const char *cd_path, char *out, size_t outsz)
+{
+	const char *base = strrchr(cd_path, '/');
+	base = base ? base + 1 : cd_path;
+	snprintf(out, outsz, "%s/cdtv-%016" PRIx64 ".card", CDTV_NVRAM_DIR, fnv1a_64(base));
+}
+
+static void cdtv_nvram_dump(uint8_t *out)
+{
+	EnableIO();
+	spi8(UIO_DMA_READ);
+	spi32_w(CDTV_NVRAM_ADDR);
+	for (int i = 0; i < CDTV_NVRAM_BYTES; i++) out[i] = (uint8_t)spi_w(0);
+	DisableIO();
+}
+
+static void cdtv_nvram_upload(const uint8_t *buf)
+{
+	static uint16_t words[CDTV_NVRAM_BYTES / 2];
+	memcpy(words, buf, CDTV_NVRAM_BYTES);
+
+	EnableIO();
+	fpga_spi_fast(UIO_DMA_WRITE);
+	fpga_spi_fast(CDTV_NVRAM_ADDR);
+	fpga_spi_fast(0);
+	fpga_spi_fast_block_write(words, CDTV_NVRAM_BYTES / 2);
+	DisableIO();
+}
+
+static bool cdtv_nvram_load_from_path(const char *path)
+{
+	struct stat st;
+	if (stat(path, &st) != 0) {
+		cdtv_dbg("NVR load skip: no file at %s (errno=%d)", path, errno);
+		return false;
+	}
+	if (st.st_size < CDTV_NVRAM_BYTES) {
+		cdtv_dbg("NVR load skip: %s too small %lld (want >= %d)",
+		         path, (long long)st.st_size, CDTV_NVRAM_BYTES);
+		return false;
+	}
+
+	static uint8_t nvr[CDTV_NVRAM_BYTES];
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		cdtv_dbg("NVR load FAIL: fopen(%s) errno=%d", path, errno);
+		cd_save_load_failed = true;
+		return false;
+	}
+	size_t got = fread(nvr, 1, CDTV_NVRAM_BYTES, f);
+	fclose(f);
+	if (got != CDTV_NVRAM_BYTES) {
+		cdtv_dbg("NVR load FAIL: read %u of %d bytes from %s",
+		         (unsigned)got, CDTV_NVRAM_BYTES, path);
+		cd_save_load_failed = true;
+		return false;
+	}
+
+	cdtv_nvram_upload(nvr);
+
+	cd_save_load_failed = false;
+	strncpy(nvr_verify_path, path, sizeof(nvr_verify_path) - 1);
+	nvr_verify_path[sizeof(nvr_verify_path) - 1] = 0;
+	nvr_verify_due_at_ms = (uint32_t)GetTimer(100);
+	cdtv_dbg("NVR loaded (%d bytes from %s) - verify in 100 ms", CDTV_NVRAM_BYTES, path);
+	return true;
+}
+
+static void cdtv_nvram_verify_load_pending(void)
+{
+	if (!nvr_verify_due_at_ms) return;
+	if (!CheckTimer(nvr_verify_due_at_ms)) return;
+	nvr_verify_due_at_ms = 0;
+
+	static uint8_t verify[CDTV_NVRAM_BYTES];
+	static uint8_t expected[CDTV_NVRAM_BYTES];
+
+	cdtv_nvram_dump(verify);
+
+	FILE *f = fopen(nvr_verify_path, "rb");
+	if (!f) {
+		cdtv_dbg("NVR verify: fopen(%s) failed errno=%d", nvr_verify_path, errno);
+		cd_save_load_failed = true;
+		return;
+	}
+	size_t got = fread(expected, 1, CDTV_NVRAM_BYTES, f);
+	fclose(f);
+	if (got != CDTV_NVRAM_BYTES) {
+		cdtv_dbg("NVR verify: short read %u/%d", (unsigned)got, CDTV_NVRAM_BYTES);
+		cd_save_load_failed = true;
+		return;
+	}
+	if (!memcmp(expected, verify, CDTV_NVRAM_BYTES)) {
+		cdtv_dbg("NVR loaded %d bytes from %s (verify OK)",
+		         CDTV_NVRAM_BYTES, nvr_verify_path);
+		cd_save_load_failed = false;
+		return;
+	}
+
+	int first_bad = -1, mismatches = 0;
+	for (int i = 0; i < CDTV_NVRAM_BYTES; i++) {
+		if (verify[i] != expected[i]) {
+			if (first_bad < 0) first_bad = i;
+			mismatches++;
+		}
+	}
+	cdtv_dbg("NVR LOAD VERIFY FAILED: %d/%d mismatched (first @ 0x%04x)",
+	         mismatches, CDTV_NVRAM_BYTES, first_bad);
+	cd_save_load_failed = true;
+}
+
+static bool cdtv_nvram_save_to_path(const char *path)
+{
+	static uint8_t buf[CDTV_NVRAM_BYTES];
+	cdtv_nvram_dump(buf);
+
+	FILE *cur = fopen(path, "rb");
+	if (cur) {
+		static uint8_t disk_buf[CDTV_NVRAM_BYTES];
+		size_t n = fread(disk_buf, 1, CDTV_NVRAM_BYTES, cur);
+		fclose(cur);
+		if (n == CDTV_NVRAM_BYTES && !memcmp(disk_buf, buf, CDTV_NVRAM_BYTES)) {
+			cdtv_dbg("NVR save skipped: identical to %s", path);
+			return true;
+		}
+	}
+
+	if (mkdir(CDTV_NVRAM_DIR, 0755) != 0 && errno != EEXIST) {
+		cdtv_dbg("NVR mkdir(%s) failed: errno=%d", CDTV_NVRAM_DIR, errno);
+	}
+
+	char tmp_path[300];
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+
+	FILE *f = fopen(tmp_path, "wb");
+	if (!f) {
+		cdtv_dbg("NVR fopen(%s) failed: errno=%d", tmp_path, errno);
+		return false;
+	}
+
+	uint8_t zero[512] = {0};
+	size_t wrote = fwrite(buf, 1, CDTV_NVRAM_BYTES, f);
+	for (int i = 0; i < (CDTV_NVRAM_FILE_BYTES - CDTV_NVRAM_BYTES) / (int)sizeof(zero); i++) {
+		wrote += fwrite(zero, 1, sizeof(zero), f);
+	}
+	int flush = fflush(f);
+	int fsy   = fsync(fileno(f));
+	int cls   = fclose(f);
+	if (wrote != CDTV_NVRAM_FILE_BYTES || flush != 0 || fsy != 0 || cls != 0) {
+		cdtv_dbg("NVR write incomplete: wrote=%u flush=%d fsync=%d close=%d",
+		         (unsigned)wrote, flush, fsy, cls);
+		unlink(tmp_path);
+		return false;
+	}
+
+	if (rename(tmp_path, path) != 0) {
+		cdtv_dbg("NVR rename(%s -> %s) failed: errno=%d", tmp_path, path, errno);
+		unlink(tmp_path);
+		return false;
+	}
+
+	cdtv_dbg("NVR saved %d bytes to %s", CDTV_NVRAM_BYTES, path);
+	return true;
+}
+
+static void cdtv_card_dump(uint8_t *out)
+{
+	EnableIO();
+	spi8(UIO_DMA_READ);
+	spi32_w(CDTV_CARD_ADDR);
+	for (int i = 0; i < CDTV_CARD_BYTES; i++) out[i] = (uint8_t)spi_w(0);
+	DisableIO();
+}
+
+static void cdtv_card_upload(const uint8_t *buf)
+{
+	static uint16_t words[CDTV_CARD_BYTES / 2];
+	memcpy(words, buf, CDTV_CARD_BYTES);
+
+	EnableIO();
+	fpga_spi_fast(UIO_DMA_WRITE);
+	fpga_spi_fast(CDTV_CARD_ADDR);
+	fpga_spi_fast(0);
+	fpga_spi_fast_block_write(words, CDTV_CARD_BYTES / 2);
+	DisableIO();
+}
+
+static void cdtv_card_load_from_path(const char *path)
+{
+	static uint8_t card[CDTV_CARD_BYTES];
+	memset(card, 0, sizeof(card));
+
+	FILE *f = path[0] ? fopen(path, "rb") : NULL;
+	if (f) {
+		size_t got = fread(card, 1, CDTV_CARD_BYTES, f);
+		fclose(f);
+		cdtv_dbg("CARD loaded %u/%d bytes from %s", (unsigned)got, CDTV_CARD_BYTES, path);
+	}
+	else {
+		cdtv_dbg("CARD blank (no file at %s)", path[0] ? path : "(none)");
+	}
+
+	cdtv_card_upload(card);
+}
+
+static bool cdtv_card_save_to_path(const char *path)
+{
+	static uint8_t buf[CDTV_CARD_BYTES];
+	cdtv_card_dump(buf);
+
+	if (FILE *cur = fopen(path, "rb")) {
+		static uint8_t disk_buf[CDTV_CARD_BYTES];
+		size_t n = fread(disk_buf, 1, CDTV_CARD_BYTES, cur);
+		fclose(cur);
+		if (n == CDTV_CARD_BYTES && !memcmp(disk_buf, buf, CDTV_CARD_BYTES)) {
+			card_save_dirty_observed = false;
+			return true;
+		}
+	}
+
+	if (mkdir(CDTV_NVRAM_DIR, 0755) != 0 && errno != EEXIST) {
+		cdtv_dbg("CARD mkdir(%s) failed: errno=%d", CDTV_NVRAM_DIR, errno);
+		return false;
+	}
+
+	FILE *f = fopen(path, "wb");
+	if (!f) {
+		cdtv_dbg("CARD fopen(%s) failed: errno=%d", path, errno);
+		return false;
+	}
+
+	size_t wrote = fwrite(buf, 1, CDTV_CARD_BYTES, f);
+	int flush = fflush(f);
+	int fsy   = fsync(fileno(f));
+	int cls   = fclose(f);
+
+	if (wrote != CDTV_CARD_BYTES || flush != 0 || fsy != 0 || cls != 0) {
+		cdtv_dbg("CARD save FAILED %s wrote=%u flush=%d fsync=%d close=%d errno=%d",
+		         path, (unsigned)wrote, flush, fsy, cls, errno);
+		return false;
+	}
+
+	card_save_dirty_observed = false;
+	cdtv_dbg("CARD saved %d bytes to %s", CDTV_CARD_BYTES, path);
+	return true;
+}
+
+static bool cdtv_nvram_save_to_disk(void)
+{
+	if (!cd_save_path_active[0]) return false;
+	if (cd_save_load_failed) {
+		static bool warned_once = false;
+		if (!warned_once) {
+			cdtv_dbg("NVR save BLOCKED: load failed for %s - refusing to overwrite "
+			         "a real save with a blank NVRAM. Future blocks silent.",
+			         cd_save_path_active);
+			warned_once = true;
+		}
+		return false;
+	}
+	return cdtv_nvram_save_to_path(cd_save_path_active);
+}
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
@@ -1141,12 +1460,43 @@ static void cdtv_dispatch(void)
 void cdtv_cd_set_cd_path(const char *path)
 {
 	if (!path) path = "";
+
+	char new_save[sizeof(cd_save_path_active)] = {0};
+	if (path[0]) cdtv_compute_save_path(path, new_save, sizeof(new_save));
+
+	char new_card[sizeof(card_save_path_active)] = {0};
+	if (path[0]) cdtv_compute_card_path(path, new_card, sizeof(new_card));
+
+	if (strcmp(new_card, card_save_path_active) != 0) {
+		if (card_save_path_active[0] && card_save_dirty_observed) {
+			cdtv_dbg("set_cd_path: flushing old card %s before swap", card_save_path_active);
+			cdtv_card_save_to_path(card_save_path_active);
+		}
+		strncpy(card_save_path_active, new_card, sizeof(card_save_path_active) - 1);
+		card_save_path_active[sizeof(card_save_path_active) - 1] = 0;
+		card_save_dirty_observed = false;
+	}
+
+	if (strcmp(new_save, cd_save_path_active) != 0) {
+		if (cd_save_path_active[0] && cd_save_dirty_observed) {
+			cdtv_dbg("set_cd_path: flushing old save %s before swap", cd_save_path_active);
+			cdtv_nvram_save_to_path(cd_save_path_active);
+		}
+		strncpy(cd_save_path_active, new_save, sizeof(cd_save_path_active) - 1);
+		cd_save_path_active[sizeof(cd_save_path_active) - 1] = 0;
+		cd_save_dirty_observed = false;
+		cd_save_load_failed    = false;
+		cd_save_load_pending   = (cd_save_path_active[0] != 0);
+	}
+	bool has_path    = (path[0] != 0);
+	bool was_present = (cd_media != 0);
+	bool swap        = was_present && has_path && strcmp(cd_path_active, path) != 0;
+
 	strncpy(cd_path_active, path, sizeof(cd_path_active) - 1);
 	cd_path_active[sizeof(cd_path_active) - 1] = 0;
 
-	bool has_path = (path[0] != 0);
-	cd_media   = has_path ? 1 : 0;
-	cd_isready = 0;                    // match WinUAE: bit 0 of STATUS always 1
+	cd_media   = swap ? 0 : (has_path ? 1 : 0);
+	cd_isready = 0;
 	cd_motor   = 0;
 	cd_playing = 0;
 	cd_paused  = 0;
@@ -1165,15 +1515,19 @@ void cdtv_cd_set_cd_path(const char *path)
 	// re-polls forever.
 	cd_finished = has_path ? 1 : 0;
 
-	// Arm an STCH inject so BIOS gets a status-change interrupt and starts
-	// issuing IDENTIFY / CAPACITY / READ TOC. Drained in poll once the
-	// bridge is being serviced. Budget covers BootInit reset window: bridge
-	// is held in reset while CPU is reset, so the first few injects may be
-	// silently dropped — keep firing until BIOS progresses past 0x81.
-	stch_retries = has_path ? STCH_RETRY_BUDGET : 0;
+	stch_retries = STCH_RETRY_BUDGET;
 	stch_next_ms = GetTimer(0);
 
-	cdtv_dbg("set_cd_path: %s", has_path ? path : "(empty)");
+	if (swap) {
+		cd_swap_pending  = true;
+		cd_swap_ready_ms = GetTimer(CDTV_SWAP_SETTLE_MS);
+	} else {
+		cd_swap_pending  = false;
+		cd_swap_ready_ms = 0;
+	}
+
+	cdtv_dbg("set_cd_path: %s%s", has_path ? path : "(empty)",
+	         swap ? " (swap, removal edge synthesized)" : "");
 }
 
 void cdtv_cd_init(void)
@@ -1215,12 +1569,67 @@ void cdtv_cd_init(void)
 		stch_retries = STCH_RETRY_BUDGET;
 		stch_next_ms = GetTimer(0);
 	}
+
+	cd_swap_pending  = false;
+	cd_swap_ready_ms = 0;
+
+	cd_save_dirty_observed   = false;
+	cd_save_load_failed      = false;
+	card_save_dirty_observed = false;
+	if (cd_save_path_active[0]) cd_save_load_pending = true;
+
 	cdtv_dbg("init media=%d isready=%d stch_retries=%d", cd_media, cd_isready, stch_retries);
 }
 
 void cdtv_cd_poll(void)
 {
 	if (!cdtv_active()) return;
+
+	if (cd_swap_pending && CheckTimer(cd_swap_ready_ms)) {
+		cd_swap_pending = false;
+		cd_media    = 1;
+		cd_finished = 1;
+		stch_retries = STCH_RETRY_BUDGET;
+		stch_next_ms = GetTimer(0);
+		cdtv_dbg("swap: settle elapsed, new disc now present");
+	}
+
+	if (cd_save_load_pending) {
+		cd_save_load_pending = false;
+		if (cd_save_path_active[0]) cdtv_nvram_load_from_path(cd_save_path_active);
+		cdtv_card_load_from_path(card_save_path_active);
+	}
+
+	cdtv_nvram_verify_load_pending();
+
+	{
+		static int nvr_menu_was_present = 0;
+		const bool nvr_dirty_now = (cdtv_read_status() & CDTV_STATUS_NVR_DIRTY) != 0;
+		const int  nvr_menu_now  = menu_present();
+		const bool osd_open_edge = nvr_menu_now && !nvr_menu_was_present;
+		nvr_menu_was_present     = nvr_menu_now;
+
+		if (nvr_dirty_now) cd_save_dirty_observed = true;
+
+		const bool card_dirty_now = (cdtv_read_status() & CDTV_STATUS_CARD_DIRTY) != 0;
+		if (card_dirty_now) card_save_dirty_observed = true;
+
+		if (osd_open_edge && cd_save_dirty_observed) {
+			cdtv_dbg("NVR flush: OSD opened with dirty pending");
+			cdtv_nvram_save_to_disk();
+		}
+
+		if (osd_open_edge && card_save_dirty_observed && card_save_path_active[0]) {
+			cdtv_dbg("CARD flush: OSD opened with dirty pending");
+			cdtv_card_save_to_path(card_save_path_active);
+		}
+	}
+
+	if (stch_playstart_pending) {
+		stch_playstart_pending = false;
+		cdtv_dbg("STCH play-start (playing=%d motor=%d)", cd_playing, cd_motor);
+		cdtv_inject_stch();
+	}
 
 	// Retry STCH inject on a slow cadence until BIOS progresses past STATUS
 	// polling. See stch_retries comment for why a single pulse isn't enough.

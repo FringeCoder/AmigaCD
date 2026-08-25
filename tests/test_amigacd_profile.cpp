@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "../support/minimig/minimig_profile.h"
 
@@ -18,6 +19,12 @@ static void check(const char *name, unsigned got, unsigned want)
 {
 	if (got == want) printf("PASS %s\n", name);
 	else { printf("FAIL %s: got 0x%02X, want 0x%02X\n", name, got, want); failures++; }
+}
+
+static void check_true(const char *name, int cond)
+{
+	if (cond) printf("PASS %s\n", name);
+	else { printf("FAIL %s\n", name); failures++; }
 }
 
 int main(void)
@@ -84,7 +91,24 @@ int main(void)
 	check("every non-chip bit preserved at once, cdtv",
 	      amigacd_profile_memory(0xFC, 1), 0xFD);
 
+	// Every machine needs its OWN config file. CD32 used to have no suffix, so
+	// its file was the unsuffixed boot config that "Save settings" rewrites --
+	// saving on any other machine overwrote CD32's, and the System row then
+	// looked frozen because switching to CD32 loaded whatever you had just
+	// left. Distinct and non-empty is the whole invariant.
+	for (int i = 0; i < AMIGACD_SYS_COUNT; i++)
+	{
+		const char *a = amigacd_cfg_suffix(i);
+		check_true("suffix is not null and not empty", a && a[0]);
+		for (int j = i + 1; j < AMIGACD_SYS_COUNT; j++)
+		{
+			const char *b = amigacd_cfg_suffix(j);
+			check_true("suffixes are distinct", a && b && strcmp(a, b));
+		}
+	}
+
 	if (failures) { printf("%d FAILURE(S)\n", failures); return 1; }
+
 	printf("ALL TESTS PASSED\n");
 	return 0;
 }

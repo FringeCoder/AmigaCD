@@ -37,8 +37,8 @@
 
 // The live selection lives in core status bits so it travels the same path as
 // every other core option. Minimig is excluded from the generic status-word
-// config load (user_io.cpp), so a2065_cfg_save()/a2065_cfg_load() persist just
-// this field alongside the numbered Minimig config slots.
+// config load (user_io.cpp), so the mode is carried in mm_configTYPE instead,
+// via a2065_cfg_get()/a2065_cfg_set() at save and load.
 #define A2065_STATUS_OPT "[54:52]"
 
 int  a2065_get_iface(void);
@@ -52,8 +52,8 @@ int  a2065_eth1_present(void);
 int  a2065_mode_available(int mode);
 
 // Persistence, called from minimig_cfg_save()/minimig_cfg_load().
-void a2065_cfg_save(int num);
-void a2065_cfg_load(int num);
+uint8_t a2065_cfg_get();
+void a2065_cfg_set(uint8_t mode);
 
 // Lifecycle. Both are idempotent: a2065_start() on an already-running card
 // just resets the LANCE state, and a2065_stop() on a stopped card is a nop.

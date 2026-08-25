@@ -482,7 +482,7 @@ void ide_img_set(uint32_t drvnum, fileTYPE *f, int cd, int sectors, int heads, i
 	{
 		if (drive->present)
 		{
-			if (!drive->chd_f) 
+			if (!drive->chd_f)
 			{
 				if (parse_vhd_config(drive)) ide_set_geometry(drive, sectors, heads);
 				else ide_set_geometry(drive, drive->spt, drive->heads);
@@ -1142,7 +1142,8 @@ int ide_open(uint8_t unit, const char* filename)
 	// driver can serve READ TOC/INFO/etc. from it. Allow the mount path when
 	// CDTV mode is active and the slot is configured as a CD (cfg==2).
 	bool cdtv_cd_slot = is_minimig()
-	                 && (minimig_config.chipset & CONFIG_CDTV)
+	                 && ((minimig_config.chipset & CONFIG_CDTV)
+	                     || minimig_config.cdtv_drive.cfg)
 	                 && minimig_config.hardfile[unit].cfg == 2;
 	if (!is_minimig()
 	    || ((minimig_config.ide_cfg & 1) && minimig_config.hardfile[unit].cfg)
