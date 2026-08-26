@@ -97,10 +97,21 @@ void amiga_lightpen_abs(int x, int y, int xmin, int xmax, int ymin, int ymax)
 	int hpos = map_range(x, xmin, xmax, LPEN_HPOS_MIN, LPEN_HPOS_MIN + LPEN_HPOS_SPAN);
 	int vpos = map_range(y, ymin, ymax, vmin, vmin + vspan);
 
-	// Vertical first, then horizontal. The core arms its latch on both matching
-	// the raster at once, so a pair torn across a frame boundary simply does not
-	// match and the latch waits for the next frame -- one frame stale at worst,
-	// never a position stitched together from two places on the screen.
+	// Vertical first, then horizontal, and the pair must already be a real one
+	// when it gets here -- input.cpp sends on EV_SYN, once per completed report,
+	// not on each EV_ABS.
+	//
+	// An earlier version of this comment argued the ordering made tearing
+	// harmless, on the grounds that the core arms only when vpos AND hpos both
+	// match the raster, so a mismatched pair would simply fail to match. That
+	// reasoning is wrong. A torn pair is not an impossible coordinate, it is
+	// somebody else's coordinate: new x with the previous y is a point the beam
+	// genuinely sweeps through, so the latch arms there quite happily and then
+	// holds that wrong position for the rest of the frame. Requiring both to
+	// match rejects nothing.
+	//
+	// So the atomicity has to come from the caller, and it does. The ordering
+	// below is now only about which half is newer if a write is ever lost.
 	spi_uio_cmd16(UIO_MM2_LPENV, (uint16_t)vpos);
 	spi_uio_cmd16(UIO_MM2_LPENH, (uint16_t)hpos);
 }
