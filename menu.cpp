@@ -6518,8 +6518,16 @@ void HandleUI(void)
 		strcpy(s, " D-Cache  : ");
 		strcat(s, (minimig_config.cpu & 16) ? "On" : "Off");
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
-		strcpy(s, " CPU Speed : ");
-		strcat(s, (minimig_config.cpu & 0x20) ? "14 MHz" : "Full");
+		// CPU CFG bit 5 read the other way up: set means the stock-speed throttle
+		// is engaged, so Turbo On is the bit CLEAR. Phrased as Turbo because that
+		// is the question being asked -- "faster than the real machine?" -- rather
+		// than as a clock rate the core does not literally produce.
+		//
+		// "CPU Turbo" and not just "Turbo": FDD Turbo is a few rows down on this
+		// same page, and two rows both called Turbo is a support question waiting
+		// to happen.
+		strcpy(s, " CPU Turbo: ");
+		strcat(s, (minimig_config.cpu & 0x20) ? "Off" : "On");
 		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
 		strcpy(s, " Chipset   : ");
 		strcat(s, config_chipset_msg[(minimig_config.chipset >> 2) & 7]);
@@ -6604,15 +6612,13 @@ void HandleUI(void)
 		{
 			if (menusub == 0)
 			{
+				// 68000 / 68010 / 68020. Upstream folded a fourth step in here for
+				// the stock-speed variant, which made the CPU row silently change
+				// Turbo; the Turbo row owns that bit instead, so this leaves it
+				// alone. Mask keeps bit 5 (Turbo) and bit 4 (D-Cache) untouched.
 				int cpu = minimig_config.cpu & 3;
-				if (minus)
-				{
-					cpu = (cpu == 0) ? 3 : (cpu == 3) ? 1 : 0;
-				}
-				else
-				{
-					cpu = (cpu == 0) ? 1 : (cpu == 1) ? 3 : 0;
-				}
+				if (minus) cpu = (cpu == 0) ? 3 : (cpu == 3) ? 1 : 0;
+				else       cpu = (cpu == 0) ? 1 : (cpu == 1) ? 3 : 0;
 
 				menustate = MENU_MINIMIG_CHIPSET1;
 				minimig_config.cpu = (minimig_config.cpu & 0xfc) | cpu;
