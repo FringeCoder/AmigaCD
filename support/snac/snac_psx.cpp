@@ -117,6 +117,18 @@ static void snac_mouse(void)
 #define SNAC_GUN_OFFSCREEN_X 0x0001
 #define SNAC_GUN_OFFSCREEN_Y 0x000A
 
+// The GunCon's two buttons, as they arrive in pad[].
+//
+// docs/psx-snac-hardware.md records the reply layout, settled from PSX_MiSTer's
+// rtl/joypad_pad.vhd: trigger is bit 5 of buttons-MSB and the B button is bit 6,
+// both active low. rtl/snac_psx.v's decode() inverts those and lays them out at
+// the standard pad positions -- b1[5] lands where CIRCLE sits and b1[6] where
+// CROSS sits -- so a GunCon's trigger reaches userspace wearing CIRCLE's bit and
+// its B button wearing CROSS's. Named here rather than used through the pad
+// names, which would read as though a gun had a circle button.
+#define SNAC_GUN_TRIGGER SNAC_CIRCLE
+#define SNAC_GUN_B       SNAC_CROSS
+
 // rtl/snac_psx.v packs the last four payload bytes into axes the same way
 // for every device (it does not know or care which one it is talking to):
 //   axes <= { rx_byte[8], rx_byte[7], rx_byte[6], rx_byte[5] }
@@ -139,6 +151,22 @@ static void snac_lightpen(void)
 		unsigned char mode = minimig_config.snac[p] & 0x07;
 		if (mode != mmsp_lightgun) continue;
 		if (id[p] != 0x63) continue;   // axes are only meaningful from a GunCon
+
+		// The trigger, before the off-screen check. A shot that misses the
+		// screen still pulls the trigger, and a title that reads fire without
+		// caring where the gun points must see it -- the sentinel says only
+		// that there is no position to latch.
+		//
+		// amiga_lightpen_button() owns the mapping and the port, so this passes
+		// the same EV_KEY codes a USB gun's driver would and both guns land on
+		// the same Amiga buttons. That was the intent recorded at
+		// support/lightpen/amiga_lightpen.cpp: "the SNAC gun can use the same
+		// route when its trigger is wired up".
+		//
+		// Levels, not edges: the routing sets or clears the bit from `pressed`,
+		// so re-asserting an unchanged level each poll is a no-op.
+		amiga_lightpen_button(BTN_TRIGGER, (pad[p] & SNAC_GUN_TRIGGER) ? 1 : 0);
+		amiga_lightpen_button(BTN_THUMB,   (pad[p] & SNAC_GUN_B)       ? 1 : 0);
 
 		uint16_t gx = (uint16_t)(axes[p] & 0x01FF);          // X, 9 bits
 		uint16_t gy = (uint16_t)((axes[p] >> 16) & 0x01FF);  // Y, 9 bits
