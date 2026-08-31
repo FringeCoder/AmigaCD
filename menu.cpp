@@ -7307,9 +7307,10 @@ void HandleUI(void)
 	{
 		OsdSetTitle("Settings", 0);
 		helptext_idx = 0;
-		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
-		// Save state(5), Restore state(6), Back(7) -- eight rows, so 0xFF.
-		menumask = 0xFF;
+		// FastRAM(0), D-Cache(1), CPU Turbo(2), Main ROM(3), Ext ROM(4),
+		// Save slot(5), Save state(6), Restore state(7), Back(8) -- nine rows,
+		// so 0x1FF.
+		menumask = 0x1FF;
 		parentstate = menustate;
 
 		m = 0;
@@ -7324,6 +7325,14 @@ void HandleUI(void)
 		strcat(s, (minimig_config.cpu & 16) ? "ON" : "OFF");
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
 
+		// CPU Turbo = CPU byte bit5 read the other way up: the bit SET engages
+		// the stock-speed throttle, so Turbo On is the bit clear. Same 020-only
+		// gate as D-Cache above, and sat next to it because they are the two
+		// CPU settings on this page.
+		strcpy(s, " CPU Turbo: ");
+		strcat(s, (minimig_config.cpu & 0x20) ? "OFF" : "ON");
+		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
+
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " Main ROM : ");
@@ -7335,7 +7344,7 @@ void HandleUI(void)
 			if (!name[0]) strcat(s, "<none>");
 			else strncat(s, name, 22);
 		}
-		OsdWrite(m++, s, menusub == 2, 0);
+		OsdWrite(m++, s, menusub == 3, 0);
 
 		strcpy(s, " Ext ROM  : ");
 		{
@@ -7350,7 +7359,7 @@ void HandleUI(void)
 				strncat(s, disp, 22);
 			}
 		}
-		OsdWrite(m++, s, menusub == 3, 0);
+		OsdWrite(m++, s, menusub == 4, 0);
 
 		// Save states. These rows were originally added to MENU_MINIMIG_CHIPSET1,
 		// which the AmigaCD console variant never reaches -- menu.cpp:5859 sends
@@ -7366,14 +7375,14 @@ void HandleUI(void)
 
 			strcpy(s, " Save slot: ");
 			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
-			OsdWrite(m++, s, menusub == 4, ss_blocked);
+			OsdWrite(m++, s, menusub == 5, ss_blocked);
 
-			OsdWrite(m++, " Save state", menusub == 5, ss_blocked);
-			OsdWrite(m++, " Restore state", menusub == 6, ss_blocked);
+			OsdWrite(m++, " Save state", menusub == 6, ss_blocked);
+			OsdWrite(m++, " Restore state", menusub == 7, ss_blocked);
 		}
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 7, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 8, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -7418,12 +7427,21 @@ void HandleUI(void)
 				}
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 2 && select) // Main ROM
+			else if (menusub == 2) // CPU Turbo (CPU bit5 inverted; 020 only)
+			{
+				if (minimig_config.cpu & 0x2)
+				{
+					minimig_config.cpu ^= 0x20;
+					minimig_ConfigCPU(minimig_config.cpu);
+				}
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 3 && select) // Main ROM
 			{
 				ioctl_index = 1;
 				SelectFile(Selected_F[4], "ROM", SCANO_DIR, MENU_AMIGACD_ROMFILE_SELECTED, MENU_AMIGACD_SETTINGS1);
 			}
-			else if (menusub == 3) // Ext ROM ('-' clears the pairing)
+			else if (menusub == 4) // Ext ROM ('-' clears the pairing)
 			{
 				if (minus)
 				{
@@ -7436,14 +7454,14 @@ void HandleUI(void)
 					SelectFile(Selected_F[5], "ROM", SCANO_DIR | SCANO_UMOUNT, MENU_AMIGACD_EXTROMFILE_SELECTED, MENU_AMIGACD_SETTINGS1);
 				}
 			}
-			else if (menusub == 4 && !minimig_ss_blocked()) // Save slot 1-4
+			else if (menusub == 5 && !minimig_ss_blocked()) // Save slot 1-4
 			{
 				int slot = minimig_config.ss_slot & 3;
 				slot = minus ? (slot + 3) & 3 : (slot + 1) & 3;
 				minimig_config.ss_slot = (unsigned char)slot;
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 5 && select && !minimig_ss_blocked()) // Save state
+			else if (menusub == 6 && select && !minimig_ss_blocked()) // Save state
 			{
 				// Arming the host poller happens here and nowhere earlier.
 				//
@@ -7475,7 +7493,7 @@ void HandleUI(void)
 				// not sit in a menu while it does.
 				menustate = MENU_NONE1;
 			}
-			else if (menusub == 6 && select && !minimig_ss_blocked()) // Restore state
+			else if (menusub == 7 && select && !minimig_ss_blocked()) // Restore state
 			{
 				// This is not housekeeping, it is the load. process_ss() maps
 				// the four DDR3 windows AND reads the four .ss files off disk
@@ -7528,7 +7546,7 @@ void HandleUI(void)
 				// not sit in a menu while it does.
 				menustate = MENU_NONE1;
 			}
-			else if (menusub == 7 && select) // Back
+			else if (menusub == 8 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 5;   // Settings row
