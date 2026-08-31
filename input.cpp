@@ -6064,7 +6064,10 @@ int input_test(int getchar)
 											input[i].lasty = ev.value;
 										}
 									}
+								}
 
+								if (ev.type == EV_SYN && input[i].quirk == QUIRK_LIGHTGUN_CRT)
+								{
 									// AmigaCD's light pen, driven from a USB CRT gun (GunCon 2
 									// and friends). Deliberately after the grace-period handling
 									// above, so lastx/lasty are the settled on-screen position
