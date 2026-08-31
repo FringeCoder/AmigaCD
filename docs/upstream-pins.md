@@ -264,3 +264,5 @@ shares with it. Unlike the physical_disc module this cannot be a re-extract: it
 touches `menu.cpp`, `ide.cpp`, `ide_cdrom.cpp` and `user_io.cpp`, all of which
 we have modified. Treat it as a real merge with conflicts, on its own branch,
 with a hardware test afterwards.
+
+| `MiSTer-devel/Main_MiSTer` | `master` | `915ca33` "minimig: repair the reserved CPU value when loading a config" | 2026-08-29 |
