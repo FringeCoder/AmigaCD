@@ -10,10 +10,15 @@ against. Re-verify line numbers after moving off these.
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
 | `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `de40622` "Merge PR #9, remount on savestate" | 2026-08-23 |
+| ^ **head is `f2963eb` (2026-08-30), NOT taken** — DVD player core support and autolaunch, a feature for a different core; see below | | | |
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `915ca33` "minimig: repair the reserved CPU value when loading a config (#1297)" | 2026-08-29 |
+| ^ previous pin, superseded 2026-08-31 | | `0a8fb44` | 2026-08-23 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `c26772a` "Akiko: PIO command register, and DRIVEXMIT for zero-result commands (#229)" | 2026-08-27 |
+| ^ previous pin, superseded 2026-08-27 | | `b265a3b` | 2026-08-23 |
+| ^ superseded 2026-08-24 | | `809b955` "A2065 Ethernet" | 2026-07-26 |
 | ^ our core's fork point | | `3ab91cd` "Release 20260220." | 2026-02-20 |
 
 `52625a4` is merged into this repo's `master` as the working tree.
@@ -265,4 +270,3 @@ touches `menu.cpp`, `ide.cpp`, `ide_cdrom.cpp` and `user_io.cpp`, all of which
 we have modified. Treat it as a real merge with conflicts, on its own branch,
 with a hardware test afterwards.
 
-| `MiSTer-devel/Main_MiSTer` | `master` | `915ca33` "minimig: repair the reserved CPU value when loading a config" | 2026-08-29 |
