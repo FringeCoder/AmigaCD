@@ -6572,8 +6572,17 @@ void HandleUI(void)
 		strcpy(s, " HRTmon : ");
 		strcat(s, (minimig_config.memory & 0x40) ? "enabled " : "disabled");
 		OsdWrite(m++, s, menusub == 10, 0);
-		sprintf(s, " FDD Turbo: %s", minimig_config.floppy.speed ? "On" : "Off");
-		MenuWrite(m++, s, menusub == 11, 0);
+		// No FDD Turbo row here. One was added to this page at some point with
+		// menusub 11 -- the index Save slot already used -- and with no handler
+		// branch of its own, so it rendered, highlighted in step with Save slot,
+		// and did nothing when pressed. The working control is on the Drives
+		// page (MENU_MINIMIG_DISK1, "Floppy Disk Turbo", menusub 10), which is
+		// where floppy settings belong and where its handler actually lives.
+		//
+		// Removing it also puts the render back in step with the handler
+		// without renumbering anything: rows are 0..13 with Back at 14 again,
+		// which is what MENU_MINIMIG_CHIPSET2 has always expected and what
+		// menumask 0x7FFF describes. The extra row was the whole fault.
 
 		// Save states. The core is the active party in the protocol: these rows
 		// only pick a slot and raise a request bit, the capture itself is
