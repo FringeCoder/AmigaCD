@@ -282,7 +282,7 @@ static int akiko_prefetch_pick_evict(void)
 // ("play starting"), but BIOS won't advance past the audio-cued state until
 // it sees the asynchronous opcode-0x04 follow-up frame. Values:
 //    2,1 -> countdown to "play started" emission (CDS_PLAYING|2)
-//   -1   -> stop audio engine (placeholder until Phase 33), advance to -2
+//   -1   -> stop audio engine, advance to -2 (teardown happens at the stop site)
 //   -2   -> emit "play ended" (CDS_PLAYEND)
 //   -3   -> emit "play failed" (CDS_ERROR)
 static int8_t   cd_audio_timeout    = 0;
@@ -2683,8 +2683,9 @@ void akiko_cd32_poll(void)
 			emit_playend_notify(0);
 			cd_audio_timeout = 0;
 		} else if (cd_audio_timeout == -1) {
-			// Phase 33 will tear down the CDDA pump here. For now we
-			// just advance to the play-ended emission.
+			// The pump teardown is not done here -- cmd_stop() clears
+			// cd_cdda_lba_next/end and cd_cdda_drv itself. This arm
+			// only advances to the play-ended emission.
 			cd_audio_timeout = -2;
 		} else if (cd_audio_timeout == -2) {
 			emit_playend_notify(1);
