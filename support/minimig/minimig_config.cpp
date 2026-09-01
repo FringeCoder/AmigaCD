@@ -1321,7 +1321,16 @@ int amigacd_apply_system(int sys)
 	minimig_config.cdtv_drive.cfg = (sys == AMIGACD_SYS_CDTV) ? 1 : 0;
 	minimig_config.cd32_drive.cfg = (sys == AMIGACD_SYS_CD32) ? 1 : 0;
 
-	if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1; // single df0
+	// Floppy drive count is a machine property, so it comes from the profile.
+	// This used to read
+	//
+	//     if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1;
+	//
+	// commented "single df0" -- but the field is a count minus one, so that is
+	// TWO drives, and it ran for every machine including CD32 and CDTV, which
+	// have none. Kickstart then probed two drives and spent chip RAM on a
+	// trackdisk buffer for each. See amigacd_profile_floppy_drives().
+	minimig_config.floppy.drives = amigacd_profile_floppy_drives(sys);
 
 	int rom_ok = amigacd_set_default_roms(sys);
 

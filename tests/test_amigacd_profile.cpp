@@ -107,6 +107,37 @@ int main(void)
 		}
 	}
 
+	// ---- floppy drive count is a machine property -------------------------
+	//
+	// The bug: amigacd_apply_system forced floppy.drives = 1 for every system,
+	// commented "single df0". The field is a count MINUS ONE, so that is two
+	// drives -- on CD32 and CDTV, which have none. Kickstart probes what it is
+	// offered and spends chip RAM on a trackdisk buffer per drive it finds.
+	check("cd32 gets one floppy drive, not two",
+	      amigacd_profile_floppy_drives(AMIGACD_SYS_CD32), 0);
+	check("cdtv gets one floppy drive, not two",
+	      amigacd_profile_floppy_drives(AMIGACD_SYS_CDTV), 0);
+
+	// A500 and A1200 keep two: one internal plus the external DF1 nearly
+	// everyone had. A seed, not a clamp -- the user owns it afterwards.
+	check("a500 keeps two floppy drives",
+	      amigacd_profile_floppy_drives(AMIGACD_SYS_A500), 1);
+	check("a1200 keeps two floppy drives",
+	      amigacd_profile_floppy_drives(AMIGACD_SYS_A1200), 1);
+
+	// The value is a count minus one packed into two bits by
+	// minimig_ConfigFloppy, so anything above 3 would silently truncate.
+	for (int sys = 0; sys < AMIGACD_SYS_COUNT; sys++)
+		check_true("floppy drive count fits the two-bit field",
+		           amigacd_profile_floppy_drives(sys) <= 3);
+
+	// Neither CD machine may claim more drives than a machine that has one.
+	check_true("no CD machine offers more drives than an A500",
+	           amigacd_profile_floppy_drives(AMIGACD_SYS_CD32)
+	             <= amigacd_profile_floppy_drives(AMIGACD_SYS_A500)
+	        && amigacd_profile_floppy_drives(AMIGACD_SYS_CDTV)
+	             <= amigacd_profile_floppy_drives(AMIGACD_SYS_A500));
+
 	if (failures) { printf("%d FAILURE(S)\n", failures); return 1; }
 
 	printf("ALL TESTS PASSED\n");

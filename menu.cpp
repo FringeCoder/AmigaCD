@@ -6930,7 +6930,11 @@ void HandleUI(void)
 				}
 				else strcat(s, "* no disk *");
 			}
-			OsdWrite(m++, s, menusub == (uint32_t)(2 + fu), 0);
+			// Grey a drive the machine does not have, rather than dropping the
+			// row: positions are shared across systems and every menusub below
+			// would shift, which is the same reason the A1200's CD rows stay.
+			OsdWrite(m++, s, menusub == (uint32_t)(2 + fu),
+			         fu > minimig_config.floppy.drives);
 		}
 
 		// Two hard disks. HD0 is hardfile[1], the IDE0 slave, so it sits beside
