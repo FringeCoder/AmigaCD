@@ -32,6 +32,23 @@ uint8_t amigacd_profile_memory(uint8_t memory, int sys)
 	return (uint8_t)((memory & ~MEM_CHIP_MASK) | chip);
 }
 
+uint8_t amigacd_profile_floppy_drives(int sys)
+{
+	switch (sys)
+	{
+	case AMIGACD_SYS_CD32:
+	case AMIGACD_SYS_CDTV:
+		// No floppy drive on either machine. Zero is not expressible, so one.
+		return 0;
+
+	case AMIGACD_SYS_A500:
+	case AMIGACD_SYS_A1200:
+	default:
+		// One internal, plus the external DF1 nearly everyone had.
+		return 1;
+	}
+}
+
 const char *amigacd_system_name(int sys)
 {
 	switch (sys)

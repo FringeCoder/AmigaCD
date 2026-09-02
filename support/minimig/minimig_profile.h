@@ -55,4 +55,28 @@ const char *amigacd_cfg_suffix(int sys);
 // they set it to afterwards.
 uint8_t amigacd_profile_memory(uint8_t memory, int sys);
 
+// How many floppy drives the machine has, as minimig_config.floppy.drives
+// wants it: a count MINUS ONE, so 0 is one drive and 1 is two.
+//
+// This is a machine property in the same sense chip RAM is, and it was not
+// being treated as one -- amigacd_apply_system forced the value 1 for every
+// system, which is TWO drives, on machines including CD32 and CDTV that have
+// none at all. Kickstart probes what it is offered, finds two drives, and
+// allocates a trackdisk MFM track buffer per unit. Those buffers live in chip
+// RAM because floppy DMA can only reach chip RAM, so the cost lands on the
+// 2 MB a CD32 has.
+//
+// CLAMPED, NOT CHOSEN, for CD32 and CDTV. Neither has a floppy drive, and
+// neither the host protocol nor the RTL can say so: minimig_ConfigFloppy packs
+// the count into two bits as count-minus-one, and paula_floppy.v hardwires
+// drive 0 as always present. One drive is the nearest expressible answer.
+// If the RTL ever gains a zero-drive encoding, this function is the only place
+// that has to change.
+//
+// A500 and A1200 get two, which is a seed rather than a clamp -- the same
+// reasoning the A500's trapdoor RAM already gets in this file. Both shipped
+// with one internal drive, but an external DF1 was near universal and most
+// multi-disk software is painful without it. The user owns it after this.
+uint8_t amigacd_profile_floppy_drives(int sys);
+
 #endif
