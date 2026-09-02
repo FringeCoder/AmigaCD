@@ -315,10 +315,22 @@ static void BootCustomInit()
 	//move.w #$003c,$dff092  ; DDFSTRT, display data fetch start
 	//move.w #$00d4,$dff094  ; DDFSTOP, display data fetch stop
 	//move.w #$87c0,$dff096  ; DMACON, enable important bits
-	//move.w #$0000,$dff098  ; CLXCON, TODO
+	//move.w #$0000,$dff098  ; CLXCON
 	//move.w #$7fff,$dff09a  ; INTENA, disable all interrupts
 	//move.w #$7fff,$dff09c  ; INTREQ, disable all interrupts
-	//move.w #$0000,$dff09e  ; ADKCON, TODO
+	//move.w #$7fff,$dff09e  ; ADKCON, clear every bit
+	//
+	// ADKCON is a SET/CLR register like DMACON, INTENA and INTREQ above it: bit
+	// 15 chooses whether the mask sets or clears. The value this line carried
+	// while it was commented out was $0000, which clears nothing at all -- so
+	// enabling it as written would have looked like a fix and done nothing.
+	// $7fff is what actually clears bits 0..14, and it matches what the two
+	// interrupt registers on the line before are already doing.
+	//
+	// This matters now that the audio attach bits are implemented. ADKCON bits
+	// 0..7 attach one audio channel to the next; a title that left them set
+	// silences two of the four channels for whatever runs after it, and until
+	// attach existed here that was dormant rather than audible.
 	mem_upload_init(0xdff08e);
 	//mem_write16(0x1d64);
 	//mem_write16(0x38c7);
@@ -330,6 +342,7 @@ static void BootCustomInit()
 	mem_write16(0x00d4);
 	mem_write16(0x87c0);
 	mem_write16(0x0000);
+	mem_write16(0x7fff);
 	mem_write16(0x7fff);
 	mem_write16(0x7fff);
 	mem_upload_fini();
@@ -346,7 +359,7 @@ static void BootCustomInit()
 	//move.w #$a200,$dff100  ; BPLCON0, two bitplanes & colorburst enabled
 	//move.w #$0000,$dff102  ; BPLCON1, bitplane control scroll value
 	//move.w #$0000,$dff104  ; BPLCON2, misc bitplane bits
-	//move.w #$0000,$dff106  ; BPLCON3, TODO
+	//move.w #$0000,$dff106  ; BPLCON3
 	//move.w #$0000,$dff108  ; BPL1MOD, bitplane modulo for odd planes
 	//move.w #$0000,$dff10a  ; BPL2MOD, bitplane modulo for even planes
 	mem_upload_init(0xdff100);

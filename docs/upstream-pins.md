@@ -16,7 +16,8 @@ against. Re-verify line numbers after moving off these.
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
 | `MiSTer-devel/Main_MiSTer` | `master` | `915ca33` "minimig: repair the reserved CPU value when loading a config (#1297)" | 2026-08-29 |
 | ^ previous pin, superseded 2026-08-31 | | `0a8fb44` | 2026-08-23 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `c26772a` "Akiko: PIO command register, and DRIVEXMIT for zero-result commands (#229)" | 2026-08-27 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `74d6ce0` "gary: decode the custom registers at $DFxxxx, not across all of $C0-$DF (#235)" | 2026-08-28 |
+| ^ previous pin, superseded 2026-08-31 | | `c26772a` "Akiko: PIO command register, and DRIVEXMIT for zero-result commands (#229)" | 2026-08-27 |
 | ^ previous pin, superseded 2026-08-27 | | `b265a3b` | 2026-08-23 |
 | ^ superseded 2026-08-24 | | `809b955` "A2065 Ethernet" | 2026-07-26 |
 | ^ our core's fork point | | `3ab91cd` "Release 20260220." | 2026-02-20 |
