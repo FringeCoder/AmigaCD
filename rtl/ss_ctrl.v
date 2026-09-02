@@ -1125,6 +1125,45 @@ begin
 end
 endtask
 
+// DDR3 read return, registered locally.
+//
+// Timing, not function. The f2sdram bridge sits a long way from this module on
+// the die and ddr_readdatavalid was reaching the state register directly across
+// that distance. report_timing on the seed 10 netlist had
+//
+//     0.117  f2sdram~FF_3780 -> ss_ctrl|state.S_L_KICK_CHK
+//     0.286  f2sdram~FF_3780 -> ss_ctrl|state.S_L_MAGIC
+//
+// as the worst setup path in the whole design and three more of the same shape
+// in the worst ten -- S_L_KICK_CHK and S_L_MAGIC are only ever entered from
+// S_L_RD_DATA's `if (ddr_readdatavalid) state <= rd_ret`, so the source really
+// is the valid strobe crossing the die. One long hop becomes two short ones.
+//
+// The cycle this costs is free. Both consumers -- S_FAST_DATA and S_L_RD_DATA --
+// sit and wait for the beat with nothing else to do, one 64-bit read already
+// costs tens of cycles of DDR3 latency, and a restore is a bulk transfer with
+// the machine frozen. It is not a real-time path and never was.
+//
+// ddr_waitrequest is deliberately NOT registered. Avalon requires it to be
+// sampled in the same cycle as the command, so delaying it would break the
+// protocol rather than relax it. The same goes for the write path, where
+// ddr_write is dropped on !ddr_waitrequest.
+//
+// readdatavalid is one beat per read here -- burstcount is 1, and reads are
+// issued one at a time, serialised against the write path by word_busy -- so a
+// one-cycle delay cannot merge or drop beats.
+reg [63:0] ddr_readdata_q;
+reg        ddr_readdatavalid_q;
+always @(posedge clk) begin
+	if (!rst_n) begin
+		ddr_readdatavalid_q <= 1'b0;
+	end
+	else begin
+		ddr_readdatavalid_q <= ddr_readdatavalid;
+		if (ddr_readdatavalid) ddr_readdata_q <= ddr_readdata;
+	end
+end
+
 always @(posedge clk) begin
 	if (!rst_n) begin
 		state            <= S_IDLE;
@@ -1918,8 +1957,8 @@ always @(posedge clk) begin
 		end
 
 		S_FAST_DATA: begin
-			if (ddr_readdatavalid) begin
-				fast_dat <= ddr_readdata;
+			if (ddr_readdatavalid_q) begin
+				fast_dat <= ddr_readdata_q;
 				state    <= S_FAST_Q0;
 			end
 		end
@@ -2041,8 +2080,8 @@ always @(posedge clk) begin
 		// into an intermittent half-restore, which is a strictly worse thing to
 		// have to diagnose.
 		S_L_RD_DATA: begin
-			if (ddr_readdatavalid) begin
-				rd_data <= ddr_readdata;
+			if (ddr_readdatavalid_q) begin
+				rd_data <= ddr_readdata_q;
 				rd_pair <= {1'b0, rd_idx[23:1]};
 				state   <= rd_ret;
 			end
