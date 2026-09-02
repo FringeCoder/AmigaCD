@@ -344,3 +344,73 @@ minimum:
 
 That is a real test campaign, not a smoke test. It is the reason this document ends with
 analysis rather than a patch.
+
+---
+
+## 2026-09-02: the `sd_addr` framing above is out of date
+
+Everything before this section is still accurate as history, and wrong as a description of
+the current design. Two things have happened since.
+
+**The designated fix was attempted, and it landed.** The section above says reducing fan-in
+pressure on `sd_addr` is "not attempted. This is the one to reach for when the problem
+returns". It was reached for -- `5cb32ea perf(sdram): split sd_addr into chip and CPU
+halves, select at the output` -- and the problem returned anyway, and a seed then absorbed
+it. That whole sequence is worth more than the original prediction: a fix aimed at one
+register moved which source wins, and the pressure reappeared elsewhere.
+
+**`sd_addr` is no longer the destination of anything that binds.** `report_timing -setup
+-npaths 10` against the seed 10 netlist (2026-08-31) found neither `sd_addr` nor
+`sdram_ctrl` anywhere in the worst ten. Seven of the ten were inside `ss_ctrl`, the save
+state controller, in two shapes: the DDR3 read return arriving at the restore state
+machine, and the header/index arithmetic feeding `rd_idx`.
+
+### The DDR3 read return, fixed 2026-09-02
+
+The first shape was the f2sdram bridge reaching `ss_ctrl`'s state register directly across
+the die:
+
+    0.117  f2sdram~FF_3780 -> ss_ctrl|state.S_L_KICK_CHK      <- worst in the design
+    0.286  f2sdram~FF_3780 -> ss_ctrl|state.S_L_MAGIC
+
+Both of those states are only ever entered from `S_L_RD_DATA`'s
+`if (ddr_readdatavalid) state <= rd_ret`, so the source was the valid strobe itself.
+Registering the read return inside `ss_ctrl` splits that hop in two. `ddr_waitrequest` is
+deliberately not registered: Avalon requires it sampled in the same cycle as the command.
+
+**Result: the entire `f2sdram -> ss_ctrl|state` family left the worst twelve.** The cycle it
+costs is free -- both consumers sit waiting on the beat, a 64-bit read already costs tens of
+cycles of DDR3 latency, and a restore is a bulk transfer with the machine frozen.
+
+### What binds now
+
+    0.095  ss_ctrl|rom_scan -> sdram_ctrl|cpu_cache|fill_tag[10]
+    0.124  ss_ctrl|rom_scan -> sdram_ctrl|cpu_cache|cpu_sm_tag_dat_w[*]    (ten of these)
+
+A different shape again, and a promising one. `rom_scan` is a mode flag: raised when the
+module needs the SDRAM CPU port, held for the length of a scan, dropped at the end. It
+feeds `ss_port_own = ss_freeze | ss_rom_scan | ss_peek_scan` at `Minimig.sv:741`. A signal
+that is static for thousands of cycles is being held to a single-cycle budget, which is
+exactly the case `Minimig.sdc` already documents for `ram1|init_done`. `ss_ctrl.v:366`
+records that widening this signal's fan-in once cost 0.136 ns, so the pressure on it is
+known.
+
+The obvious next step is a `-setup 2` from `rom_scan` into the cache, written conservatively
+rather than as a false path for the same reason `init_done` was: the 0->1 edge does change
+downstream behaviour, and on a memory path "it only moves once per scan" is not an argument
+worth relying on unaltered. Establish first that the port mux cannot act on the edge within
+one cycle.
+
+### The lottery is structural, not a settings problem
+
+Five seed changes in two days, each invalidated by a smaller RTL edit than the last -- the
+final one differed from its predecessor by two parameters defaulting to zero. Quartus Prime
+Lite cannot preserve placement across edits: incremental compilation and Rapid Recompile are
+Standard and Pro features. There is no setting that fixes this, and the fitter settings in
+`Minimig.qsf` are already at maximum (`HIGH PERFORMANCE EFFORT`, `STANDARD FIT`, physical
+synthesis combo/duplication/retiming all on, aggressive routability always). The only cure
+is to fix the marginal paths themselves so no seed is needed, which is what this section is
+a log of.
+
+Utilisation is not the constraint and has never been: 70% ALM, 50% RAM blocks, 62% DSP,
+46% pins. The cost is routing distance between blocks that must talk.

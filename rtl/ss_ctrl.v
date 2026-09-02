@@ -102,10 +102,19 @@
 // one that was never the same ROM. See the CORE_WORDS comment below for why
 // payload word 0 and not a ninth header word.
 //
-// WIRING. Minimig.sv muxes the SDRAM CPU port on `ss_freeze | ss_rom_scan`.
-// Both scans now run frozen, so `rom_scan` is redundant with ss_freeze in both
-// directions; it is kept because it names the window the port is borrowed for,
-// and because the mux would have to change in lockstep with removing it.
+// WIRING. Minimig.sv muxes the SDRAM CPU port on `ss_freeze | ss_peek_scan`.
+// `rom_scan` is NOT in that OR any more. Both scans run frozen, so it was a
+// strict subset of ss_freeze and the term bought nothing -- and once ss_ctrl's
+// DDR3 read return was registered it became the binding path in the entire
+// design, eleven of the worst twelve, reaching the CPU cache's tag logic
+// through that mux as a mode flag timed at a single cycle. It is kept as an
+// output because it names the window the port is borrowed for and because
+// ssdiag reports it, but nothing depends on it functionally.
+//
+// The redundancy is proven by ss_ctrl_tb's sticky `scan_unfrozen` observer,
+// asserted as "never scans the ROM unfrozen". If a future change ever lets a
+// scan run with the machine going again, that assertion fails AND the term has
+// to go back into Minimig.sv's mux at the same time.
 //
 // The restore-side scan used to run with the machine still going, and the
 // ss_freeze term did not cover it. That was safe as far as the CPU went --
@@ -1125,6 +1134,45 @@ begin
 end
 endtask
 
+// DDR3 read return, registered locally.
+//
+// Timing, not function. The f2sdram bridge sits a long way from this module on
+// the die and ddr_readdatavalid was reaching the state register directly across
+// that distance. report_timing on the seed 10 netlist had
+//
+//     0.117  f2sdram~FF_3780 -> ss_ctrl|state.S_L_KICK_CHK
+//     0.286  f2sdram~FF_3780 -> ss_ctrl|state.S_L_MAGIC
+//
+// as the worst setup path in the whole design and three more of the same shape
+// in the worst ten -- S_L_KICK_CHK and S_L_MAGIC are only ever entered from
+// S_L_RD_DATA's `if (ddr_readdatavalid) state <= rd_ret`, so the source really
+// is the valid strobe crossing the die. One long hop becomes two short ones.
+//
+// The cycle this costs is free. Both consumers -- S_FAST_DATA and S_L_RD_DATA --
+// sit and wait for the beat with nothing else to do, one 64-bit read already
+// costs tens of cycles of DDR3 latency, and a restore is a bulk transfer with
+// the machine frozen. It is not a real-time path and never was.
+//
+// ddr_waitrequest is deliberately NOT registered. Avalon requires it to be
+// sampled in the same cycle as the command, so delaying it would break the
+// protocol rather than relax it. The same goes for the write path, where
+// ddr_write is dropped on !ddr_waitrequest.
+//
+// readdatavalid is one beat per read here -- burstcount is 1, and reads are
+// issued one at a time, serialised against the write path by word_busy -- so a
+// one-cycle delay cannot merge or drop beats.
+reg [63:0] ddr_readdata_q;
+reg        ddr_readdatavalid_q;
+always @(posedge clk) begin
+	if (!rst_n) begin
+		ddr_readdatavalid_q <= 1'b0;
+	end
+	else begin
+		ddr_readdatavalid_q <= ddr_readdatavalid;
+		if (ddr_readdatavalid) ddr_readdata_q <= ddr_readdata;
+	end
+end
+
 always @(posedge clk) begin
 	if (!rst_n) begin
 		state            <= S_IDLE;
@@ -1918,8 +1966,8 @@ always @(posedge clk) begin
 		end
 
 		S_FAST_DATA: begin
-			if (ddr_readdatavalid) begin
-				fast_dat <= ddr_readdata;
+			if (ddr_readdatavalid_q) begin
+				fast_dat <= ddr_readdata_q;
 				state    <= S_FAST_Q0;
 			end
 		end
@@ -2041,8 +2089,8 @@ always @(posedge clk) begin
 		// into an intermittent half-restore, which is a strictly worse thing to
 		// have to diagnose.
 		S_L_RD_DATA: begin
-			if (ddr_readdatavalid) begin
-				rd_data <= ddr_readdata;
+			if (ddr_readdatavalid_q) begin
+				rd_data <= ddr_readdata_q;
 				rd_pair <= {1'b0, rd_idx[23:1]};
 				state   <= rd_ret;
 			end
