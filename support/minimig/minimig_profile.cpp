@@ -49,6 +49,25 @@ uint8_t amigacd_profile_floppy_drives(int sys)
 	}
 }
 
+uint8_t amigacd_profile_floppy_drives_onload(uint8_t drives, int sys)
+{
+	switch (sys)
+	{
+	case AMIGACD_SYS_CD32:
+	case AMIGACD_SYS_CDTV:
+		// A fact about the machine, so it is forced on every load. See the
+		// header for why this is a clamp to one rather than to none.
+		return amigacd_profile_floppy_drives(sys);
+
+	case AMIGACD_SYS_A500:
+	case AMIGACD_SYS_A1200:
+	default:
+		// A preference with an OSD row. Seeded when the machine is selected,
+		// the user's from then on.
+		return drives;
+	}
+}
+
 const char *amigacd_system_name(int sys)
 {
 	switch (sys)

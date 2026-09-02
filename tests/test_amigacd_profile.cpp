@@ -138,6 +138,45 @@ int main(void)
 	        && amigacd_profile_floppy_drives(AMIGACD_SYS_CDTV)
 	             <= amigacd_profile_floppy_drives(AMIGACD_SYS_A500));
 
+	// The on-load correction. Making the drive count a machine property was not
+	// enough on its own: amigacd_apply_system() runs only when the user selects
+	// a machine or when there is no config at all, so every CD32 config already
+	// written kept its stored two drives and the OSD still showed both.
+	check("cd32 config load is forced to one drive",
+	      amigacd_profile_floppy_drives_onload(1, AMIGACD_SYS_CD32), 0);
+	check("cdtv config load is forced to one drive",
+	      amigacd_profile_floppy_drives_onload(1, AMIGACD_SYS_CDTV), 0);
+	check("cd32 already at one drive is left alone",
+	      amigacd_profile_floppy_drives_onload(0, AMIGACD_SYS_CD32), 0);
+	check("cd32 with a corrupt count is still clamped",
+	      amigacd_profile_floppy_drives_onload(3, AMIGACD_SYS_CD32), 0);
+
+	// Asymmetric on purpose: a preference with an OSD row survives a load.
+	check("a500 keeps one drive if that is what the user set",
+	      amigacd_profile_floppy_drives_onload(0, AMIGACD_SYS_A500), 0);
+	check("a500 keeps two drives",
+	      amigacd_profile_floppy_drives_onload(1, AMIGACD_SYS_A500), 1);
+	check("a500 keeps four drives",
+	      amigacd_profile_floppy_drives_onload(3, AMIGACD_SYS_A500), 3);
+	check("a1200 keeps two drives",
+	      amigacd_profile_floppy_drives_onload(1, AMIGACD_SYS_A1200), 1);
+
+	// Whatever comes back still has to fit the two-bit field
+	// minimig_ConfigFloppy packs it into, for every system and every input.
+	for (int sys = 0; sys < AMIGACD_SYS_COUNT; sys++)
+		for (uint8_t d = 0; d <= 3; d++)
+			check_true("on-load result fits the two-bit field",
+			           amigacd_profile_floppy_drives_onload(d, sys) <= 3);
+
+	// And a CD machine can never come out of a load claiming more drives than
+	// an A500 seed, whatever the file said.
+	for (uint8_t d = 0; d <= 3; d++)
+		check_true("no CD machine outlasts an A500 after a load",
+		           amigacd_profile_floppy_drives_onload(d, AMIGACD_SYS_CD32)
+		             <= amigacd_profile_floppy_drives(AMIGACD_SYS_A500)
+		        && amigacd_profile_floppy_drives_onload(d, AMIGACD_SYS_CDTV)
+		             <= amigacd_profile_floppy_drives(AMIGACD_SYS_A500));
+
 	if (failures) { printf("%d FAILURE(S)\n", failures); return 1; }
 
 	printf("ALL TESTS PASSED\n");
