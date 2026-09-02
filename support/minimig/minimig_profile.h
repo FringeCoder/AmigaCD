@@ -96,4 +96,20 @@ uint8_t amigacd_profile_floppy_drives(int sys);
 // user's choice every time the config was read.
 uint8_t amigacd_profile_floppy_drives_onload(uint8_t drives, int sys);
 
+// Whether the machine has NO floppy drive at all. CD32 and CDTV have none; the
+// function above clamps them to one because that was the fewest the hardware
+// could express, and this is what finally expresses zero.
+//
+// DERIVED, never stored. It is a fact about the machine with no OSD row and no
+// user control, so it is computed from the system on every send rather than
+// kept in the config -- which is precisely the failure mode the drive count
+// hit, where a value written into a config file outlived the fix that changed
+// it. Nothing to migrate and nothing to correct on load.
+//
+// What it costs to get wrong: Kickstart probes the drives it is offered and
+// trackdisk.device allocates an MFM track buffer per unit it opens. Floppy DMA
+// reaches only chip RAM, so each phantom drive spends roughly 19 KB of the 2 MB
+// a CD32 has.
+uint8_t amigacd_profile_floppy_none(int sys);
+
 #endif

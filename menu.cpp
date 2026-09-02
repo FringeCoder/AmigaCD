@@ -6933,8 +6933,14 @@ void HandleUI(void)
 			// Grey a drive the machine does not have, rather than dropping the
 			// row: positions are shared across systems and every menusub below
 			// would shift, which is the same reason the A1200's CD rows stay.
+			// A CD32 or a CDTV has no floppy drive at all, so both rows grey
+			// rather than only the second. The rows stay present because row
+			// positions are shared across systems and every menusub below
+			// would shift otherwise -- the same reason the A1200's dead CD
+			// rows are kept.
 			OsdWrite(m++, s, menusub == (uint32_t)(2 + fu),
-			         fu > minimig_config.floppy.drives);
+			         amigacd_profile_floppy_none(amigacd_system())
+			         || fu > minimig_config.floppy.drives);
 		}
 
 		// Two hard disks. HD0 is hardfile[1], the IDE0 slave, so it sits beside

@@ -1569,7 +1569,17 @@ void minimig_ConfigChipset(mm_configTYPE *config)
 
 void minimig_ConfigFloppy(unsigned char drives, unsigned char speed)
 {
-	spi_uio_cmd8(UIO_MM2_FLP, ((drives & 0x03) << 2) | (speed & 0x03));
+	// Bit 4 says the machine has NO floppy drive at all, which the drive count
+	// cannot say: it is a count minus one on both sides of the link, so 0
+	// already means one drive.
+	//
+	// Derived here rather than passed in, so every existing call site gets it
+	// and none of them can forget. It is a fact about the machine, so there is
+	// nothing to store, migrate or correct on load -- unlike the drive count,
+	// where a stored value outlived the fix that was supposed to change it.
+	unsigned char none = (is_amigacd() && amigacd_profile_floppy_none(amigacd_system()))
+	                   ? 0x10 : 0x00;
+	spi_uio_cmd8(UIO_MM2_FLP, none | ((drives & 0x03) << 2) | (speed & 0x03));
 }
 
 // External-drive assignment, 3 bits per unit, split across two commands because

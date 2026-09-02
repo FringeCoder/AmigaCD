@@ -177,6 +177,29 @@ int main(void)
 		        && amigacd_profile_floppy_drives_onload(d, AMIGACD_SYS_CDTV)
 		             <= amigacd_profile_floppy_drives(AMIGACD_SYS_A500));
 
+	// No floppy drive at all. The clamp above puts CD32 and CDTV at one drive
+	// because that was the fewest the link could express; this is what finally
+	// expresses none, and the two have to agree about which machines they mean.
+	check_true("cd32 has no floppy drive", amigacd_profile_floppy_none(AMIGACD_SYS_CD32) == 1);
+	check_true("cdtv has no floppy drive", amigacd_profile_floppy_none(AMIGACD_SYS_CDTV) == 1);
+	check_true("a500 has a floppy drive",  amigacd_profile_floppy_none(AMIGACD_SYS_A500) == 0);
+	check_true("a1200 has a floppy drive", amigacd_profile_floppy_none(AMIGACD_SYS_A1200) == 0);
+
+	// Sent as a single bit, so anything but 0 or 1 would corrupt the rest of
+	// the floppy command word.
+	for (int sys = 0; sys < AMIGACD_SYS_COUNT; sys++)
+		check_true("no-drive flag is one bit", amigacd_profile_floppy_none(sys) <= 1);
+
+	// The two functions describe the same machines from opposite directions:
+	// exactly the systems clamped to a single drive are the ones that really
+	// have none. A machine added later with no drive but a real count would
+	// show up here rather than as a phantom drive on hardware.
+	for (int sys = 0; sys < AMIGACD_SYS_COUNT; sys++)
+		check_true("no-drive machines are the ones clamped to one",
+		           (amigacd_profile_floppy_none(sys) == 1)
+		             == (amigacd_profile_floppy_drives(sys) == 0
+		                 && amigacd_profile_floppy_drives_onload(3, sys) == 0));
+
 	if (failures) { printf("%d FAILURE(S)\n", failures); return 1; }
 
 	printf("ALL TESTS PASSED\n");
