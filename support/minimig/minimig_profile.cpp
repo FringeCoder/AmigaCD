@@ -28,6 +28,8 @@ uint8_t amigacd_profile_memory(uint8_t memory, int sys)
 		                 | MEM_CHIP_512K | MEM_SLOW_512K);
 	}
 
+	// CD32PLUS falls through to 2M with the stock CD32 -- an expanded CD32 is
+	// still a CD32, and chip RAM is not what the expansions added.
 	uint8_t chip = (sys == AMIGACD_SYS_CDTV) ? MEM_CHIP_1M : MEM_CHIP_2M;
 	return (uint8_t)((memory & ~MEM_CHIP_MASK) | chip);
 }
@@ -43,8 +45,11 @@ uint8_t amigacd_profile_floppy_drives(int sys)
 
 	case AMIGACD_SYS_A500:
 	case AMIGACD_SYS_A1200:
+	case AMIGACD_SYS_CD32PLUS:
 	default:
-		// One internal, plus the external DF1 nearly everyone had.
+		// One internal, plus the external DF1 nearly everyone had. For
+		// CD32PLUS this is the point of the machine: an SX-1 gave a CD32 a
+		// floppy drive, and a second is the same seed the desktops get.
 		return 1;
 	}
 }
@@ -61,9 +66,11 @@ uint8_t amigacd_profile_floppy_drives_onload(uint8_t drives, int sys)
 
 	case AMIGACD_SYS_A500:
 	case AMIGACD_SYS_A1200:
+	case AMIGACD_SYS_CD32PLUS:
 	default:
 		// A preference with an OSD row. Seeded when the machine is selected,
-		// the user's from then on.
+		// the user's from then on. CD32PLUS belongs here and not with the CD
+		// machines above: its drives are real, so its count is the user's.
 		return drives;
 	}
 }
@@ -78,23 +85,40 @@ uint8_t amigacd_profile_floppy_none(int sys)
 
 	case AMIGACD_SYS_A500:
 	case AMIGACD_SYS_A1200:
+	case AMIGACD_SYS_CD32PLUS:
 	default:
 		return 0;
 	}
+}
+
+uint8_t amigacd_profile_has_hdd(int sys)
+{
+	// Narrow on purpose: only the stock CD32 loses the rows. See the header.
+	return (sys == AMIGACD_SYS_CD32) ? 0 : 1;
 }
 
 const char *amigacd_system_name(int sys)
 {
 	switch (sys)
 	{
-		case AMIGACD_SYS_CDTV:  return "CDTV";
-		case AMIGACD_SYS_A500:  return "A500";
-		case AMIGACD_SYS_A1200: return "A1200";
-		default:                return "CD32";
+		case AMIGACD_SYS_CDTV:     return "CDTV";
+		case AMIGACD_SYS_A500:     return "A500";
+		case AMIGACD_SYS_A1200:    return "A1200";
+		case AMIGACD_SYS_CD32PLUS: return "CD32+";
+		default:                   return "CD32";
 	}
 }
 
 const char *amigacd_cfg_suffix(int sys)
 {
-	return amigacd_system_name(sys);
+	// Was a pass-through to the display name, and stays identical for the four
+	// machines that predate CD32+. It is a switch now because the display name
+	// gained a '+', and this string becomes a filename -- AmigaCD_CD32+.cfg.
+	// Legal on FAT and exFAT, but a config filename is not the place to find
+	// out which of the paths it travels through disagrees.
+	switch (sys)
+	{
+		case AMIGACD_SYS_CD32PLUS: return "CD32PLUS";
+		default:                   return amigacd_system_name(sys);
+	}
 }

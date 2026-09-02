@@ -6854,6 +6854,15 @@ void HandleUI(void)
 		// "not on this machine".
 		const int amigacd_has_cd = (amigacd_system() != AMIGACD_SYS_A1200);
 		if (!amigacd_has_cd) menumask &= ~0x003;
+
+		// A stock CD32 has no hard disk interface at all -- Akiko gives it the
+		// CD, and the IDE and Gayle decodes belong to hardware it never
+		// shipped with. The rows are masked as well as greyed so the selection
+		// cannot land on something that cannot work; they keep their positions
+		// because every menusub below would shift otherwise, which is the same
+		// reason the A1200's dead CD rows are kept.
+		const int amigacd_has_hdd = amigacd_profile_has_hdd(amigacd_system());
+		if (!amigacd_has_hdd) menumask &= ~0x030;
 		parentstate = menustate;
 
 		// mister_floppy_status rides in the core's OSD mask: bit 6 board
@@ -6963,8 +6972,8 @@ void HandleUI(void)
 				char *hp = strrchr(hname, '/');
 				strncat(s, hp ? hp + 1 : hname, 22);
 			}
-			else strcat(s, "* none *");
-			OsdWrite(m++, s, menusub == (uint32_t)(4 + hu), 0);
+			else strcat(s, amigacd_has_hdd ? "* none *" : "-");
+			OsdWrite(m++, s, menusub == (uint32_t)(4 + hu), !amigacd_has_hdd);
 		}
 
 		OsdWrite(m++, "", 0, 0);
