@@ -79,4 +79,21 @@ uint8_t amigacd_profile_memory(uint8_t memory, int sys);
 // multi-disk software is painful without it. The user owns it after this.
 uint8_t amigacd_profile_floppy_drives(int sys);
 
+// Returns `drives` corrected for what the machine physically has, for use on
+// EVERY config load rather than only when the machine is selected.
+//
+// The function above was not enough on its own. amigacd_apply_system runs only
+// when the user picks a machine or when no config exists at all, so a CD32
+// config written before the drive count became a machine property keeps its
+// stored two drives forever, and Kickstart goes on spending chip RAM on a
+// trackdisk buffer for a drive the machine does not have. Correcting it on load
+// is what actually reaches an installation that already exists.
+//
+// Asymmetric on purpose, and it is the same distinction amigacd_profile_memory
+// draws between chip RAM and FastRAM. For CD32 and CDTV the count is a fact
+// about the machine and is forced. For A500 and A1200 it is a preference with
+// an OSD row, so it comes back untouched -- forcing it here would undo the
+// user's choice every time the config was read.
+uint8_t amigacd_profile_floppy_drives_onload(uint8_t drives, int sys);
+
 #endif

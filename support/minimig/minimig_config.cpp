@@ -1103,6 +1103,29 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 			       amigacd_system_name(sys), minimig_config.memory, fixed);
 			minimig_config.memory = fixed;
 		}
+
+		// The floppy drive count needs exactly the same treatment, and for
+		// exactly the same reason. Making it a machine property in
+		// amigacd_apply_system() only reached machines the user re-selected:
+		// every config already on a card kept its stored count, which for a
+		// CD32 written before that change is TWO drives (the field is a count
+		// minus one). Kickstart probes both and trackdisk.device takes an MFM
+		// track buffer per unit out of chip RAM, which is what the change was
+		// meant to stop.
+		//
+		// Only CD32 and CDTV are forced here. For an A500 or A1200 the count is
+		// a preference with an OSD row, and amigacd_profile_floppy_drives_onload
+		// returns it untouched -- forcing it every load would undo the user's
+		// choice the same way forcing FastRAM above would.
+		uint8_t fixed_drives =
+			amigacd_profile_floppy_drives_onload(minimig_config.floppy.drives, sys);
+		if (fixed_drives != minimig_config.floppy.drives)
+		{
+			printf("AmigaCD: correcting floppy drives for %s: %d -> %d\n",
+			       amigacd_system_name(sys),
+			       minimig_config.floppy.drives + 1, fixed_drives + 1);
+			minimig_config.floppy.drives = fixed_drives;
+		}
 	}
 
 	if ((minimig_config.cpu & 0x03) == 0x02) minimig_config.cpu |= 0x01;
