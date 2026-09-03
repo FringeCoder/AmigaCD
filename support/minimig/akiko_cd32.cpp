@@ -185,6 +185,8 @@ static const int command_lengths[16] = {
 //   1 = we sent the {0x0a, present} media-status response.
 //   2 = host sent INFO (0x07); fully initialised.
 static uint8_t  cd_initialized      = 0;
+static uint32_t cd_boot_ready_ms    = 0;   // 0 = no hold pending
+static uint32_t cd_boot_settle_ms   = 0;
 static uint8_t  cd_paused           = 0;
 static uint8_t  cd_playing          = 0;       // unused in M3, set by 0x04 (audio)
 static uint8_t  cd_led_state        = 0;
@@ -330,6 +332,26 @@ static uint32_t cd_media_swap_ready_ms = 0;
 // reach CDFileSystem before the arrival lands or the two collapse back into
 // no change at all.
 #define AKIKO_SWAP_SETTLE_MS 700
+
+// Hold the FIRST media-present announcement after a cold boot, so the CD32 ROM
+// gets up and reaches its animation before the disc appears.
+//
+// Reported from hardware and it is the whole point of this: with a disc already
+// selected at core load, our machine announces media immediately and Flink
+// fails for want of a contiguous 1774.8 KB block. Let the machine reach the
+// animation and select the SAME disc by hand and it loads and runs, with the
+// block landing at exactly 1774.8 KB. WinUAE behaves like the second case --
+// the animation shows briefly before the disc is mounted.
+//
+// Consumption is not the difference: measured against a fair reference (WinUAE
+// with its boot ROM enabled, as ours has) our machine uses 666.4 KB against
+// 665.8 KB at the same point. What differs is how the guest PACKS identical
+// demand, and the one input to that we control is when the disc shows up.
+//
+// Tunable at runtime for the sweep: write a millisecond value into
+// /tmp/akiko_boot_delay and reload the core. 0 restores the old behaviour.
+#define AKIKO_BOOT_SETTLE_MS 2500
+#define AKIKO_BOOT_DELAY_FILE "/tmp/akiko_boot_delay"
 
 // TOC streaming state. After cmd_info completes we proactively push TOC
 // entries (cmd 0x06 / cdrom_return_toc_entry) one per poll until the BIOS
@@ -2356,8 +2378,26 @@ void akiko_cd32_set_cd_path(const char *path)
 	           path, cd_save_path_active);
 }
 
+// Milliseconds to hold the first media announcement. Re-read on every init so a
+// value can be swept by editing the file and reloading the core, with no rebuild.
+static uint32_t akiko_boot_settle_ms(void)
+{
+	uint32_t ms = AKIKO_BOOT_SETTLE_MS;
+	FILE *f = fopen(AKIKO_BOOT_DELAY_FILE, "r");
+	if (f) {
+		int v = -1;
+		if (fscanf(f, "%d", &v) == 1 && v >= 0 && v <= 20000) ms = (uint32_t)v;
+		fclose(f);
+	}
+	return ms;
+}
+
 void akiko_cd32_init(void)
 {
+	cd_boot_settle_ms = akiko_boot_settle_ms();
+	cd_boot_ready_ms  = cd_boot_settle_ms ? (uint32_t)GetTimer(cd_boot_settle_ms) : 0;
+	akiko_diag("[akiko] boot settle: holding first media announce %u ms",
+	           cd_boot_settle_ms);
 	cd_initialized   = 0;
 	cd_paused        = 0;
 	cd_playing       = 0;
@@ -2553,6 +2593,12 @@ void akiko_cd32_poll(void)
 
 	if (cd_initialized == 0 && rx_idle) {
 		if (cd_media_present()) {
+			// Hold the arrival until the settle expires, so the ROM boots into
+			// its animation first and allocates in the order it does when a
+			// disc is inserted afterwards. Returning WITHOUT setting
+			// cd_initialized keeps this branch live for the next poll.
+			if (cd_boot_ready_ms && !CheckTimer(cd_boot_ready_ms)) return;
+			cd_boot_ready_ms = 0;
 			uint8_t r[2];
 			r[0] = 0x0a;
 			r[1] = 0x01;
