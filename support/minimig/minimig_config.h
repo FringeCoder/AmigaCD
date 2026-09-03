@@ -136,7 +136,23 @@ typedef struct
 	mm_hardfileTYPE cd32_drive;
 	mm_hardfileTYPE cdtv_drive;
 	uint8_t         a2065_mode;
+	// Seconds to hold the first CD media announcement at cold boot. 0 disables
+	// the hold entirely; 8 is the default and the value measured to work.
+	//
+	// Presenting a disc that is already there at power-on is not what the
+	// hardware does, and a CD32 title that wants most of chip RAM in one
+	// allocation fails because of it -- the ROM allocates its CD structures in
+	// a different order and fragments the region. See
+	// docs/chip-ram-shortfall.md; the OSD row is on the Advanced page.
+	//
+	// Appended, so every older layout migrates through the branches in
+	// minimig_cfg_load and gets the working default rather than a zero.
+	unsigned char   cd_mount_delay;
 } mm_configTYPE;
+
+// Seconds. Kept here because the menu, the config loader and akiko all need it.
+#define AMIGACD_CD_DELAY_DEFAULT 8
+#define AMIGACD_CD_DELAY_MAX     15
 
 extern mm_configTYPE minimig_config;
 

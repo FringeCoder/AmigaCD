@@ -363,15 +363,13 @@ static uint32_t cd_media_swap_ready_ms = 0;
 // would be an intermittent out-of-memory indistinguishable from a game bug.
 // If that is ever reported, RAISE THIS FIRST.
 //
-// Overridable at runtime without a rebuild: write milliseconds into
-// /tmp/akiko_boot_delay and reload the core. 0 restores the old immediate
-// announce, which is what makes this cheap to falsify.
+// The value is the user's, from "CD Mount Delay" on the Advanced page, and 0
+// there restores the old immediate announce -- which is what makes this cheap
+// to falsify if a title ever behaves oddly because of it.
 //
 // Only the cold boot is delayed. akiko_cd32_init() runs from BootInit
 // (minimig_boot.cpp), not on a disc change, so swapping a disc from the OSD
 // keeps the existing 700 ms swap settle and does not wait eight seconds.
-#define AKIKO_BOOT_SETTLE_MS 8000
-#define AKIKO_BOOT_DELAY_FILE "/tmp/akiko_boot_delay"
 
 // TOC streaming state. After cmd_info completes we proactively push TOC
 // entries (cmd 0x06 / cdrom_return_toc_entry) one per poll until the BIOS
@@ -2398,18 +2396,13 @@ void akiko_cd32_set_cd_path(const char *path)
 	           path, cd_save_path_active);
 }
 
-// Milliseconds to hold the first media announcement. Re-read on every init so a
-// value can be swept by editing the file and reloading the core, with no rebuild.
+// Milliseconds to hold the first media announcement, from the user's setting on
+// the Advanced page. 0 means no hold, which restores the immediate announce.
 static uint32_t akiko_boot_settle_ms(void)
 {
-	uint32_t ms = AKIKO_BOOT_SETTLE_MS;
-	FILE *f = fopen(AKIKO_BOOT_DELAY_FILE, "r");
-	if (f) {
-		int v = -1;
-		if (fscanf(f, "%d", &v) == 1 && v >= 0 && v <= 20000) ms = (uint32_t)v;
-		fclose(f);
-	}
-	return ms;
+	unsigned d = minimig_config.cd_mount_delay;
+	if (d > AMIGACD_CD_DELAY_MAX) d = AMIGACD_CD_DELAY_DEFAULT;   // corrupt config
+	return (uint32_t)d * 1000u;
 }
 
 void akiko_cd32_init(void)

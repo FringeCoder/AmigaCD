@@ -7590,7 +7590,8 @@ void HandleUI(void)
 		OsdSetTitle("Advanced", 0);
 		helptext_idx = 0;
 		int snac = (minimig_config.userport == mmup_snacpsx);
-		menumask = snac ? 0x1F : 0x7;   // User Port[, Port 1, Port 2], Ethernet, Back
+		// User Port[, Port 1, Port 2], Ethernet, CD Mount Delay, Back
+		menumask = snac ? 0x3F : 0xF;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 
@@ -7648,11 +7649,28 @@ void HandleUI(void)
 		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 3 : 1), 0);
 
 		OsdWrite(m++, "", 0, 0);
+
+		// How long the first CD media announcement is held at cold boot.
+		// Presenting a disc that is already there at power-on is not what the
+		// hardware does, and a CD32 title that wants most of chip RAM in one
+		// allocation fails because of it. 8 s is the measured value: 6 fails.
+		// Off restores the old immediate announce.
+		strcpy(s, " CD Mount Delay : ");
+		if (!minimig_config.cd_mount_delay) strcat(s, "Off");
+		else
+		{
+			char d[8];
+			sprintf(d, "%u s", minimig_config.cd_mount_delay);
+			strcat(s, d);
+		}
+		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 4 : 2), 0);
+
+		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
 		OsdWrite(m++, " is always present either way.", 0, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 4 : 2), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 5 : 3), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -7674,7 +7692,8 @@ void HandleUI(void)
 			// Ethernet and Back slide down the menusub list when it is.
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
 			uint32_t eth_row  = snac ? 3 : 1;
-			uint32_t back_row = snac ? 4 : 2;
+			uint32_t cd_row   = snac ? 4 : 2;
+			uint32_t back_row = snac ? 5 : 3;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -7702,6 +7721,15 @@ void HandleUI(void)
 					if (a2065_mode_available(m2)) break;
 				}
 				a2065_set_iface(m2);
+				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == cd_row) // CD mount delay, 0 (Off) .. AMIGACD_CD_DELAY_MAX
+			{
+				int d = minimig_config.cd_mount_delay;
+				if (d > AMIGACD_CD_DELAY_MAX) d = AMIGACD_CD_DELAY_DEFAULT;
+				d = minus ? (d + AMIGACD_CD_DELAY_MAX) % (AMIGACD_CD_DELAY_MAX + 1)
+				          : (d + 1) % (AMIGACD_CD_DELAY_MAX + 1);
+				minimig_config.cd_mount_delay = (unsigned char)d;
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
 			else if (menusub == back_row && select) // Back
