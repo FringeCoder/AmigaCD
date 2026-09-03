@@ -217,3 +217,37 @@ if __name__ == "__main__":
         sys.exit(main())
     except RuntimeError as e:
         sys.exit("error: %s" % e)
+
+
+def cmd_map(p, args):
+    """Where chip RAM actually went: free chunks and the allocations between them.
+
+    The free list is walkable; allocations are not. But the gaps BETWEEN free
+    chunks are exactly the allocated blocks, so the map falls out of one walk
+    and the large gaps are the ones worth identifying.
+    """
+    mh = 0x400
+    lower, upper = p.longs(mh + MH_LOWER)[0], p.longs(mh + MH_UPPER)[0]
+    chunk = p.long(mh + MH_FIRST)
+    print("chip region $%08X-$%08X" % (lower, upper))
+    print()
+    prev_end = lower
+    used = []
+    n = 0
+    while 0 < chunk < CHIP_TOP and n < 400:
+        nxt, size = p.longs(chunk)[0:2]
+        if chunk > prev_end:
+            used.append((prev_end, chunk - prev_end))
+        prev_end = chunk + size
+        chunk = nxt
+        n += 1
+    if prev_end < upper:
+        used.append((prev_end, upper - prev_end))
+
+    used.sort(key=lambda t: -t[1])
+    print("largest allocated blocks:")
+    for addr, size in used[:12]:
+        print("  $%08X  %8.1f KB" % (addr, size / 1024.0))
+    print()
+    print("%d allocated blocks, %.1f KB total"
+          % (len(used), sum(s for _, s in used) / 1024.0))
