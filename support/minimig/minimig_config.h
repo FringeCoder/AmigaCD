@@ -75,9 +75,28 @@ enum mm_snacPortMode {
 typedef struct
 {
 	unsigned char cfg;
+	// hardfile[0].reserved carries AMIGACD_HF0_CD32PLUS: this machine is a
+	// CD32+ rather than a stock CD32. The two agree on every other bit, and
+	// the thing that used to tell them apart -- whether IDE was enabled --
+	// turned out to be unavailable, because the CD32's own CD needs it.
+	//
+	// This byte is the marker because it is the only genuinely spare persisted
+	// storage in the config: declared, never read, never written, reachable
+	// from no menu path. Using it changes no struct size, so minimig_cfg_load's
+	// exact-size dispatch is untouched and every existing config keeps loading
+	// down the same branch, with the bit reading 0 and meaning "stock CD32".
+	//
+	// The alternatives were worse. ext_cfg/ext_cfg2 are a live 32-bit word sent
+	// to the core. hardfile[1].cfg is cleared when the user ejects a drive
+	// (menu.cpp), so a CD32+ would silently demote itself. Appending a field
+	// changes sizeof and needs a new migration branch in the riskiest function
+	// in minimig_config.cpp.
 	unsigned char reserved;
 	char filename[1024];
 } mm_hardfileTYPE;
+
+// Bit 0 of hardfile[0].reserved. See above.
+#define AMIGACD_HF0_CD32PLUS 0x01
 
 typedef struct
 {
