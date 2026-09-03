@@ -18,6 +18,7 @@
 #include "minimig_profile.h"
 #include "minimig_config.h"
 #include "minimig_share.h"
+#include "../physical_disc/physical_disc.h"   // PHYSICAL_DISC_SENTINEL
 #include "akiko_cd32.h"
 #include "cdtv_cd.h"
 #include "minimig_a2065.h"
@@ -723,13 +724,42 @@ static void ApplyConfiguration(char reloadkickstart)
 	// alone would leave a hardfile from an earlier profile mounted and still
 	// visible to the guest.
 	const int hdd_ok = !is_amigacd() || amigacd_profile_has_hdd(amigacd_system());
+
+	// Unit 0 is the CD. On an AmigaCD machine Akiko serves the disc, so
+	// mounting it as an IDE unit as well is redundant -- proven on hardware:
+	// with the IDE mount gone the CD still loads and the game still runs, and
+	// the memory map came back byte-identical, so the unit itself costs
+	// nothing. What it does do is keep the disc dependent on IDE, which is what
+	// blocked turning Gayle off.
+	//
+	// The short-circuit matters: when this is false, hdd_open(0) -- and so
+	// ide_open() -- is never called for the image.
+	//
+	// A physical disc is the exception and stays on IDE; see
+	// amigacd_cd_needs_ide().
+	const int cd_on_ide = !is_amigacd() || amigacd_cd_needs_ide();
+
 	spi_uio_cmd8(UIO_MM2_HDD, (minimig_config.ide_cfg & 0x21) |
-		(hdd_open(0) ? 2 : 0) |
+		((cd_on_ide && hdd_open(0)) ? 2 : 0) |
 		((hdd_ok && hdd_open(1)) ? 4 : 0) |
 		((hdd_ok && hdd_open(2)) ? 8 : 0) |
 		((hdd_ok && hdd_open(3)) ? 16 : 0));
 
-	minimig_cd_drive_open(0, minimig_config.cd32_drive.cfg ? minimig_config.cd32_drive.filename : "");
+	// cd32_drive.filename is written when the user PICKS a disc, so a config
+	// saved before that -- or by any older build -- carries the path in
+	// hardfile[0].filename instead. That used to be mounted by hdd_open(0) on
+	// the IDE side, and cd_is_mounted() was satisfied through ide_inst. With
+	// the disc off IDE nothing mounted it at boot, and the machine came up at
+	// the CD32 animation until the disc was selected by hand. Reported from
+	// hardware; this is the fallback that fixes it.
+	const char *cd0 = minimig_config.cd32_drive.cfg
+	                ? minimig_config.cd32_drive.filename : "";
+	if (!cd0[0] && minimig_config.hardfile[0].cfg == 2
+	    && strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
+	{
+		cd0 = minimig_config.hardfile[0].filename;
+	}
+	minimig_cd_drive_open(0, cd0);
 	minimig_cd_drive_open(1, minimig_config.cdtv_drive.cfg ? minimig_config.cdtv_drive.filename : "");
 
 	minimig_ConfigMemory(memcfg);
@@ -1283,6 +1313,20 @@ int amigacd_set_default_roms(int sys)
 // AmigaCD Settings menu. Defaults match an authentic CD32: D-Cache OFF (the
 // 68EC020 has no data cache) and no FastRAM. CDTV is a 68000 (cpu 0x00,
 // chipset 0x20, 1M chip).
+// Does this machine's CD have to be reached over IDE?
+//
+// Only for a PHYSICAL disc. physical_disc_autoboot.cpp mounts it with
+// ide_open(), so the controller has to be there. An image is served by Akiko and
+// needs no IDE at all, which is what lets a stock CD32 drop Gayle and recover
+// the contiguous chip RAM that CD32 titles want.
+//
+// Not a machine property, so it is not in minimig_profile.h: it depends on what
+// is in the drive right now, not on which machine was selected.
+int amigacd_cd_needs_ide(void)
+{
+	return !strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL);
+}
+
 int amigacd_apply_system(int sys)
 {
 	if (sys == AMIGACD_SYS_CDTV)
@@ -1368,7 +1412,23 @@ int amigacd_apply_system(int sys)
 		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF (authentic CD32 default)
 		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
 		minimig_config.memory  = 0x03; // 2M chip, no fast (authentic CD32 default)
-		minimig_config.ide_cfg = 0x01; // REQUIRED: the CD32's own CD needs it
+		// No IDE. A real CD32 has none, and on this core it is not free:
+		// Gayle's guest-side allocations cost about 190 KB and, worse, they
+		// fragment low memory. Measured on hardware -- with IDE enabled the
+		// largest contiguous block is 1703 KB, and Flink wants a single
+		// 1774.8 KB allocation, so it fails. With IDE off the block reaches
+		// exactly 1774.8 KB and the game runs. See docs/chip-ram-shortfall.md.
+		//
+		// This is safe now only because the disc no longer travels the IDE
+		// path: Akiko serves it, which was proven separately before this was
+		// switched off. An earlier attempt to clear ide_cfg on its own took the
+		// CD away entirely and shipped as a regression -- the disc's only mount
+		// was the IDE unit at the time.
+		//
+		// A PHYSICAL disc still needs IDE: physical_disc_autoboot.cpp opens it
+		// with ide_open(). So the bit stays set for that one case, and such a
+		// machine pays the memory. An image gets the authentic, lean machine.
+		minimig_config.ide_cfg = amigacd_cd_needs_ide() ? 0x01 : 0x00;
 	}
 	// One removable CD slot on every machine that has a CD drive. The A1200
 	// has none -- see above.

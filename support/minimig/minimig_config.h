@@ -193,6 +193,10 @@ void amigacd_default_rom_names(int sys, const char **main_name, const char **ext
 // but as the wrong Amiga, and the only other clue is the Main ROM row.
 int amigacd_set_default_roms(int sys);
 int amigacd_apply_system(int sys);
+
+// True when the CD must be reached over IDE -- a physical disc only. An image is
+// served by Akiko, which is what allows a stock CD32 to run with no IDE at all.
+int amigacd_cd_needs_ide(void);
 int  amigacd_is_cdtv(void);
 // The AMIGACD_SYS_* values these two speak in live in minimig_profile.h, which
 // is included above so callers need only this header.
