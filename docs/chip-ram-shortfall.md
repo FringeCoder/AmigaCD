@@ -1,7 +1,8 @@
 # The CD32 is ~72 KB short of contiguous chip RAM
 
 **Date:** 2026-09-03
-**Status:** measured, cause not yet isolated. No fix attempted.
+**Status:** partly fixed. 21.6 KB recovered, ~50 KB still missing.
+**Updated:** 2026-09-03, after the no-IDE change landed.
 **Occasion:** Flink refuses to start on a stock CD32 profile (2 MB chip, no fast
 RAM). WinUAE runs the same CHD on the same ROMs in the same configuration.
 
@@ -104,6 +105,79 @@ one shipped regression from a half-verified reading.
 
 ## What any candidate fix has to achieve
 
-**One contiguous block of 1774.8 KB**, i.e. 72 KB more than we manage now.
-Measurable before it is built, with `scripts/amiga-peek.py mem` against the
-Flink failure and `winuae_ref` against the reference.
+**One contiguous block of 1774.8 KB.** Measurable before it is built, with
+`scripts/amiga-peek.py mem` against the Flink failure and
+`scripts/winuae-ref.py` against the reference.
+
+---
+
+# What landed, and what is left  [2026-09-03]
+
+|                            | largest block |
+|----------------------------|---------------|
+| IDE on (original)          | 1703.2 KB     |
+| **IDE off, disc on Akiko** | **1724.8 KB** |
+| needed                     | 1774.8 KB     |
+
+**A stock CD32 now has no IDE and Akiko serves the disc.** Both halves were
+needed and neither works alone: clearing `ide_cfg` by itself took the CD away
+and shipped as a regression, because the disc's only mount WAS the IDE unit.
+
+Two hypotheses died on the way, and neither is worth re-testing:
+
+- **The floppy drive.** Real, measured at 26.4 KB, and NOT the cause. Removing
+  it was correct anyway: a CD32 has no floppy drive.
+- **The IDE unit itself.** Dropping its mount left the memory map
+  BYTE-IDENTICAL -- same free, same used, same largest, every block at the same
+  address. It cost nothing. What it did was keep the disc dependent on IDE,
+  which is what blocked turning Gayle off, and that is why it had to go first.
+
+One false positive to know about, because it nearly shipped as a success:
+selecting a disc BY HAND after a reset produced a perfect 1774.8 KB layout and
+the game ran. That was allocation ORDER, not the fix -- the same build from a
+cold boot gives 1724.8 KB and fails. Reproduce from a cold boot before believing
+any result here.
+
+## The remaining ~50 KB is top-region fragmentation
+
+|            | allocated | span                        | holes  |
+|------------|-----------|-----------------------------|--------|
+| WinUAE top | 64.7 KB   | `$1EFD70-$200000` = 64.7 KB | none   |
+| ours top   | 60.9 KB   | `$1DEB90-$200000` = 132 KB  | ~70 KB |
+
+**We allocate slightly LESS than WinUAE up there and spread it over twice the
+space.** Ours begins 69.5 KB lower, and that is the whole remaining shortfall:
+packed the way WinUAE packs it, the free region would run `$2F840-$1EFD70` =
+1793 KB, comfortably past 1774.8.
+
+The blocks, as far as inspection can take them:
+
+    $1DEB90  28.0 KB  filled with 0A repeated, structured data at +4000.
+                      THIS is the one that caps the game's region.
+    $1ED168  12.6 KB  a pointer and a Kickstart ROM address ($00FA8C60)
+    $1F1400   5.6 KB  counters
+    $1F2C68   6.6 KB  counters
+    $1FDBB8   1.1 KB  mostly zero  -- WinUAE has ONE 11.4 KB block spanning
+    $1FE400   7.0 KB  dense data      exactly this range, with no hole
+
+Even at the very top, where WinUAE makes a single allocation, we make two with a
+gap between. The fragmentation is systematic, not one bad block.
+
+**Moving just the 28.0 KB block would be enough**: the free region would then
+reach `$1ED168`, which is 1782.8 KB.
+
+## Why this needs a different instrument
+
+None of those blocks carry names, and the peek window can only READ memory -- it
+cannot trap a call. Attributing them needs a breakpoint on AllocMem with a call
+stack, which the WinUAE GDB harness can do for the REFERENCE machine and which
+has no equivalent on the MiSTer.
+
+So the next step is not more of the same measurement. It is either:
+
+- **find which blocks are OURS.** The 1.1 KB is plausibly the CD32 NVRAM and the
+  7.0 KB sits where Akiko's buffers would. Both are sized by our code, so we
+  control them.
+- **or chase the media churn.** The akiko log shows media-present/absent
+  transitions during boot. Each one makes the guest tear down and rebuild its CD
+  structures, and that churn is a plausible source of the holes.
