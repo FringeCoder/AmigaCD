@@ -267,3 +267,38 @@ RAM, fast RAM, CPU, and whether the game has loaded on both sides.
   That change is worth 21.6 KB of the total on its own.
 - **Chip RAM size, the CHD TOC, CD read failures, media churn.** All measured
   and all fine.
+
+---
+
+# CD32+ trades memory for its expansions, and cannot run the hungriest titles
+
+Measured after the fix, all on 2 MB chip with no fast RAM:
+
+| machine                          | largest block |
+|----------------------------------|---------------|
+| stock CD32                       | **1774.8 KB** (Flink runs) |
+| CD32+ with a hard disk           | 1672.3 KB     |
+| CD32+ with no hard disk          | 1684.0 KB     |
+| Flink needs                      | 1774.8 KB     |
+
+**CD32+ enables IDE only when a hard disk is actually configured**, which is
+worth 11.7 KB. That was expected to be nearer 52 KB, so most of what was
+attributed to Gayle is something else.
+
+The remaining ~91 KB is very likely the FLOPPY DRIVES. CD32+ has two by
+definition and a stock CD32 has none; one drive's trackdisk buffers measured at
+26.4 KB, so two is about 53 KB, which is the bulk of it. The rest is the usual
+packing difference.
+
+**This is not a defect and should not be chased.** CD32+ exists to have floppy
+drives and a hard disk, and those cost contiguous chip RAM -- the same trade a
+real SX-32 owner made. Making it drop them to gain memory would turn it back
+into a stock CD32.
+
+So: **demanding titles run on stock CD32; CD32+ is for when you want the
+drives.** Fast RAM also works on either.
+
+The attach path was tested on hardware: mounting an AmigaVision HDF on CD32+
+brings IDE back up and the machine boots from it. MENU_AMIGACD_HDFFILE_SELECTED
+already sets ide_cfg and hardfile[n].cfg together, and the IDE bit is computed
+at send time from the hardfile state so the two cannot drift apart.

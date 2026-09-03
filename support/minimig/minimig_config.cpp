@@ -768,7 +768,32 @@ static void ApplyConfiguration(char reloadkickstart)
 	// amigacd_cd_needs_ide().
 	const int cd_on_ide = !is_amigacd() || amigacd_cd_needs_ide();
 
-	spi_uio_cmd8(UIO_MM2_HDD, (minimig_config.ide_cfg & 0x21) |
+	// CD32+ pays for Gayle in contiguous chip RAM: measured at ~52 KB, which is
+	// the difference between Flink running and not on a 2 MB machine. It is a
+	// fair price for hard disks and a pointless one without them, so the
+	// controller only comes up when a drive is actually configured.
+	//
+	// Computed here rather than stored, so it cannot drift from the hardfile
+	// state. Attaching a drive already sets ide_cfg and hardfile[n].cfg
+	// together (MENU_AMIGACD_HDFFILE_SELECTED), so the bit comes back on the
+	// next reset -- which a hard disk needs anyway, on this machine as on a
+	// real one.
+	//
+	// Deliberately narrow: only CD32+. A stock CD32 already has no IDE, and
+	// A1200 and CDTV keep exactly the behaviour they have today. The physical
+	// disc exception applies here too, since that reaches its drive over IDE.
+	unsigned char ide_bits = minimig_config.ide_cfg;
+	if (is_amigacd()
+	    && amigacd_system() == AMIGACD_SYS_CD32PLUS
+	    && !amigacd_cd_needs_ide()
+	    && !minimig_config.hardfile[1].cfg
+	    && !minimig_config.hardfile[2].cfg
+	    && !minimig_config.hardfile[3].cfg)
+	{
+		ide_bits &= (unsigned char)~0x01;
+	}
+
+	spi_uio_cmd8(UIO_MM2_HDD, (ide_bits & 0x21) |
 		((cd_on_ide && hdd_open(0)) ? 2 : 0) |
 		((hdd_ok && hdd_open(1)) ? 4 : 0) |
 		((hdd_ok && hdd_open(2)) ? 8 : 0) |
