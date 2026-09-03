@@ -2490,7 +2490,18 @@ static inline bool cd32_active(void)
 
 void akiko_cd32_poll(void)
 {
-	const bool mounted = cd32_active() && cd_is_mounted();
+	// Hold the disc genuinely ABSENT until the boot settle expires, not merely
+	// unannounced. Delaying only the unsolicited push was not enough: the guest
+	// also QUERIES media status, cd_media_present() kept answering "present",
+	// and from the ROM's point of view the disc was there from power-on -- the
+	// animation never appeared. Measured on hardware: the push was held for
+	// 2.45 s and nothing else changed.
+	//
+	// Reporting absent here is what a real late insertion looks like, which is
+	// the sequence that produces a 1774.8 KB contiguous block when a disc is
+	// selected by hand.
+	const bool boot_held = cd_boot_ready_ms && !CheckTimer(cd_boot_ready_ms);
+	const bool mounted = cd32_active() && cd_is_mounted() && !boot_held;
 	const cd_media_level_t level = mounted ? CD_MEDIA_PRESENT : CD_MEDIA_ABSENT;
 
 	if (level != cd_media_level || cd_media_event) {
