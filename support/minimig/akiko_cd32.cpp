@@ -1001,6 +1001,32 @@ static void cmd_pause(const uint8_t *cmd)
 	// 57+ seconds until BIOS times out, by which time the boot has hung.
 	toc_push_idx     = -1;
 	toc_push_last_ms = 0;
+	// WinUAE cdrom_command_pause (akiko.cpp:1011) clears cdrom_audiotimeout
+	// unconditionally as the first act of PAUSE. We deliberately do NOT copy
+	// that verbatim: our cd_audio_timeout carries semantics WinUAE's field
+	// does not. WinUAE's cdrom_audiotimeout only ever holds a positive
+	// "play started" countdown, so an unconditional clear is harmless there.
+	// Ours also uses negative values (-1/-2/-3) to encode a pending, not-yet-
+	// emitted "play ended / play failed" async frame (see the state machine
+	// in the poll loop and the arm sites in cmd_multi / akiko_cdda_pump).
+	// Clearing those on PAUSE would swallow an end-of-play notification BIOS
+	// is waiting on. So we mirror cmd_stop's rule: drop only a pending
+	// positive "play started" ack (you paused — you do not want a delayed
+	// "now playing" frame) and let a negative end-of-play emission survive.
+	if (cd_audio_timeout > 0) cd_audio_timeout = 0;
+	// WinUAE early-outs with `if (cdrom_paused) return 2;` (akiko.cpp:1017)
+	// before setting cdrom_paused = 1, so a PAUSE arriving while already
+	// paused changes no state — it still returns the status frame but does
+	// not re-arm anything. Match that: a redundant PAUSE is idempotent. The
+	// TOC-drip teardown and the positive-ack clear above still run first,
+	// exactly as WinUAE runs its cdrom_toc_counter / cdrom_audiotimeout
+	// writes ahead of its early-out.
+	if (cd_paused) {
+		akiko_send_response(r, 2);
+		akiko_dbg("PAUSE (already paused; playing=%d, present=%d)\n",
+		          cd_playing, cd_media_present());
+		return;
+	}
 	cd_paused = 1;
 	akiko_send_response(r, 2);
 	akiko_dbg("PAUSE (playing=%d, present=%d)\n", cd_playing, cd_media_present());
