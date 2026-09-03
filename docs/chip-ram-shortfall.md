@@ -235,6 +235,28 @@ hold and nothing else changed: the guest also QUERIES media status, and
 cd_media_present() went on answering "present" throughout, so the ROM never saw
 an empty drive. The machine has to genuinely report absent for the window.
 
+## Method note: the reference has to match the machine
+
+**Every WinUAE measurement taken during this investigation used
+`boot_rom_uae=none`**, copied from the mcp-winuae-emu launcher without thinking
+about it, while our machine has an injected boot ROM. Enabling it in WinUAE adds
+an **81.6 KB block at $10000** and moves the game's allocation down to $255D0.
+
+So for most of a day the reference was ~81.6 KB leaner than the machine it was
+being compared against, and every intermediate conclusion of the form "we carry
+an allocation WinUAE does not" was measured against a machine that was not
+comparable. Two blocks were about to be chased on that basis.
+
+A second trap of the same kind: two blocks (6.4 KB at $22BE8, 40.5 KB at $25670)
+looked like ours alone, but they were high-entropy data in OUR FAILED state
+compared against WinUAE's SUCCESSFUL one -- almost certainly Flink's own
+allocations, made before the one that failed. **Comparing a failed load against
+a successful one attributes the game's memory to the machine.**
+
+Before believing any figure from `scripts/winuae-ref.py`, check that the
+reference config matches the machine in the ways that allocate: boot ROM, chip
+RAM, fast RAM, CPU, and whether the game has loaded on both sides.
+
 ## What did not matter, so nobody re-tests it
 
 - **The floppy drive.** Real, 26.4 KB, not the cause. Removing it was right
