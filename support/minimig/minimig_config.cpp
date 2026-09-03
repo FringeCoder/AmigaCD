@@ -723,8 +723,22 @@ static void ApplyConfiguration(char reloadkickstart)
 	// alone would leave a hardfile from an earlier profile mounted and still
 	// visible to the guest.
 	const int hdd_ok = !is_amigacd() || amigacd_profile_has_hdd(amigacd_system());
+
+	// DIAGNOSTIC BUILD ONLY -- DO NOT MERGE.
+	//
+	// IDE stays ENABLED (ide_cfg is untouched), but the disc is no longer
+	// mounted as an IDE unit on a stock CD32. Akiko keeps its own mount via
+	// minimig_cd_drive_open() below, and the akiko log shows it serving sector
+	// reads already (prefetch hits/misses), so if the CD still works then the
+	// IDE CD unit is redundant and removable.
+	//
+	// The short-circuit matters: when this is false, hdd_open(0) -- and so
+	// ide_open() -- is never called, so the image is not opened on the IDE side
+	// at all. See docs/chip-ram-shortfall.md.
+	const int cd_on_ide = !is_amigacd()
+	                    || amigacd_system() != AMIGACD_SYS_CD32;
 	spi_uio_cmd8(UIO_MM2_HDD, (minimig_config.ide_cfg & 0x21) |
-		(hdd_open(0) ? 2 : 0) |
+		((cd_on_ide && hdd_open(0)) ? 2 : 0) |
 		((hdd_ok && hdd_open(1)) ? 4 : 0) |
 		((hdd_ok && hdd_open(2)) ? 8 : 0) |
 		((hdd_ok && hdd_open(3)) ? 16 : 0));
