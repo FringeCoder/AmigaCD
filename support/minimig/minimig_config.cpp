@@ -717,11 +717,17 @@ static void ApplyConfiguration(char reloadkickstart)
 
 	rstval = SPI_CPU_HLT;
 	spi_uio_cmd8(UIO_MM2_RST, rstval);
+	// Unit 0 is the CD slot and is always offered. Units 1..3 are hard disks,
+	// and a stock CD32 has none. This is what "no hard disk support" means now
+	// that ide_cfg has to stay set for the CD to work: greying the OSD rows
+	// alone would leave a hardfile from an earlier profile mounted and still
+	// visible to the guest.
+	const int hdd_ok = !is_amigacd() || amigacd_profile_has_hdd(amigacd_system());
 	spi_uio_cmd8(UIO_MM2_HDD, (minimig_config.ide_cfg & 0x21) |
 		(hdd_open(0) ? 2 : 0) |
-		(hdd_open(1) ? 4 : 0) |
-		(hdd_open(2) ? 8 : 0) |
-		(hdd_open(3) ? 16 : 0));
+		((hdd_ok && hdd_open(1)) ? 4 : 0) |
+		((hdd_ok && hdd_open(2)) ? 8 : 0) |
+		((hdd_ok && hdd_open(3)) ? 16 : 0));
 
 	minimig_cd_drive_open(0, minimig_config.cd32_drive.cfg ? minimig_config.cd32_drive.filename : "");
 	minimig_cd_drive_open(1, minimig_config.cdtv_drive.cfg ? minimig_config.cdtv_drive.filename : "");
@@ -1333,33 +1339,47 @@ int amigacd_apply_system(int sys)
 		// in CPU, chipset and chip RAM, because that is what those cartridges
 		// left alone.
 		//
-		// ide_cfg bit 0 is also what tells this machine from a stock CD32 when
-		// a config is read back: see amigacd_system(). The two agree on every
-		// other bit, exactly as A1200 and CD32 do.
+		// Both CD32s run with IDE enabled, so the marker is a spare persisted
+		// byte instead -- see AMIGACD_HF0_CD32PLUS. It is set below, after
+		// hardfile[0] is configured, so that assignment cannot clear it.
 		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF, as the CD32
 		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
 		minimig_config.memory  = 0x03; // 2M chip, no fast
-		minimig_config.ide_cfg = 0x01; // IDE, which the stock machine has not
+		minimig_config.ide_cfg = 0x01; // as the stock machine; the CD needs it
 	}
 	else
 	{
-		// A stock CD32: no floppy drive and NO IDE. It had neither, and giving
-		// it both was not free -- Kickstart probed the phantom drive and spent
-		// chip RAM on a trackdisk buffer for it, out of the 2 MB that titles
-		// like Flink want nearly all of.
+		// A stock CD32: no floppy drive, and no hard disks offered.
 		//
-		// Losing IDE does not cost the CD drive. Akiko is decoded separately;
-		// ide_ena gates only the IDE and Gayle registers at $DA0000 and
-		// $DE1000 (fastchip.v), which a real CD32 does not answer either. Pick
-		// CD32PLUS to get them back.
+		// IDE STAYS ENABLED, and the comment that used to sit here was wrong.
+		// It argued that clearing ide_cfg was safe because Akiko is decoded
+		// separately -- sel_akiko in fastchip.v really is independent of
+		// ide_ena, so that half was correct and irrelevant. The CD32's disc
+		// also travels the USERSPACE IDE path: hardfile[0] holds the same
+		// image and ide_open runs against it on every config apply. Clearing
+		// the bit left the drive present at mount and gone seconds later, when
+		// the machine reset to boot it. Measured on hardware -- the CHD
+		// mounted, its 19-track TOC built, then "media level -> absent".
+		//
+		// So a stock CD32 is not authentic in this one respect, and cannot be
+		// until the CD is served without the IDE path. What it does not get is
+		// any hard disk: amigacd_profile_has_hdd() keeps units 1..3 unopened
+		// and their OSD rows greyed, which is the part that was asked for.
 		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF (authentic CD32 default)
 		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
 		minimig_config.memory  = 0x03; // 2M chip, no fast (authentic CD32 default)
-		minimig_config.ide_cfg = 0x00; // no IDE -- a stock CD32 has none
+		minimig_config.ide_cfg = 0x01; // REQUIRED: the CD32's own CD needs it
 	}
 	// One removable CD slot on every machine that has a CD drive. The A1200
 	// has none -- see above.
 	minimig_config.hardfile[0].cfg = (sys == AMIGACD_SYS_A1200) ? 0 : 2;
+
+	// After the line above, which writes the same struct. This is what tells a
+	// CD32+ from a stock CD32 on the next config load.
+	if (sys == AMIGACD_SYS_CD32PLUS)
+		minimig_config.hardfile[0].reserved |= AMIGACD_HF0_CD32PLUS;
+	else
+		minimig_config.hardfile[0].reserved &= (unsigned char)~AMIGACD_HF0_CD32PLUS;
 
 	// Upstream's dedicated drive slots have to agree with the profile:
 	// minimig_ConfigChipset() derives CONFIG_CDTV from cdtv_drive.cfg and
@@ -1408,19 +1428,17 @@ int amigacd_system(void)
 	// disc: 2 means "there is a removable CD device", 0 means there is not.
 	if (minimig_config.hardfile[0].cfg == 0)  return AMIGACD_SYS_A1200;
 
-	// Stock CD32 and CD32+ agree on CPU, chipset and chip RAM, so IDE is what
-	// separates them -- a stock CD32 has none, and that is the whole of the
-	// difference the core sees.
+	// Stock CD32 and CD32+ agree on CPU, chipset, chip RAM and now IDE as well,
+	// so the marker is an explicit bit in a spare persisted byte. IDE was tried
+	// first and had to be abandoned: clearing it for the stock machine took
+	// that machine's own CD away, on hardware.
 	//
-	// MIGRATION, worth knowing about: every CD32 config written before this
-	// change carries ide_cfg = 0x01, because the old CD32 profile set it. So
-	// an existing CD32 config now reads back as CD32+. That is deliberate and
-	// it is the safe direction: CD32+ behaves exactly as CD32 did before, so
-	// nothing a user had stops working, and the System row shows the new name
-	// rather than changing behaviour silently. Selecting CD32 gets the
-	// authentic machine.
-	return (minimig_config.ide_cfg & 0x01) ? AMIGACD_SYS_CD32PLUS
-	                                       : AMIGACD_SYS_CD32;
+	// A config written before this bit existed reads 0 and is therefore a stock
+	// CD32, so anyone with hard disks configured picks CD32+ once to get them
+	// back. That is the safe direction now: a visibly missing drive beats a
+	// machine that quietly is not the one the System row names.
+	return (minimig_config.hardfile[0].reserved & AMIGACD_HF0_CD32PLUS)
+	         ? AMIGACD_SYS_CD32PLUS : AMIGACD_SYS_CD32;
 }
 
 static char minimig_adjust = 0;
