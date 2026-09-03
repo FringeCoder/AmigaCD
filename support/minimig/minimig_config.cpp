@@ -723,8 +723,15 @@ static void ApplyConfiguration(char reloadkickstart)
 	// alone would leave a hardfile from an earlier profile mounted and still
 	// visible to the guest.
 	const int hdd_ok = !is_amigacd() || amigacd_profile_has_hdd(amigacd_system());
+
+	// DIAGNOSTIC BUILD ONLY -- DO NOT MERGE.
+	// The disc is not mounted as an IDE unit on a stock CD32; Akiko serves it.
+	// Proven on hardware: with this alone the CD loads and the game runs.
+	// Short-circuit matters -- ide_open() is never called for it.
+	const int cd_on_ide = !is_amigacd()
+	                    || amigacd_system() != AMIGACD_SYS_CD32;
 	spi_uio_cmd8(UIO_MM2_HDD, (minimig_config.ide_cfg & 0x21) |
-		(hdd_open(0) ? 2 : 0) |
+		((cd_on_ide && hdd_open(0)) ? 2 : 0) |
 		((hdd_ok && hdd_open(1)) ? 4 : 0) |
 		((hdd_ok && hdd_open(2)) ? 8 : 0) |
 		((hdd_ok && hdd_open(3)) ? 16 : 0));
@@ -1368,7 +1375,12 @@ int amigacd_apply_system(int sys)
 		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF (authentic CD32 default)
 		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
 		minimig_config.memory  = 0x03; // 2M chip, no fast (authentic CD32 default)
-		minimig_config.ide_cfg = 0x01; // REQUIRED: the CD32's own CD needs it
+		// DIAGNOSTIC BUILD ONLY -- DO NOT MERGE.
+		// No IDE at all, which is what a real CD32 is. This failed before
+		// ONLY because the disc's sole mount was the IDE unit; with the
+		// disc on Akiko (above) the CD should survive losing IDE, and
+		// this is the configuration that freed 190 KB.
+		minimig_config.ide_cfg = 0x00; // DIAGNOSTIC: was 0x01
 	}
 	// One removable CD slot on every machine that has a CD drive. The A1200
 	// has none -- see above.
