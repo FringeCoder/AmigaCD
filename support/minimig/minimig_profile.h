@@ -20,15 +20,21 @@
 // derived from the saved chipset/cpu bits by amigacd_system() -- so the order
 // here is free to change.
 enum {
-	AMIGACD_SYS_CD32  = 0,
-	AMIGACD_SYS_CDTV  = 1,
-	AMIGACD_SYS_A500  = 2,
-	AMIGACD_SYS_A1200 = 3,
+	AMIGACD_SYS_CD32     = 0,
+	AMIGACD_SYS_CDTV     = 1,
+	AMIGACD_SYS_A500     = 2,
+	AMIGACD_SYS_A1200    = 3,
+	// An expanded CD32: the machine plus the things people actually bolted on
+	// to it. Same CPU, chipset and 2 MB chip as a stock CD32, plus two floppy
+	// drives and the IDE the SX-1 and SX-32 expansions carried. It exists so
+	// that AMIGACD_SYS_CD32 can be authentic -- a stock CD32 has no floppy
+	// drive and no IDE, and giving it both cost chip RAM that titles wanted.
+	AMIGACD_SYS_CD32PLUS = 4,
 };
 
 // How many machines the System row cycles through. Here rather than at the
 // menu, so adding one is a single edit.
-#define AMIGACD_SYS_COUNT 4
+#define AMIGACD_SYS_COUNT 5
 
 // The machine's display name, and the config-file suffix that goes with it.
 //
@@ -95,5 +101,39 @@ uint8_t amigacd_profile_floppy_drives(int sys);
 // an OSD row, so it comes back untouched -- forcing it here would undo the
 // user's choice every time the config was read.
 uint8_t amigacd_profile_floppy_drives_onload(uint8_t drives, int sys);
+
+// Whether the machine has NO floppy drive at all. CD32 and CDTV have none; the
+// function above clamps them to one because that was the fewest the hardware
+// could express, and this is what finally expresses zero.
+//
+// DERIVED, never stored. It is a fact about the machine with no OSD row and no
+// user control, so it is computed from the system on every send rather than
+// kept in the config -- which is precisely the failure mode the drive count
+// hit, where a value written into a config file outlived the fix that changed
+// it. Nothing to migrate and nothing to correct on load.
+//
+// What it costs to get wrong: Kickstart probes the drives it is offered and
+// trackdisk.device allocates an MFM track buffer per unit it opens. Floppy DMA
+// reaches only chip RAM, so each phantom drive spends roughly 19 KB of the 2 MB
+// a CD32 has.
+uint8_t amigacd_profile_floppy_none(int sys);
+
+// Whether the machine has a hard disk interface at all.
+//
+// A stock CD32 has none: Akiko gives it a CD drive, and the IDE and Gayle
+// register decodes at $DA0000 and $DE1000 belong to hardware it never shipped
+// with. Offering hard disk rows for it is offering something that cannot work,
+// since the same bit that enables those decodes is what carries the drives to
+// the core -- so the rows are greyed rather than quietly doing nothing.
+//
+// CD32PLUS is the machine to pick when you want them, which is the whole
+// reason it exists.
+//
+// DERIVED like the no-drive flag, not stored. Deliberately narrow: it returns
+// 0 only for a stock CD32, so no other machine's behaviour moves as a side
+// effect of this. CDTV and A500 both run with IDE disabled today and still
+// show the rows, which is the same defect one machine over -- left alone here
+// rather than changed unasked.
+uint8_t amigacd_profile_has_hdd(int sys);
 
 #endif

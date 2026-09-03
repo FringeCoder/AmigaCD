@@ -1326,12 +1326,36 @@ int amigacd_apply_system(int sys)
 		minimig_config.memory  = 0x33; // 2M chip + 8M Zorro II fast
 		minimig_config.ide_cfg = 0x01; // Gayle IDE
 	}
+	else if (sys == AMIGACD_SYS_CD32PLUS)
+	{
+		// A CD32 with the expansions people actually fitted -- an SX-1 or an
+		// SX-32 brought a floppy drive and IDE. Identical to the stock machine
+		// in CPU, chipset and chip RAM, because that is what those cartridges
+		// left alone.
+		//
+		// ide_cfg bit 0 is also what tells this machine from a stock CD32 when
+		// a config is read back: see amigacd_system(). The two agree on every
+		// other bit, exactly as A1200 and CD32 do.
+		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF, as the CD32
+		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
+		minimig_config.memory  = 0x03; // 2M chip, no fast
+		minimig_config.ide_cfg = 0x01; // IDE, which the stock machine has not
+	}
 	else
 	{
+		// A stock CD32: no floppy drive and NO IDE. It had neither, and giving
+		// it both was not free -- Kickstart probed the phantom drive and spent
+		// chip RAM on a trackdisk buffer for it, out of the 2 MB that titles
+		// like Flink want nearly all of.
+		//
+		// Losing IDE does not cost the CD drive. Akiko is decoded separately;
+		// ide_ena gates only the IDE and Gayle registers at $DA0000 and
+		// $DE1000 (fastchip.v), which a real CD32 does not answer either. Pick
+		// CD32PLUS to get them back.
 		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF (authentic CD32 default)
 		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
 		minimig_config.memory  = 0x03; // 2M chip, no fast (authentic CD32 default)
-		minimig_config.ide_cfg = 0x01; // akiko / IDE
+		minimig_config.ide_cfg = 0x00; // no IDE -- a stock CD32 has none
 	}
 	// One removable CD slot on every machine that has a CD drive. The A1200
 	// has none -- see above.
@@ -1342,7 +1366,8 @@ int amigacd_apply_system(int sys)
 	// clears the bit when that slot is empty, so setting minimig_config.chipset
 	// above is not on its own enough to bring the core up as a CDTV.
 	minimig_config.cdtv_drive.cfg = (sys == AMIGACD_SYS_CDTV) ? 1 : 0;
-	minimig_config.cd32_drive.cfg = (sys == AMIGACD_SYS_CD32) ? 1 : 0;
+	minimig_config.cd32_drive.cfg =
+		(sys == AMIGACD_SYS_CD32 || sys == AMIGACD_SYS_CD32PLUS) ? 1 : 0;
 
 	// Floppy drive count is a machine property, so it comes from the profile.
 	// This used to read
@@ -1382,7 +1407,20 @@ int amigacd_system(void)
 	// the user happens to have mounted. hardfile[0].cfg is the slot, not the
 	// disc: 2 means "there is a removable CD device", 0 means there is not.
 	if (minimig_config.hardfile[0].cfg == 0)  return AMIGACD_SYS_A1200;
-	return AMIGACD_SYS_CD32;
+
+	// Stock CD32 and CD32+ agree on CPU, chipset and chip RAM, so IDE is what
+	// separates them -- a stock CD32 has none, and that is the whole of the
+	// difference the core sees.
+	//
+	// MIGRATION, worth knowing about: every CD32 config written before this
+	// change carries ide_cfg = 0x01, because the old CD32 profile set it. So
+	// an existing CD32 config now reads back as CD32+. That is deliberate and
+	// it is the safe direction: CD32+ behaves exactly as CD32 did before, so
+	// nothing a user had stops working, and the System row shows the new name
+	// rather than changing behaviour silently. Selecting CD32 gets the
+	// authentic machine.
+	return (minimig_config.ide_cfg & 0x01) ? AMIGACD_SYS_CD32PLUS
+	                                       : AMIGACD_SYS_CD32;
 }
 
 static char minimig_adjust = 0;
@@ -1569,7 +1607,17 @@ void minimig_ConfigChipset(mm_configTYPE *config)
 
 void minimig_ConfigFloppy(unsigned char drives, unsigned char speed)
 {
-	spi_uio_cmd8(UIO_MM2_FLP, ((drives & 0x03) << 2) | (speed & 0x03));
+	// Bit 4 says the machine has NO floppy drive at all, which the drive count
+	// cannot say: it is a count minus one on both sides of the link, so 0
+	// already means one drive.
+	//
+	// Derived here rather than passed in, so every existing call site gets it
+	// and none of them can forget. It is a fact about the machine, so there is
+	// nothing to store, migrate or correct on load -- unlike the drive count,
+	// where a stored value outlived the fix that was supposed to change it.
+	unsigned char none = (is_amigacd() && amigacd_profile_floppy_none(amigacd_system()))
+	                   ? 0x10 : 0x00;
+	spi_uio_cmd8(UIO_MM2_FLP, none | ((drives & 0x03) << 2) | (speed & 0x03));
 }
 
 // External-drive assignment, 3 bits per unit, split across two commands because
