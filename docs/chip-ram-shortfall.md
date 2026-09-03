@@ -1,7 +1,7 @@
 # The CD32 is ~72 KB short of contiguous chip RAM
 
 **Date:** 2026-09-03
-**Status:** partly fixed. 21.6 KB recovered, ~50 KB still missing.
+**Status:** SOLVED 2026-09-03. Flink runs on a stock CD32, 2 MB chip, no fast RAM.
 **Updated:** 2026-09-03, after the no-IDE change landed.
 **Occasion:** Flink refuses to start on a stock CD32 profile (2 MB chip, no fast
 RAM). WinUAE runs the same CHD on the same ROMs in the same configuration.
@@ -181,3 +181,67 @@ So the next step is not more of the same measurement. It is either:
 - **or chase the media churn.** The akiko log shows media-present/absent
   transitions during boot. Each one makes the guest tear down and rebuild its CD
   structures, and that churn is a plausible source of the holes.
+
+---
+
+# SOLVED: the disc was arriving before the ROM was ready
+
+Flink now runs on a stock CD32 with 2 MB chip and no fast RAM. Measured from a
+COLD boot with the disc pre-selected:
+
+    USED $00030898 - $001EC3D0   1774.8 KB   <- Flink, the exact target
+    free $001EC3D0 - $001EFD70      14.4 KB
+    USED $001EFD70 - $001FD280      53.3 KB   } identical to WinUAE,
+    USED $001FD288 - $00200000      11.4 KB   } to the byte
+
+## What it was
+
+Not consumption. Against a fair reference our machine used 666.4 KB against
+665.8 KB at the same point -- 0.6 KB apart. What differed was WHEN the disc
+appeared.
+
+We announced media at t=0, with the disc already mounted before the CD32 ROM had
+finished coming up. Real hardware cannot do that: a CD32 spins up and reads its
+TOC while the ROM is already running, and WinUAE behaves the same way -- the
+animation shows briefly before the disc mounts. Announcing at t=0 made the ROM
+allocate its CD structures in a different order, which fragmented the region and
+cost about 50 KB of contiguity.
+
+The fix holds the first media-present announcement for 8000 ms at cold boot.
+Only the cold boot: akiko_cd32_init() runs from BootInit, not on a disc change,
+so an OSD disc swap keeps its existing 700 ms settle.
+
+## The value, and its margin
+
+8000 ms is measured -- 6000 FAILS and 8000 works on this machine -- so the true
+threshold is between them and the margin is about two seconds. That is thinner
+than it looks. A slower disc, another Kickstart, or a busier card could push the
+boot past it, and the symptom would be an intermittent out-of-memory
+indistinguishable from a game bug. **If that is ever reported, raise this
+first.** Overridable at runtime: write milliseconds into /tmp/akiko_boot_delay
+and reload the core, no rebuild.
+
+## Two mistakes worth keeping
+
+**The false positive that was not one.** Selecting the disc BY HAND after the
+animation produced a perfect 1774.8 KB layout and the game ran, hours before the
+cause was found. It was recorded as a false positive because it could not be
+reproduced from a cold boot -- but "cannot reproduce from a cold boot" WAS the
+bug, not evidence against the result. The answer was measured and filed as noise.
+
+**Delaying the announcement is not the same as having no disc.** The first
+attempt held only the unsolicited media-status push. The log confirmed a 2.45 s
+hold and nothing else changed: the guest also QUERIES media status, and
+cd_media_present() went on answering "present" throughout, so the ROM never saw
+an empty drive. The machine has to genuinely report absent for the window.
+
+## What did not matter, so nobody re-tests it
+
+- **The floppy drive.** Real, 26.4 KB, not the cause. Removing it was right
+  anyway: a CD32 has no floppy drive.
+- **The IDE unit.** Dropping its mount left the map BYTE-IDENTICAL. It cost
+  nothing -- but it had to go first, because it was the dependency keeping Gayle
+  switched on, and turning Gayle off is what let the low region pack properly.
+  That change is worth 21.6 KB of the total on its own.
+- **Chip RAM size, the CHD TOC, CD read failures, media churn.** All measured
+  and all fine.

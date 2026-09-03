@@ -185,6 +185,8 @@ static const int command_lengths[16] = {
 //   1 = we sent the {0x0a, present} media-status response.
 //   2 = host sent INFO (0x07); fully initialised.
 static uint8_t  cd_initialized      = 0;
+static uint32_t cd_boot_ready_ms    = 0;   // 0 = no hold pending
+static uint32_t cd_boot_settle_ms   = 0;
 static uint8_t  cd_paused           = 0;
 static uint8_t  cd_playing          = 0;       // unused in M3, set by 0x04 (audio)
 static uint8_t  cd_led_state        = 0;
@@ -330,6 +332,44 @@ static uint32_t cd_media_swap_ready_ms = 0;
 // reach CDFileSystem before the arrival lands or the two collapse back into
 // no change at all.
 #define AKIKO_SWAP_SETTLE_MS 700
+
+// Hold the FIRST media-present announcement after a cold boot, so the CD32 ROM
+// comes up and reaches its animation before the disc appears.
+//
+// WHY. A CD32 title that wants most of chip RAM in one allocation would fail:
+// Flink asks for a single contiguous 1774.8 KB block and got 1724.8 KB. It was
+// never a consumption problem -- measured against a fair reference (WinUAE with
+// its boot ROM enabled, as ours has) we used 666.4 KB against 665.8 KB at the
+// same point, a 0.6 KB difference. What differed was how the guest PACKED
+// identical demand, and the one input to that we control is WHEN the disc shows
+// up.
+//
+// Presenting a disc that is already there at power-on is not what the hardware
+// does. A real CD32 spins up and reads the TOC while the ROM is already
+// running, and WinUAE behaves the same way -- the animation shows briefly
+// before the disc mounts. Announcing at t=0 made the ROM allocate its CD
+// structures in a different order and fragment the region.
+//
+// The tell was on hardware the whole time: selecting the SAME disc by hand
+// after the animation always worked, and a cold boot with it pre-selected never
+// did. That was recorded as a false positive early on -- wrongly, because
+// "cannot reproduce from a cold boot" WAS the bug rather than evidence against
+// it.
+//
+// THE VALUE. 8000 ms is measured, not chosen: 6000 fails and 8000 works on this
+// machine, so the real threshold is between them and the margin here is about
+// two seconds. That is thinner than it looks -- a slower disc, another
+// Kickstart, or a busier card could push the boot past it, and the symptom
+// would be an intermittent out-of-memory indistinguishable from a game bug.
+// If that is ever reported, RAISE THIS FIRST.
+//
+// The value is the user's, from "CD Mount Delay" on the Advanced page, and 0
+// there restores the old immediate announce -- which is what makes this cheap
+// to falsify if a title ever behaves oddly because of it.
+//
+// Only the cold boot is delayed. akiko_cd32_init() runs from BootInit
+// (minimig_boot.cpp), not on a disc change, so swapping a disc from the OSD
+// keeps the existing 700 ms swap settle and does not wait eight seconds.
 
 // TOC streaming state. After cmd_info completes we proactively push TOC
 // entries (cmd 0x06 / cdrom_return_toc_entry) one per poll until the BIOS
@@ -2356,8 +2396,21 @@ void akiko_cd32_set_cd_path(const char *path)
 	           path, cd_save_path_active);
 }
 
+// Milliseconds to hold the first media announcement, from the user's setting on
+// the Advanced page. 0 means no hold, which restores the immediate announce.
+static uint32_t akiko_boot_settle_ms(void)
+{
+	unsigned d = minimig_config.cd_mount_delay;
+	if (d > AMIGACD_CD_DELAY_MAX) d = AMIGACD_CD_DELAY_DEFAULT;   // corrupt config
+	return (uint32_t)d * 1000u;
+}
+
 void akiko_cd32_init(void)
 {
+	cd_boot_settle_ms = akiko_boot_settle_ms();
+	cd_boot_ready_ms  = cd_boot_settle_ms ? (uint32_t)GetTimer(cd_boot_settle_ms) : 0;
+	akiko_diag("[akiko] boot settle: holding first media announce %u ms",
+	           cd_boot_settle_ms);
 	cd_initialized   = 0;
 	cd_paused        = 0;
 	cd_playing       = 0;
@@ -2450,7 +2503,18 @@ static inline bool cd32_active(void)
 
 void akiko_cd32_poll(void)
 {
-	const bool mounted = cd32_active() && cd_is_mounted();
+	// Hold the disc genuinely ABSENT until the boot settle expires, not merely
+	// unannounced. Delaying only the unsolicited push was not enough: the guest
+	// also QUERIES media status, cd_media_present() kept answering "present",
+	// and from the ROM's point of view the disc was there from power-on -- the
+	// animation never appeared. Measured on hardware: the push was held for
+	// 2.45 s and nothing else changed.
+	//
+	// Reporting absent here is what a real late insertion looks like, which is
+	// the sequence that produces a 1774.8 KB contiguous block when a disc is
+	// selected by hand.
+	const bool boot_held = cd_boot_ready_ms && !CheckTimer(cd_boot_ready_ms);
+	const bool mounted = cd32_active() && cd_is_mounted() && !boot_held;
 	const cd_media_level_t level = mounted ? CD_MEDIA_PRESENT : CD_MEDIA_ABSENT;
 
 	if (level != cd_media_level || cd_media_event) {
@@ -2553,6 +2617,12 @@ void akiko_cd32_poll(void)
 
 	if (cd_initialized == 0 && rx_idle) {
 		if (cd_media_present()) {
+			// Hold the arrival until the settle expires, so the ROM boots into
+			// its animation first and allocates in the order it does when a
+			// disc is inserted afterwards. Returning WITHOUT setting
+			// cd_initialized keeps this branch live for the next poll.
+			if (cd_boot_ready_ms && !CheckTimer(cd_boot_ready_ms)) return;
+			cd_boot_ready_ms = 0;
 			uint8_t r[2];
 			r[0] = 0x0a;
 			r[1] = 0x01;

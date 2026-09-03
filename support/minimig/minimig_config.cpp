@@ -135,6 +135,35 @@ typedef struct
 	unsigned char    ss_slot;
 } mm_configTYPE_NoCdSlots;
 
+// The layout as it was before the CD mount delay was appended: everything
+// through a2065_mode. Every config written before 2026-09-03 is this shape.
+typedef struct
+{
+	char             id[8];
+	unsigned short   version;
+	unsigned short   ext_cfg2;
+	char             kickstart[992];
+	char             label[32];
+	unsigned short   ext_cfg;
+	unsigned char    memory;
+	unsigned char    chipset;
+	mm_floppyTYPE    floppy;
+	unsigned char    disable_ar3;
+	unsigned char    ide_cfg;
+	unsigned char    scanlines;
+	unsigned char    audio;
+	mm_hardfileTYPE  hardfile[4];
+	unsigned char    cpu;
+	unsigned char    autofire;
+	char             info[64];
+	mm_userportMode  userport;
+	unsigned char    snac[2];
+	unsigned char    ss_slot;
+	mm_hardfileTYPE  cd32_drive;
+	mm_hardfileTYPE  cdtv_drive;
+	uint8_t          a2065_mode;
+} mm_configTYPE_NoCdDelay;
+
 // Every layout above predates the dedicated CD drive slots, so none of them
 // says anything about them -- and minimig_ConfigChipset() now derives
 // CONFIG_CDTV from cdtv_drive.cfg and CLEARS the bit when that slot is empty.
@@ -1016,6 +1045,24 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 			}
 			else BootPrint("Cannot migrate configuration file\n");
 		}
+		else if (size == sizeof(mm_configTYPE_NoCdDelay))
+		{
+			// Written before the CD mount delay existed. A straight memcpy
+			// would leave cd_mount_delay reading whatever followed in memory,
+			// and a zero there means "no delay" -- silently restoring the
+			// behaviour this setting exists to fix. So it is set explicitly.
+			printf("Pre CD-delay configuration file, migrating.\n");
+			static mm_configTYPE_NoCdDelay oldconf = {};
+			if (FileLoadConfig(filename, &oldconf, sizeof(oldconf))
+			    && !strncmp(oldconf.id, config_id, sizeof(minimig_config.id))
+			    && oldconf.floppy.drives <= 4)
+			{
+				memcpy((void*)&minimig_config, (void*)&oldconf, sizeof(oldconf));
+				minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
+				result = 1;
+			}
+			else BootPrint("Cannot migrate configuration file\n");
+		}
 		else if (size == (int)sizeof(minimig_config))
 		{
 			static mm_configTYPE tmpconf = {};
@@ -1105,6 +1152,7 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		minimig_config.cd32_drive.filename[0] = 0;
 		minimig_config.cdtv_drive.cfg = 0;
 		minimig_config.cdtv_drive.filename[0] = 0;
+		minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
 		BootPrintEx(">>> No config found. Using defaults. <<<");
 
 		// AmigaCD console variant: no saved CFG -> start as a CD32 with its
