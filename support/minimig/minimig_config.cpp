@@ -1368,7 +1368,11 @@ int amigacd_apply_system(int sys)
 		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF (authentic CD32 default)
 		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
 		minimig_config.memory  = 0x03; // 2M chip, no fast (authentic CD32 default)
-		minimig_config.ide_cfg = 0x01; // REQUIRED: the CD32's own CD needs it
+		// DIAGNOSTIC BUILD ONLY -- DO NOT MERGE. Set to 0x00 to measure what
+		// the IDE unit costs in chip RAM. A CD will NOT load in this build;
+		// the measurement is taken at the CD32 boot animation, which needs
+		// no disc. See docs/chip-ram-shortfall.md.
+		minimig_config.ide_cfg = 0x00; // DIAGNOSTIC: was 0x01
 	}
 	// One removable CD slot on every machine that has a CD drive. The A1200
 	// has none -- see above.
