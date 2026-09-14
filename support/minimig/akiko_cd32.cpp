@@ -36,6 +36,7 @@
 #include "../../menu.h"       // menu_present() — OSD-open save trigger
 #include "../chd/mister_chd.h" // mister_chd_read_sector for CDDA pump
 #include "../physical_disc/physical_disc.h" // physical CD-ROM drive media
+#include "akiko_pace.h"                    // sector delivery floor
 #include "minimig_config.h"   // minimig_reset() — used to unblock BIOS stuck
                               // on no-CD splash after a boot-with-no-CD-then-mount.
 #include "akiko_cd32.h"
@@ -144,11 +145,23 @@ static void akiko_diag(const char *fmt, ...);
 // PBX sector size (raw Mode-1/Mode-2 frame).
 #define AKIKO_SECTOR_BYTES 2352
 
-// Per-opcode command lengths *excluding* the trailing checksum byte.
-// akiko.cpp:1136 — entries < 0 are "reserved/unsupported".
+// Ext-bus block write shaping: how many words go out per burst, and the gap
+// between bursts. Transport shaping only -- the sector delivery RATE LIMIT is
+// AKIKO_SECTOR_PERIOD_US in akiko_pace.h, not these.
+//
+// That distinction is new, and it is the point of this pair of comments. These
+// two constants were the rate limit until 2026-09-14, by accident: usleep(10)
+// costs a scheduler wakeup (~92 us measured on the MiSTer), not 10 us, so the
+// 18 gaps in a 1176-word sector were spending ~1.7 ms while the constants read
+// as 180 us. Widening the chunks or shrinking the gap would have removed the
+// protection with nothing to say so. They are kept at the values #1277 tested
+// because that is the shape that is field-proven, but the timing no longer
+// depends on them.
 #define AKIKO_FILL_CHUNK_WORDS 64
 #define AKIKO_FILL_GAP_US      10
 
+// Per-opcode command lengths *excluding* the trailing checksum byte.
+// akiko.cpp:1136 — entries < 0 are "reserved/unsupported".
 static const int command_lengths[16] = {
 	1, 2, 1, 1, 12, 2, 1, 1, 4, 1, 2, -1, -1, -1, -1, -1
 };
@@ -1681,6 +1694,25 @@ static bool akiko_nvram_save_to_disk(void)
 // push is both faster and does not burn a virtual disk slot.
 static void akiko_push_sector(const uint8_t *buf)
 {
+	// Hold each sector to AKIKO_SECTOR_PERIOD_US from the start of the last
+	// one. Measured from start to start rather than slept after the write, so
+	// the time a CHD miss or a physical-drive seek already spent counts towards
+	// the interval instead of being added to it -- a slow sector is never made
+	// slower by this.
+	static int64_t prev_us = -1;
+
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	int64_t now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+
+	const int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, AKIKO_SECTOR_PERIOD_US);
+	if (wait_us > 0) {
+		usleep((useconds_t)wait_us);
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+	}
+	prev_us = now_us;
+
 	akiko_ext_block_write(AKIKO_SECTOR_ADDR, buf, AKIKO_SECTOR_BYTES);
 }
 
