@@ -7483,6 +7483,16 @@ void HandleUI(void)
 				// than a stale window, on a keypress the user made deliberately.
 				// It also resets the poller's counters, so it cannot itself
 				// trigger a spurious write back to disk.
+				// Close the OSD BEFORE the load, not after it.
+				//
+				// process_ss() now draws a progress bar while it reads the four
+				// slots, and ProgressMessage -> InfoMessage is behind the same
+				// menustate <= MENU_INFO gate as every other message here. Left
+				// on this page (menustate 98) the bar would be dropped exactly
+				// the way the save state toasts were, and the user would be
+				// back to watching a frozen menu for several seconds.
+				menustate = MENU_NONE1;
+
 				if (amigacd_ss_name()[0])
 					process_ss(amigacd_ss_name(), 1);
 
