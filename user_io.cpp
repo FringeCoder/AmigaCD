@@ -2028,6 +2028,36 @@ static void *ss_base_win[4] = {};
 // itself, which is what the user is actually waiting for.
 #define SS_IO_CHUNK (256 * 1024)
 
+// Thumbnail beside the save: same path, .png instead of .ss. Returns 0 if the
+// name does not look like a save state path, which is the only case the caller
+// has to care about -- a thumbnail that cannot be named is simply not taken.
+static int ss_thumb_path(const char *ss_path, char *out, size_t outsz)
+{
+	if (!ss_path || !*ss_path) return 0;
+
+	const char *dot = strrchr(ss_path, '.');
+	if (!dot || strcasecmp(dot, ".ss")) return 0;
+
+	size_t stem = (size_t)(dot - ss_path);
+	if (stem + 5 > outsz) return 0;
+
+	memcpy(out, ss_path, stem);
+	strcpy(out + stem, ".png");
+	return 1;
+}
+
+// The same name the writer would use for a given media name and slot, so the
+// OSD can only ever look for the file process_ss actually wrote. slot is 0..3,
+// matching minimig_config.ss_slot and the '1'..'4' suffix the writer patches in.
+int ss_thumb_path_for_slot(const char *media_name, int slot, char *out, size_t outsz)
+{
+	if (!media_name || !*media_name) return 0;
+
+	char ss_path[1024];
+	FileGenerateSavestatePath(media_name, ss_path, (slot & 3) + 1);
+	return ss_thumb_path(ss_path, out, outsz);
+}
+
 // Set when the user asks for a save, cleared when one is written or after the
 // core has had long enough that it is not coming. It speeds the poll below up
 // while a save is in flight -- see there for why that matters -- and it is
@@ -2314,6 +2344,24 @@ int process_ss(const char *rom_name, int enable)
 					// is on the card either way and the next restore would
 					// find a truncated one.
 					*ss_sufx = i + '1';
+
+					// A picture of the moment, taken before the write rather
+					// than after it: the machine is a few frames past the
+					// freeze by the time the host notices a save, and every
+					// frame of the several seconds the write takes is further
+					// away from the state actually in the file.
+					//
+					// Failure is ignored on purpose. A thumbnail is a
+					// convenience for finding a slot again; a save that
+					// reported an error because its picture did not encode
+					// would be a worse trade than a slot with no picture.
+					char thumb[1024];
+					if (ss_thumb_path(ss_name, thumb, sizeof(thumb)))
+					{
+						if (!screenshot_capture_to(thumb))
+							printf("process_ss: no thumbnail for %s\n", thumb);
+					}
+
 					if (FileOpenEx(&f, ss_name, O_CREAT | O_TRUNC | O_RDWR | O_SYNC))
 					{
 						// Written in chunks so there is something to watch.

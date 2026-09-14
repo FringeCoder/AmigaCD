@@ -3881,6 +3881,98 @@ static Imlib_Image menubg = 0;
 static int bg_has_picture = 0;
 extern uint8_t  _binary_logo_png_start[], _binary_logo_png_end[];
 
+// ---------------------------------------------------------------------------
+// Save state preview
+// ---------------------------------------------------------------------------
+// Put a picture on the whole screen and draw the OSD over it, which is what the
+// menu core already does for wallpapers -- same framebuffer, same imlib2, same
+// scaler path. The difference is that this runs on a GAME core, so the fb
+// replaces the core's live video for as long as it is up. The Amiga keeps
+// running underneath; nothing is paused.
+//
+// Bank 1, which is one of video_menu_bg's pair. Not a free choice: fb_base maps
+// exactly three banks (see shmem_map at the top of this file) and bank 0 is the
+// Linux console framebuffer the fb terminal uses, so 1 and 2 are all there is.
+// Sharing with the wallpaper is harmless -- that only draws on the menu core,
+// this only draws on a game core, and the menu core redraws its banks when it
+// loads. Do NOT "fix" this by reaching for bank 3: it is outside the mapping,
+// and the DDR3 past it is where the save state windows live.
+#define FB_BANK_PREVIEW 1
+
+static int preview_shown = 0;
+
+int video_fb_preview(const char *path)
+{
+	if (!fb_base || !fb_width || !fb_height) return 0;
+
+	Imlib_Image img = imlib_load_image(path);
+	if (!img) return 0;
+
+	imlib_context_set_image(img);
+	int src_w = imlib_image_get_width();
+	int src_h = imlib_image_get_height();
+	if (src_w <= 0 || src_h <= 0)
+	{
+		imlib_free_image();
+		return 0;
+	}
+
+	Imlib_Image dst = imlib_create_image_using_data(fb_width, fb_height,
+	                                                (uint32_t*)(fb_base + (FB_SIZE * FB_BANK_PREVIEW)));
+	if (!dst)
+	{
+		imlib_context_set_image(img);
+		imlib_free_image();
+		return 0;
+	}
+
+	// Letterboxed, not stretched. A save state thumbnail is a picture of the
+	// game as it was; distorting it to fill a 16:9 panel would misrepresent
+	// the thing the user is being shown to help them recognise it.
+	int dst_w = fb_width;
+	int dst_h = (int)((int64_t)fb_width * src_h / src_w);
+	if (dst_h > fb_height)
+	{
+		dst_h = fb_height;
+		dst_w = (int)((int64_t)fb_height * src_w / src_h);
+	}
+	int dst_x = (fb_width  - dst_w) / 2;
+	int dst_y = (fb_height - dst_h) / 2;
+
+	// Black the whole bank first: the letterbox bars, and whatever a previous
+	// preview at a different aspect left behind. Written straight to the buffer
+	// the way draw_black() does, rather than through imlib's get_data /
+	// put_back_data pair, because the memory is ours already.
+	volatile uint32_t *buf = fb_base + (FB_SIZE * FB_BANK_PREVIEW);
+	for (int i = 0; i < fb_width * fb_height; i++) buf[i] = 0;
+
+	imlib_context_set_image(dst);
+	imlib_context_set_blend(0);
+	imlib_context_set_anti_alias(1);
+	imlib_blend_image_onto_image(img, 0, 0, 0, src_w, src_h, dst_x, dst_y, dst_w, dst_h);
+
+	imlib_context_set_image(dst);
+	imlib_free_image();
+	imlib_context_set_image(img);
+	imlib_free_image();
+
+	video_fb_enable(1, FB_BANK_PREVIEW);
+	preview_shown = 1;
+	return 1;
+}
+
+void video_fb_preview_off()
+{
+	if (!preview_shown) return;
+	preview_shown = 0;
+	video_fb_enable(0);
+}
+
+int video_fb_preview_active()
+{
+	return preview_shown;
+}
+
 void video_menu_bg(int n, int idle)
 {
 	static Imlib_Image bg1 = 0, bg2 = 0;

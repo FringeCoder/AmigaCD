@@ -397,7 +397,10 @@ extern char last_filename[1024];
 
 enum ScreenshotResult {
     SCREENSHOT_SUCCESS,
-    SCREENSHOT_FAILURE
+    SCREENSHOT_FAILURE,
+    // Finished, say nothing. Used for save state thumbnails, which report
+    // through the save's own progress bar and result toast.
+    SCREENSHOT_NONE
 };
 
 struct ScreenshotResult_atomic {
@@ -414,6 +417,12 @@ bool write_screenshot(const char *filename, const uint8_t *argb,
 
 // atomic variables for worker process
 static std::atomic<bool> screenshot_pending_atomic{false};
+
+// Set while the in-flight capture is a save state thumbnail rather than a
+// user-requested screenshot. Only one capture is ever in flight -- that is what
+// screenshot_pending_atomic guarantees -- so one flag is enough to tell them
+// apart when the result comes back. Consumed by screenshot_cb().
+static std::atomic<bool> screenshot_silent_atomic{false};
 static std::atomic<ScreenshotResult_atomic*> screenshot_result_data_atomic{nullptr};
 
 static struct { const char *fmtstr; Imlib_Load_Error err_code; } err_strings[] = {
@@ -536,6 +545,59 @@ static void save_screenshot(int do_rescale, int base_width, int base_height, int
     screenshot_pending_atomic = false;
 };
 
+// Capture the current frame straight to a named file, with no toast and no
+// screenshots/ naming. Used for save state thumbnails: the frame wanted is the
+// one on screen at the moment the state is taken, so the read has to happen on
+// the caller's thread, now -- only the encode is offloaded.
+//
+// Returns 0 if the frame could not be read. A queued encode that later fails
+// returns 1 here: the save state itself does not depend on the thumbnail, and
+// a failed thumbnail must not look like a failed save.
+int screenshot_capture_to(const char *path)
+{
+	if (!path || !*path) return 0;
+
+	// Shares screenshot_outputbuf and the pending flag with the hotkey
+	// screenshot. If one is already in flight, skip rather than queue: a
+	// thumbnail is not worth blocking a save for.
+	if (screenshot_pending_atomic || screenshot_requested) return 0;
+
+	mister_scaler *ms = mister_scaler_init();
+	if (!ms) return 0;
+
+	int base_width  = ms->width;
+	int base_height = ms->height;
+
+	size_t needed = (size_t)base_width * (size_t)base_height * 4;
+	if (!base_width || !base_height || needed > sizeof(screenshot_outputbuf))
+	{
+		mister_scaler_free(ms);
+		return 0;
+	}
+
+	screenshot_pending_atomic = true;
+	screenshot_silent_atomic  = true;
+	mister_scaler_read(ms, screenshot_outputbuf);
+	mister_scaler_free(ms);
+
+	char *filename_copy = strdup(path);
+	if (!filename_copy)
+	{
+		screenshot_silent_atomic  = false;
+		screenshot_pending_atomic = false;
+		return 0;
+	}
+
+	// Native resolution, unscaled: this is a thumbnail source, and the display
+	// side scales it to whatever the screen is anyway.
+	offload_add_work([=]() {
+		save_screenshot(0, base_width, base_height, base_width, base_height,
+		                screenshot_outputbuf, filename_copy);
+	});
+
+	return 1;
+}
+
 void do_screenshot(char* imgname)
 {
 	#ifdef PROFILING
@@ -647,7 +709,13 @@ void screenshot_cb(void)
 
     if (result_data) {
 
-        switch (result_data->result)
+        // A save state thumbnail reports nothing on screen. The save has its
+        // own progress bar and result toast, and "Screen saved to ..." landing
+        // in the middle of them would be a message about a file the user never
+        // asked for.
+        const bool silent = screenshot_silent_atomic.exchange(false);
+
+        switch (silent ? SCREENSHOT_NONE : result_data->result)
         {
             case SCREENSHOT_SUCCESS:
                 if (result_data->filename)
