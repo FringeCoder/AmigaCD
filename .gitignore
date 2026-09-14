@@ -58,3 +58,7 @@ greybox_tmp/
 Thumbs.db
 desktop.ini
 output/
+
+# Diagnostic tarballs pulled off the MiSTer by scripts/collect-diag.sh.
+# Machine state, not source: they carry the device's config and logs.
+diag/

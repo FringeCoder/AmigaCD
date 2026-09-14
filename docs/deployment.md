@@ -93,6 +93,44 @@ snac_psx=1
 
 Load the AmigaCD core and it restarts into our binary.
 
+### Getting the machine's state off it
+
+`scripts/collect-diag.sh` pulls everything worth reading into one tarball:
+
+```bash
+./scripts/collect-diag.sh                # logs, config, what is installed
+./scripts/collect-diag.sh --with-images  # plus save state thumbnails and screenshots
+./scripts/collect-diag.sh --clear        # truncate the device logs first
+./scripts/collect-diag.sh --full         # whole logs, not the last 5000 lines each
+```
+
+Host comes from `./host` or `$MISTER_HOST`, same as the deploy scripts. It is
+read-only on the device except for `--clear`, which truncates the logs under
+`/tmp` and nothing else.
+
+The useful sequence for a specific fault is `--clear`, reproduce it, then run it
+again — what comes back then contains that run and nothing before it.
+
+What it collects, and what each is good for:
+
+| file | answers |
+|---|---|
+| `report.txt` | uname, uptime, free space, what is running, md5s of the installed binary and cores, `MiSTer.ini`, the contents of `savestates/`, dmesg tail |
+| `akiko_dbg.log` | `sec_req timing` — the real per-sector delivery period, which is the number `AKIKO_SECTOR_PERIOD_US` was set against without ever being measured on hardware. Also `sec_req GAP` |
+| `ss_dbg.log` | the save state sequence, including whether each toast was drawn or **dropped** by the `menustate <= MENU_INFO` gate |
+| `cdtv_dbg.log` | the CR-511 command stream |
+| `physical_disc_stats.log` | drive hit rate and worst-case I/O latency |
+| `images/` | the save state thumbnails, which are what the preview shows, and the newest screenshots |
+
+A missing log is not a failure: these are written on first use, so one that is
+absent means that subsystem never ran. The script says which.
+
+**Screenshots beat photographs of the screen**, and not only for convenience: a
+capture off the device isolates what the core produced from what the display did
+with it. The one question it cannot answer is whether the picture is *stable* —
+flicker, resync, or a mode change on the monitor leaves no trace in any file, so
+that part still has to be watched and described.
+
 ### Why the binary is installed twice
 
 `MiSTer` and `MiSTer_AmigaCD` are the **same build under two names**, and both
