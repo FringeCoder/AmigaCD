@@ -217,6 +217,29 @@ Target is ~150 sectors/s (2× red book). kblood's history shows the SPI push pat
 was already the bottleneck against CHD, so this may end up transport-limited
 rather than drive-limited.
 
+**Delivery is floored, not targeted, and the floor is above 150/s.** Since
+2026-09-14 `akiko_push_sector()` holds each sector to `AKIKO_SECTOR_PERIOD_US`
+(`support/minimig/akiko_pace.h`, 1700 µs ≈ 590 sectors/s) measured start to
+start. The floor exists because of the Z2-fast-RAM black screen (`#1277`), not
+because of fidelity: `#1277` spent that time as 18 `usleep(10)` chunk gaps,
+which cost ~1.7 ms rather than the 180 µs their constants read as, so the
+protection was real but accidental and would have vanished on any change to the
+transport. Nothing about the observed rate changes; what changes is that it can
+no longer collapse silently.
+
+Two numbers to keep apart from it. ~351 sectors/s is what the physical drive
+sustains on the host side, which is headroom rather than delivery. 6667 µs is
+what a real 2x CD32 does — more faithful than the floor and ~4× the margin over
+the measured failure knee, at ~4× the load time and ~4× the stall this imposes
+on `user_io_poll()`. That is a policy change and wants its own hardware pass.
+
+The root cause is now identified and is core-side: `ddram_ctrl` dropped a DDR3
+read return that arrived while `waitrequest` was high, which wedges master 0 —
+a 68k stalled on a fast-RAM fetch, and Z2 fast RAM lives in DDR3. See T24 in the
+core repo's `docs/core-accuracy-todo.md`. If that fix holds on hardware, the
+floor becomes a fidelity choice rather than a crutch, and removing it is then a
+hardware test rather than an assumption.
+
 `/tmp/physical_disc_stats.log` gives hit rate and worst-case I/O latency; the
 `sec_req GAP` diagnostic in `akiko_handle_sec_req` gives the other half. Both
 are the instruments for the first hardware run.

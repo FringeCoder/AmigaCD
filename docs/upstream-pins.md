@@ -9,11 +9,15 @@ against. Re-verify line numbers after moving off these.
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
-| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `de40622` "Merge PR #9, remount on savestate" | 2026-08-23 |
+| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `f2963eb` "dvd fpga core support" | 2026-09-12 |
+| ^ previous pin, superseded 2026-09-14 | | `de40622` "Merge PR #9, remount on savestate" | 2026-08-23 |
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
+| ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
+| ^ previous pin, superseded 2026-09-14 | | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
 | ^ our core's fork point | | `3ab91cd` "Release 20260220." | 2026-02-20 |
 
 `52625a4` is merged into this repo's `master` as the working tree.
@@ -259,8 +263,9 @@ The root upstream. Our tree reaches it through kblood's fork, which reaches it
 through its own base — and **nobody in that chain is rebasing**, so staying
 current is ours to do.
 
-As of 2026-07-31 it is **58 commits** ahead of `0f3a6ad`, the base our tree
-shares with it. Unlike the physical_disc module this cannot be a re-extract: it
+**Merged through `0039110` on 2026-09-14** (see the table above), so the gap
+below is history rather than a standing debt. It was, as of 2026-07-31, **58
+commits** ahead of `0f3a6ad`, the base our tree shares with it. Unlike the physical_disc module this cannot be a re-extract: it
 touches `menu.cpp`, `ide.cpp`, `ide_cdrom.cpp` and `user_io.cpp`, all of which
 we have modified. Treat it as a real merge with conflicts, on its own branch,
 with a hardware test afterwards.
