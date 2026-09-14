@@ -2021,6 +2021,43 @@ static void kbd_fifo_poll()
 // them and is the only thing that maps or fills them.
 static void *ss_base_win[4] = {};
 
+// Save state file I/O chunk, in bytes. Only sets how often the progress bar can
+// move: the bar itself has 168 steps, so anything at or below payload/168 keeps
+// it smooth, and 256 KB gives ~45 updates on the largest save this core makes.
+// Large enough that the per-call overhead stays irrelevant next to the SD write
+// itself, which is what the user is actually waiting for.
+#define SS_IO_CHUNK (256 * 1024)
+
+// Thumbnail beside the save: same path, .png instead of .ss. Returns 0 if the
+// name does not look like a save state path, which is the only case the caller
+// has to care about -- a thumbnail that cannot be named is simply not taken.
+static int ss_thumb_path(const char *ss_path, char *out, size_t outsz)
+{
+	if (!ss_path || !*ss_path) return 0;
+
+	const char *dot = strrchr(ss_path, '.');
+	if (!dot || strcasecmp(dot, ".ss")) return 0;
+
+	size_t stem = (size_t)(dot - ss_path);
+	if (stem + 5 > outsz) return 0;
+
+	memcpy(out, ss_path, stem);
+	strcpy(out + stem, ".png");
+	return 1;
+}
+
+// The same name the writer would use for a given media name and slot, so the
+// OSD can only ever look for the file process_ss actually wrote. slot is 0..3,
+// matching minimig_config.ss_slot and the '1'..'4' suffix the writer patches in.
+int ss_thumb_path_for_slot(const char *media_name, int slot, char *out, size_t outsz)
+{
+	if (!media_name || !*media_name) return 0;
+
+	char ss_path[1024];
+	FileGenerateSavestatePath(media_name, ss_path, (slot & 3) + 1);
+	return ss_thumb_path(ss_path, out, outsz);
+}
+
 // Set when the user asks for a save, cleared when one is written or after the
 // core has had long enough that it is not coming. It speeds the poll below up
 // while a save is in flight -- see there for why that matters -- and it is
@@ -2151,7 +2188,39 @@ int process_ss(const char *rom_name, int enable)
 					}
 					else
 					{
-						int ret = FileReadAdv(&f, ss_base_win[i], len);
+						// Chunked for the same reason as the write above: this
+						// runs for all four slots on one keypress, ~16 MB of
+						// blocking reads, and until now it showed nothing at
+						// all -- the machine simply stopped answering for
+						// several seconds before the core's toast appeared.
+						ProgressMessage(0, 0, 0, 0);
+						char slot_txt[32];
+						snprintf(slot_txt, sizeof(slot_txt), "Slot %d of 4", i + 1);
+
+						// The bar is scaled to the FILE, not to the window.
+						// A save is only as big as the memory that machine had,
+						// so it is normally a fraction of the window it is read
+						// into -- scaling to len would stop the bar partway
+						// every time and look like a failed read.
+						uint32_t total = (f.size > 0 && (uint64_t)f.size < (uint64_t)len)
+						                 ? (uint32_t)f.size : len;
+
+						int ret = 0;
+						for (uint32_t off = 0; off < len; )
+						{
+							uint32_t chunk = len - off;
+							if (chunk > SS_IO_CHUNK) chunk = SS_IO_CHUNK;
+
+							int n = FileReadAdv(&f, (uint8_t *)ss_base_win[i] + off, chunk);
+							if (n > 0) ret += n;
+							// Short read = end of file, which is the normal exit
+							// here rather than an error.
+							if (n != (int)chunk) break;
+
+							off += chunk;
+							ProgressMessage("Restore state", slot_txt, (off < total) ? off : total, total);
+						}
+						ProgressMessage(0, 0, 0, 0);
 						FileClose(&f);
 						printf("process_ss: read %d bytes from file: %s\n", ret, ss_name);
 					}
@@ -2265,7 +2334,6 @@ int process_ss(const char *rom_name, int enable)
 
 					ss_save_expected = 0;
 					MenuHide();
-					Info("Saving the state", 500);
 
 					// Say what happened, either way. Until now the only
 					// confirmation a save existed was the CORE's "Save state:
@@ -2276,9 +2344,58 @@ int process_ss(const char *rom_name, int enable)
 					// is on the card either way and the next restore would
 					// find a truncated one.
 					*ss_sufx = i + '1';
+
+					// A picture of the moment, taken before the write rather
+					// than after it: the machine is a few frames past the
+					// freeze by the time the host notices a save, and every
+					// frame of the several seconds the write takes is further
+					// away from the state actually in the file.
+					//
+					// Failure is ignored on purpose. A thumbnail is a
+					// convenience for finding a slot again; a save that
+					// reported an error because its picture did not encode
+					// would be a worse trade than a slot with no picture.
+					char thumb[1024];
+					if (ss_thumb_path(ss_name, thumb, sizeof(thumb)))
+					{
+						if (!screenshot_capture_to(thumb))
+							printf("process_ss: no thumbnail for %s\n", thumb);
+					}
+
 					if (FileOpenEx(&f, ss_name, O_CREAT | O_TRUNC | O_RDWR | O_SYNC))
 					{
-						int ret = FileWriteAdv(&f, ss_base_win[i], size);
+						// Written in chunks so there is something to watch.
+						//
+						// A save is up to ~11.5 MB -- 2 MB chip, 1.5 MB slow,
+						// 8 MB of Z2 fast RAM when it is enabled -- and the fd
+						// carries O_SYNC, so one FileWriteAdv() of the whole
+						// payload blocks the main loop for seconds with the OSD
+						// frozen on whatever was last drawn. What the user saw
+						// was the core's "Save state: saved" (which means its
+						// capture finished, not the file), then a still screen,
+						// then a result toast with nothing joining them.
+						//
+						// Same shape the ROM loader uses at user_io_file_tx:
+						// ProgressMessage only redraws when the bar cell
+						// changes, so calling it per chunk costs 168 redraws at
+						// most however big the payload is.
+						ProgressMessage(0, 0, 0, 0);
+						int ret = 0;
+						for (uint32_t off = 0; off < size; )
+						{
+							uint32_t chunk = size - off;
+							if (chunk > SS_IO_CHUNK) chunk = SS_IO_CHUNK;
+
+							int n = FileWriteAdv(&f, (uint8_t *)ss_base_win[i] + off, chunk);
+							if (n > 0) ret += n;
+							// A short or failed write ends the loop; the size
+							// comparison below is what reports it, unchanged.
+							if (n != (int)chunk) break;
+
+							off += chunk;
+							ProgressMessage("Save state", f.name, off, size);
+						}
+						ProgressMessage(0, 0, 0, 0);
 						FileClose(&f);
 						printf("Wrote %d bytes to file: %s\n", ret, ss_name);
 						if (ret == (int)size)

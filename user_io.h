@@ -327,4 +327,8 @@ char is_3do();
 
 void screenshot_cb(void);
 
+// Path of the save state thumbnail for a media name and slot (0..3). Returns 0
+// if no such name can be formed. See process_ss(), which writes it.
+int ss_thumb_path_for_slot(const char *media_name, int slot, char *out, size_t outsz);
+
 #endif // USER_IO_H

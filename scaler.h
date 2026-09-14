@@ -36,6 +36,9 @@ int mister_scaler_read(mister_scaler *,unsigned char *buffer, mister_scaler_form
 void mister_scaler_free(mister_scaler *);
 
 void request_screenshot(char *cmd, int scaled = 0);
+
+// Capture the current frame to an explicit path, silently. See scaler.cpp.
+int screenshot_capture_to(const char *path);
 void screenshot_cb(void);
 
 #endif

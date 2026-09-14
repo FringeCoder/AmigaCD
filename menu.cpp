@@ -324,6 +324,52 @@ static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
 // '*' is not a legal exfat filename character, so the state could never be
 // written. Use the same identity per-game NVRAM already uses -- the ISO9660
 // volume label, or a TOC-geometry UUID for discs without one.
+static const char *amigacd_ss_name();
+
+// Full-screen preview of what a save slot holds, shown while the cursor sits on
+// a Save slot row. The picture is the frame process_ss() captured at save time;
+// see ss_thumb_path_for_slot().
+//
+// Driven from the page DRAW rather than from the keypress, so it follows the
+// cursor without every path that can move it having to remember. The draw runs
+// on entering the page, on every cursor move and on every slot change, which is
+// exactly the set of moments the preview should change.
+//
+// It cannot follow the cursor OFF the page that way, because another page's
+// draw knows nothing about this one -- HandleUI() turns it off centrally for
+// any state that is not one of the two pages carrying these rows.
+static void amigacd_ss_preview(int on, int slot)
+{
+	static int shown_slot = -1;
+
+	if (!on)
+	{
+		if (shown_slot >= 0)
+		{
+			shown_slot = -1;
+			video_fb_preview_off();
+		}
+		return;
+	}
+
+	if (shown_slot == slot) return;
+
+	char thumb[1024];
+	if (!ss_thumb_path_for_slot(amigacd_ss_name(), slot, thumb, sizeof(thumb))
+	    || !FileExists(thumb)
+	    || !video_fb_preview(getFullPath(thumb)))
+	{
+		// No picture for this slot -- an empty slot, or one saved before
+		// thumbnails existed. Leave the core's own video up rather than
+		// showing black or the previous slot's picture, which would both
+		// read as "this slot holds that".
+		amigacd_ss_preview(0, 0);
+		return;
+	}
+
+	shown_slot = slot;
+}
+
 static const char *amigacd_ss_name()
 {
 	static char name[256];
@@ -1239,6 +1285,17 @@ static void *close_pipe_async(void *arg)
 void HandleUI(void)
 {
 	PROFILE_FUNCTION();
+
+	// The save state preview replaces the core's live video, so it must not be
+	// able to outlive the two pages that own it. Their draws turn it on and off
+	// as the cursor moves within a page; this is what turns it off when the
+	// cursor leaves one -- including the ways that do not go through a row at
+	// all, such as closing the OSD. Cheap: a no-op unless a preview is up.
+	if (menustate != MENU_MINIMIG_CHIPSET1 && menustate != MENU_MINIMIG_CHIPSET2 &&
+	    menustate != MENU_AMIGACD_SETTINGS1 && menustate != MENU_AMIGACD_SETTINGS2)
+	{
+		amigacd_ss_preview(0, 0);
+	}
 
 	if (bt_timer >= 0)
 	{
@@ -6584,6 +6641,8 @@ void HandleUI(void)
 			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
 			OsdWrite(m++, s, menusub == 11, ss_blocked);
 
+			amigacd_ss_preview(menusub == 11 && !ss_blocked, minimig_config.ss_slot & 3);
+
 			OsdWrite(m++, " Save state", menusub == 12, ss_blocked);
 		}
 
@@ -7361,6 +7420,8 @@ void HandleUI(void)
 			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
 			OsdWrite(m++, s, menusub == 4, ss_blocked);
 
+			amigacd_ss_preview(menusub == 4 && !ss_blocked, minimig_config.ss_slot & 3);
+
 			OsdWrite(m++, " Save state", menusub == 5, ss_blocked);
 			OsdWrite(m++, " Restore state", menusub == 6, ss_blocked);
 		}
@@ -7483,6 +7544,16 @@ void HandleUI(void)
 				// than a stale window, on a keypress the user made deliberately.
 				// It also resets the poller's counters, so it cannot itself
 				// trigger a spurious write back to disk.
+				// Close the OSD BEFORE the load, not after it.
+				//
+				// process_ss() now draws a progress bar while it reads the four
+				// slots, and ProgressMessage -> InfoMessage is behind the same
+				// menustate <= MENU_INFO gate as every other message here. Left
+				// on this page (menustate 98) the bar would be dropped exactly
+				// the way the save state toasts were, and the user would be
+				// back to watching a frozen menu for several seconds.
+				menustate = MENU_NONE1;
+
 				if (amigacd_ss_name()[0])
 					process_ss(amigacd_ss_name(), 1);
 
