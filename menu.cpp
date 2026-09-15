@@ -295,7 +295,7 @@ const char *config_smask_msg[] = { "None", "1x", "2x", "1x Rotated", "2x Rotated
 const char *config_scale[] = { "Normal", "V-Integer", "HV-Integer-", "HV-Integer+", "HV-Integer", "???", "???", "???" };
 
 // Save state slots. Four, matching the four DDR3 windows process_ss() maps at
-// the core's advertised base (Minimig.sv CONF_STR "SS3C000000:C00000"), and
+// the core's advertised base (AmigaCD.sv CONF_STR "SS3C000000:C00000"), and
 // matching the four .ss1-.ss4 files FileGenerateSavestatePath() names. Labelled
 // 1-4 for the user; the wire value in status[53:52] is 0-3.
 static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
@@ -312,7 +312,7 @@ static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
 //    selects the 128/256 MB Z3 autoconfig entries). The index is decoded here
 //    exactly as the FastRAM row itself decodes it.
 //  - 68000. cpu_wrapper exports TG68K state only -- fx68k has no equivalent --
-//    so Minimig.sv gates the request on `ss_supported = |cpucfg`, and userio.v
+//    so AmigaCD.sv gates the request on `ss_supported = |cpucfg`, and userio.v
 //    takes cpucfg from the low two bits of the CPU config byte, i.e.
 //    minimig_config.cpu & 3. Without this the request would be silently
 //    swallowed in RTL.
@@ -546,7 +546,7 @@ static int minimig_ss_request_save()
 	// leave the previous save on the card pretending to be this one.
 	ss_expect_save();
 
-	// The core edge-detects this in RTL (Minimig.sv ss_save_edge), so a
+	// The core edge-detects this in RTL (AmigaCD.sv ss_save_edge), so a
 	// set/clear pair is one save and a bit left high cannot re-arm. Clearing it
 	// again is housekeeping on the persisted status word, not a safety
 	// property.
@@ -7663,7 +7663,7 @@ void HandleUI(void)
 				if (amigacd_ss_name()[0])
 					process_ss(amigacd_ss_name(), 1);
 
-				// status[54], edge-detected in RTL (Minimig.sv ss_load_edge)
+				// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge)
 				// exactly as status[51] is. A level here would restore over and
 				// over -- ss_ctrl re-arms out of idle on any cycle load_req is
 				// high -- and the bit being cleared by userspace must not be
@@ -7674,7 +7674,7 @@ void HandleUI(void)
 				// Everything after this is the core's: it validates the window
 				// with the Amiga still running, refuses without freezing if any
 				// gate fails, and reports the outcome as an OSD toast either
-				// way (Minimig.sv's ss_info_* block).
+				// way (AmigaCD.sv's ss_info_* block).
 				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
 				// The drive travels beside the payload rather than in it: where
 				// the head is and what was playing are userspace state that the
@@ -7722,14 +7722,14 @@ void HandleUI(void)
 		OsdWrite(m++, "", 0, 0);
 
 		// The SNAC user port is shared with MT32-pi and MiSTer Floppy:
-		// Minimig.sv muxes USER_OUT on this and resets mt32pi when it changes,
+		// AmigaCD.sv muxes USER_OUT on this and resets mt32pi when it changes,
 		// so the three tenants are mutually exclusive by construction.
 		strcpy(s, " User Port: ");
 		strcat(s, snac                                           ? "PSX SNAC" :
 		          (minimig_config.userport == mmup_misterfloppy) ? "MiSTer Floppy" : "MT32-Pi");
 		OsdWrite(m++, s, menusub == 0, 0);
 
-		// Board detection, straight from mister_floppy_status in Minimig.sv:
+		// Board detection, straight from mister_floppy_status in AmigaCD.sv:
 		// bit 6 detected, bit 7 IBM/PC vs Shugart, bit 8 cable straight vs
 		// crossed. Informational, so drawn unselectable.
 		if (minimig_config.userport == mmup_misterfloppy)

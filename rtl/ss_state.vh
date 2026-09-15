@@ -1,6 +1,6 @@
 `ifndef SS_STATE_VH
 `define SS_STATE_VH
-// Guarded because two files include it now: Minimig.sv and
+// Guarded because two files include it now: AmigaCD.sv and
 // ss_state_fanout.v. Without this the second include redefines both
 // macros and Quartus warns on every build.
 
@@ -19,14 +19,14 @@
 // Akiko). Phase 1A carries only what is needed to prove the framework: the
 // CPU's architectural registers and Gary's memory map state.
 //
-// Every name below is a wire in Minimig.sv. The plan put the vector in
+// Every name below is a wire in AmigaCD.sv. The plan put the vector in
 // minimig.v, but the CPU register file export lives on cpu_wrapper, which is
-// instantiated in Minimig.sv -- routing 632 bits down into minimig.v and the
+// instantiated in AmigaCD.sv -- routing 632 bits down into minimig.v and the
 // register read port back out again buys nothing. minimig.v exports the four
-// memory-map bits as ss_map[3:0] instead, and Minimig.sv unpacks them into
+// memory-map bits as ss_map[3:0] instead, and AmigaCD.sv unpacks them into
 // the four names used here.
 //
-// The list is used as an LVALUE as well as an rvalue (Phase 1B-1). Minimig.sv
+// The list is used as an LVALUE as well as an rvalue (Phase 1B-1). AmigaCD.sv
 // packs it into ss_state_in; ss_state_fanout, a module at the bottom of the
 // same file, declares nets of the same names and drives them with
 //

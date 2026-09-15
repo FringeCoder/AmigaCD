@@ -1454,9 +1454,9 @@ static void akiko_nvram_dump(uint8_t *out_1024)
 
 // Canonical SD-block load path. user_io_file_mount registers the .nvr
 // as virtual disk slot 0; hps_io fires img_mounted, the in-core FSM in
-// Minimig.sv asserts sd_rd[0] with sd_lba=0, hps_io reads the file and
+// AmigaCD.sv asserts sd_rd[0] with sd_lba=0, hps_io reads the file and
 // streams every byte on sd_buff_dout / sd_buff_wr / sd_buff_addr, and
-// Minimig.sv pipes that straight into akiko_nvram.load_we. Sidesteps
+// AmigaCD.sv pipes that straight into akiko_nvram.load_we. Sidesteps
 // the gp_out CDC freeze that broke the ioctl_download path on hardware.
 //
 // Userspace returns immediately after mounting — the actual BRAM fill

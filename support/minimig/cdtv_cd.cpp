@@ -413,7 +413,7 @@ static bool cdtv_push_sector(const uint8_t *buf, int len)
 
 // -----------------------------------------------------------------------------
 // CDDA streaming — same UIO 0xF200 channel as akiko_cd32.cpp Phase 33.
-// rtl/cdda.v is instantiated unconditionally in Minimig.sv and mixed into
+// rtl/cdda.v is instantiated unconditionally in AmigaCD.sv and mixed into
 // the audio output, so we don't need a CDTV-specific FPGA hook.
 // -----------------------------------------------------------------------------
 

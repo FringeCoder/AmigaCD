@@ -23,11 +23,22 @@ cd "$(dirname "$0")/.."
 OUT="output"
 REPO_SLUG="${AMIGACD_REPO:-FringeCoder/AmigaCD}"
 
-# The AmigaCD core is built as Minimig.rbf because the Quartus project is still
-# named Minimig; it is renamed here because that is what it is on the card.
-# The core's identity comes from CONF_STR ("AmigaCD"), not the filename --
-# docs/deployment.md explains why the filename is irrelevant to the software.
-CORE_SRC="upstream/core-cd32-cdtv/output_files/Minimig.rbf"
+# The core is renamed on the way to the card: the fit writes AmigaCD.rbf and the
+# card wants amigacd.rbf. The core's identity comes from CONF_STR ("AmigaCD"),
+# not the filename -- docs/deployment.md explains why the filename is irrelevant
+# to the software.
+#
+# Minimig.rbf is accepted as a fallback. The Quartus project was named Minimig
+# until 2026-09-15, so a core tree that has not been re-fitted since the rename,
+# or a checkout of kblood's amiga-console branch, still writes the old name.
+# Preferring the new one and falling back is the difference between staging a
+# stale bitstream knowingly and doing it silently: the fallback says so.
+CORE_DIR="upstream/core-cd32-cdtv/output_files"
+CORE_SRC="$CORE_DIR/AmigaCD.rbf"
+if [ ! -f "$CORE_SRC" ] && [ -f "$CORE_DIR/Minimig.rbf" ]; then
+    echo "note: no AmigaCD.rbf; using Minimig.rbf (core tree predates the rename)" >&2
+    CORE_SRC="$CORE_DIR/Minimig.rbf"
+fi
 CORE_DST="$OUT/amigacd.rbf"
 MENU_SRC="upstream/core-menu/output_files/menu.rbf"
 MENU_DST="$OUT/menu.rbf"

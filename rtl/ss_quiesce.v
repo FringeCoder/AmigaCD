@@ -9,7 +9,7 @@
 // a state that looks fine and restores into garbage.
 //
 // "Within microseconds on a running Amiga" was the original estimate and it is
-// wrong. cpu_boundary is itself four terms (Minimig.sv), so `quiet` is seven
+// wrong. cpu_boundary is itself four terms (AmigaCD.sv), so `quiet` is seven
 // conditions holding at once, and on hardware three frames was routinely not
 // enough: saving a running game failed three attempts out of four.
 //

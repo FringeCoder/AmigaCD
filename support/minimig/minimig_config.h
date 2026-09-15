@@ -53,7 +53,7 @@ typedef struct
 	unsigned char drives;
 } mm_floppyTYPEOld;
 
-// Who owns the SNAC user port. Mutually exclusive -- Minimig.sv muxes USER_OUT
+// Who owns the SNAC user port. Mutually exclusive -- AmigaCD.sv muxes USER_OUT
 // on this and resets mt32pi when it changes.
 enum mm_userportMode {
 	mmup_mp32pi       = 0,

@@ -38,7 +38,7 @@ The Advanced page reports what the board senses:
      Not Detected
 ```
 
-Read from `mister_floppy_status` in `Minimig.sv` — bit 6 detected, bit 7 IBM/PC
+Read from `mister_floppy_status` in `AmigaCD.sv` — bit 6 detected, bit 7 IBM/PC
 vs Shugart, bit 8 cable orientation. This is the core's own answer, not
 something userspace infers, so trust it over assumptions about the drive.
 

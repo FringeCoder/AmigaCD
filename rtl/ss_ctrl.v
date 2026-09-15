@@ -102,14 +102,14 @@
 // one that was never the same ROM. See the CORE_WORDS comment below for why
 // payload word 0 and not a ninth header word.
 //
-// WIRING. Minimig.sv muxes the SDRAM CPU port on `ss_freeze | ss_rom_scan`.
+// WIRING. AmigaCD.sv muxes the SDRAM CPU port on `ss_freeze | ss_rom_scan`.
 // Both scans now run frozen, so `rom_scan` is redundant with ss_freeze in both
 // directions; it is kept because it names the window the port is borrowed for,
 // and because the mux would have to change in lockstep with removing it.
 //
 // The restore-side scan used to run with the machine still going, and the
 // ss_freeze term did not cover it. That was safe as far as the CPU went --
-// cpu_wrapper's ss_arm (Minimig.sv ties it to save_busy | load_busy | fan-out
+// cpu_wrapper's ss_arm (AmigaCD.sv ties it to save_busy | load_busy | fan-out
 // busy) parks the 68k at its next instruction boundary, milliseconds before
 // rom_scan can rise, so the CPU is not on its port to be robbed of it. What it
 // was not safe for is everything ss_arm does NOT stop. Parking the CPU is not
@@ -191,7 +191,7 @@ module ss_ctrl
 	//
 	// 12 MB, up from 4 MB, because a machine with 8 MB of Zorro II fast RAM
 	// has 11.5 MB of state and the four slots have to hold the largest case.
-	// The window moved down to 0x3C000000 to make room; see Minimig.sv.
+	// The window moved down to 0x3C000000 to make room; see AmigaCD.sv.
 	parameter SLOT_WORDS = 32'h300000,
 	// Clocks to wait for one SDRAM word during the ROM scan before concluding
 	// the CPU port is not being routed here at all. A cache hit answers in a
@@ -258,7 +258,7 @@ module ss_ctrl
 	output reg                rom_scan,
 
 	// Invalidate the 68020's cache at the end of a restore, before the machine
-	// is let go. Minimig.sv ORs this into cpu_cache_ctrl[3], the CACR clear
+	// is let go. AmigaCD.sv ORs this into cpu_cache_ctrl[3], the CACR clear
 	// bit, so this reuses the machine's own invalidate rather than adding a
 	// second one; cpu_cache_new edge-detects that bit (cpu_cache_clear).
 	//
@@ -277,7 +277,7 @@ module ss_ctrl
 	output reg                clut_wr_en,
 	output reg  [31:0]        clut_wr_data,
 
-	// Custom chipset register shadow (ss_regshadow, instantiated in Minimig.sv).
+	// Custom chipset register shadow (ss_regshadow, instantiated in AmigaCD.sv).
 	// Read out on a save, loaded back and replayed on a restore.
 	output reg  [7:0]         shadow_rd_addr,
 	input      [15:0]         shadow_rd_data,
@@ -316,7 +316,7 @@ module ss_ctrl
 	// completed and then crashed the Amiga all present as "nothing happened,
 	// and no toast".
 	//
-	// The consumer is Minimig.sv, which aggregates these with the outcome
+	// The consumer is AmigaCD.sv, which aggregates these with the outcome
 	// levels above and publishes the result on hps_ext.v's 0xF600 UIO read
 	// sub-channel; support/minimig/minimig_ssdiag.cpp polls that and logs it.
 	// See the header of that file for why the aggregation (the last non-idle
@@ -351,7 +351,7 @@ module ss_ctrl
 	output reg [127:0]        peek_data,     // four longwords, low address first
 	output reg                peek_valid,    // sticky until the next request
 
-	// High for the length of a peek. Minimig.sv ORs it into cpu_wrapper's
+	// High for the length of a peek. AmigaCD.sv ORs it into cpu_wrapper's
 	// ss_arm, which parks the 68k: the SDRAM CPU port is the CPU's, and it
 	// does not answer a borrowed request while the CPU is still driving it.
 	// The first live peek timed out for exactly that reason -- the ROM
@@ -366,7 +366,7 @@ module ss_ctrl
 	// Driving rom_scan from the peek states too widened its fan-in enough to
 	// fail setup by 0.136 ns -- the failing paths ended at rom_scan and came
 	// from the CRC and the payload index, i.e. the save path's own logic.
-	// Minimig.sv ORs the two into the port mux instead, which costs nothing.
+	// AmigaCD.sv ORs the two into the port mux instead, which costs nothing.
 	output reg                peek_scan,
 
 	// ---------------------------------------------------- restore post-mortem
@@ -827,7 +827,7 @@ reg        chip_wr_half;
 //
 // That is what rom_scan is for: it is high whenever this module needs the
 // SDRAM CPU port, which on the restore path is a time when `freeze` is low.
-// Minimig.sv currently muxes that port on ss_freeze alone; see the wiring note
+// AmigaCD.sv currently muxes that port on ss_freeze alone; see the wiring note
 // in the module header.
 reg [24:1] kick_addr;
 reg [23:0] kick_pairs;
@@ -1268,7 +1268,7 @@ always @(posedge clk) begin
 			//
 			// They used to be cleared unconditionally at this point, which made
 			// each one a single clk cycle wide. This module runs at 113.5 MHz
-			// and Minimig.sv edge-detects these on clk_sys at 28.6 MHz: an 8.8 ns
+			// and AmigaCD.sv edge-detects these on clk_sys at 28.6 MHz: an 8.8 ns
 			// pulse against a 35 ns sample period is missed nearly every time,
 			// so the core's OSD toast never fired for a save. Measured on
 			// hardware -- the only toast a save produced was the host's own
@@ -1286,7 +1286,7 @@ always @(posedge clk) begin
 				// still running and freeze only at the end, on the reasoning
 				// that a refusal should not disturb a machine it was never
 				// going to touch. The reasoning was sound; the premise was
-				// not. `ss_arm` (Minimig.sv ties it to save/load/fan-out busy)
+				// not. `ss_arm` (AmigaCD.sv ties it to save/load/fan-out busy)
 				// parks the 68k for the whole of that validation, but parking
 				// the CPU is not freezing the Amiga: Agnus, Denise, Paula and
 				// the CIAs keep running. Measured on hardware, validation
@@ -2118,7 +2118,7 @@ always @(posedge clk) begin
 						// The machine is already frozen -- S_L_FREEZE ran
 						// before any of this, so the scan and both directions
 						// of it now behave the same way. rom_scan still rises
-						// because Minimig.sv muxes the SDRAM CPU port on
+						// because AmigaCD.sv muxes the SDRAM CPU port on
 						// (ss_freeze | ss_rom_scan) and the scan needs that
 						// port; here it is redundant with ss_freeze, as it has
 						// always been on the save side.

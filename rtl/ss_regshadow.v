@@ -80,7 +80,7 @@ module ss_regshadow
 	// ------------------------------------------------------------- replay
 	//
 	// Writes the shadow back into the chipset by driving the same two buses the
-	// machine writes them on. Minimig.sv muxes reg_address and custom_data_in
+	// machine writes them on. AmigaCD.sv muxes reg_address and custom_data_in
 	// onto these while replay_active is high; the chipset cannot tell the
 	// difference, because there is nothing to tell -- an address and a value on
 	// a clk7_en tick is exactly what a CPU or copper write is.

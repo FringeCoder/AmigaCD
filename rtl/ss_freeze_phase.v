@@ -3,13 +3,13 @@
 // The two clk_sys-domain signals that carry the save state freeze into the
 // Amiga's clock generator.
 //
-// Both were written inline in Minimig.sv and a second time in the core repo's
+// Both were written inline in AmigaCD.sv and a second time in the core repo's
 // rtl/sim/ssmux/tb_ss_regbus_mux.sv, which reproduces this wiring around a real
 // minimig instance. Two copies of a rule the hardware depends on is one copy too
 // many -- especially this rule, whose cck polarity reads backwards and was got
 // wrong once. With one module both sides instantiate, they cannot disagree.
 //
-// WHAT THE FREEZE IS. Minimig.sv runs two amiga_clk instances: a master that
+// WHAT THE FREEZE IS. AmigaCD.sv runs two amiga_clk instances: a master that
 // free-runs and drives sdram_ctrl and chipdma_arb, and the Amiga's own, whose
 // `ce` is this module's `freeze_7m` inverted. Dropping ce holds clk7_en,
 // clk7n_en, c1, c3, cck and eclk where they are, which stops the whole chipset
@@ -64,7 +64,7 @@ module ss_freeze_phase
 // across a frozen replay, with the real generator, rather than checking this
 // polarity -- so getting it backwards shows up as movement.
 //
-// This is also where freeze crosses from clk_114 into clk_sys in Minimig.sv;
+// This is also where freeze crosses from clk_114 into clk_sys in AmigaCD.sv;
 // the two come from the same PLL at 4:1, so it is a timed path, not a CDC.
 always @(posedge clk) begin
 	if (!rst_n)               freeze_7m <= 1'b0;

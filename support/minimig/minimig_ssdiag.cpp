@@ -14,7 +14,7 @@
 //      unrecorded.
 //
 // TRANSPORT. hps_ext.v publishes a read-only status window on UIO class 0xF600
-// (io_din[15:9] == 7'b1111011), assembled in Minimig.sv from ss_ctrl's
+// (io_din[15:9] == 7'b1111011), assembled in AmigaCD.sv from ss_ctrl's
 // diagnostic ports and its own outcome synchronisers. It is deliberately NOT on
 // the info_req / UIO_INFO_GET path, because that path is itself under suspicion:
 // a diagnostic carried on the channel it is meant to diagnose cannot tell its
@@ -26,7 +26,7 @@
 //
 // WINDOW LAYOUT. Nine 16-bit words per read: a fixed 0x55AA signature followed
 // by eight payload words. Kept in step with the `assign ss_diag` block in
-// Minimig.sv; word 7 carries a layout version so the two can disagree out loud.
+// AmigaCD.sv; word 7 carries a layout version so the two can disagree out loud.
 //
 //   sig   0x55AA
 //   w0    [5:0] live ss_ctrl state, [13:8] last non-idle state
