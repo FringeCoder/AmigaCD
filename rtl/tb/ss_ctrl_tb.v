@@ -476,7 +476,7 @@ end
 // !load_busy) as a backstop and fired on every refusal, because ss_quiesce
 // drops freeze one cycle behind load_busy by design.
 
-// The SDRAM CPU port is not ours to take. Minimig.sv routes it to ss_ctrl while
+// The SDRAM CPU port is not ours to take. AmigaCD.sv routes it to ss_ctrl while
 // the machine is frozen; the restore-side fingerprint scan needs it while the
 // machine is still running, which is what rom_scan exists to announce. Any cycle
 // of chip select outside those two windows is a cycle contending with the live
@@ -485,7 +485,7 @@ end
 // One documented exception, and only one: when the ROM scan is abandoned on
 // SCAN_TIMEOUT, ss_dma is still mid-transfer and holds its chip select up.
 // ss_ctrl drops rom_scan anyway, because the whole point of the timeout is that
-// the port was never being routed to it in the first place -- Minimig.sv muxes
+// the port was never being routed to it in the first place -- AmigaCD.sv muxes
 // on (ss_freeze | ss_rom_scan), so nothing of that stuck select reaches the
 // machine. watch_bus is lowered for exactly the cleanup window of that one
 // test and raised again as soon as ss_dma has been let finish.
@@ -617,7 +617,7 @@ end
 // on real hardware; they are worth nothing if they report something other than
 // what the controller did. dbg_seen is a one-bit-per-state visit bitmap, which
 // is the same thing the hardware poller reconstructs from dbg_state samples and
-// the change counter Minimig.sv derives from it. The checks below use it to
+// the change counter AmigaCD.sv derives from it. The checks below use it to
 // assert the property the instrumentation exists to establish: a restore that
 // completed and a restore that was refused at the last gate are distinguishable
 // from the diagnostic ports alone.
@@ -1200,7 +1200,7 @@ initial begin
 
 	// The SDRAM CPU port is not routed to ss_ctrl at all: chip select is taken
 	// but sd_ready never comes. This is what a missing or wrong port mux in
-	// Minimig.sv looks like from in here, and before SCAN_TIMEOUT existed it
+	// AmigaCD.sv looks like from in here, and before SCAN_TIMEOUT existed it
 	// parked the controller in S_KICK_WAIT forever -- on the restore path with
 	// the CPU held off its own bus by ss_arm, i.e. a machine that looks alive
 	// and never runs another instruction, with nothing anywhere saying why.
@@ -1286,7 +1286,7 @@ initial begin
 	$display("PASS timeout reports failure");
 
 	// S_FAIL is one clock wide, so a poller sampling dbg_state at any realistic
-	// rate will never see it. That is exactly why Minimig.sv latches the last
+	// rate will never see it. That is exactly why AmigaCD.sv latches the last
 	// non-idle state rather than publishing the live one alone -- the check here
 	// is that the port does carry the code at all, on the one clock it exists.
 	check("diag saw the save failure", {31'd0, dbg_seen[DBG_S_FAIL]}, 32'd1);

@@ -116,7 +116,8 @@ That branch carries the MiSTerFloppy RTL and the `paula_floppy` flux-select
 retiming, plus four Quartus settings commits that are all dead ends kept for
 the record (`SEED 2`, `SEED 3`, raised fitter effort, and the revert of it).
 
-**`Minimig.qsf` is byte-identical to `amigacd-core`.** The raised
+**`AmigaCD.qsf` (`Minimig.qsf` before the 2026-09-15 rename) is byte-identical
+to `amigacd-core`.** The raised
 `PLACEMENT_EFFORT_MULTIPLIER` / `ROUTER_EFFORT_MULTIPLIER` and
 `ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM` were added while chasing a timing
 failure diagnosed as routing, which turned out to be logic depth — the

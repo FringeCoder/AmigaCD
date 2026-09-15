@@ -9,7 +9,7 @@
 # from the two core repos and a CI artifact.
 #
 # What lands where on the SD card (see the generated WHERE-THESE-GO.txt):
-#   amigacd.rbf      -> /media/fat/_Computer/  (or wherever you keep cores)
+#   AmigaCD_<date>.rbf -> /media/fat/_Computer/  (or wherever you keep cores)
 #   menu.rbf         -> /media/fat/            (the boot menu core)
 #   MiSTer_AmigaCD   -> /media/fat/            (needs TWO MiSTer.ini sections)
 #
@@ -23,12 +23,51 @@ cd "$(dirname "$0")/.."
 OUT="output"
 REPO_SLUG="${AMIGACD_REPO:-FringeCoder/AmigaCD}"
 
-# The AmigaCD core is built as Minimig.rbf because the Quartus project is still
-# named Minimig; it is renamed here because that is what it is on the card.
 # The core's identity comes from CONF_STR ("AmigaCD"), not the filename --
 # docs/deployment.md explains why the filename is irrelevant to the software.
-CORE_SRC="upstream/core-cd32-cdtv/output_files/Minimig.rbf"
-CORE_DST="$OUT/amigacd.rbf"
+# What the filename DOES carry is the date the menu shows; see below.
+#
+# Minimig.rbf is accepted as a fallback. The Quartus project was named Minimig
+# until 2026-09-15, so a core tree that has not been re-fitted since the rename,
+# or a checkout of kblood's amiga-console branch, still writes the old name.
+# Preferring the new one and falling back is the difference between staging a
+# stale bitstream knowingly and doing it silently: the fallback says so.
+CORE_DIR="upstream/core-cd32-cdtv/output_files"
+CORE_SRC="$CORE_DIR/AmigaCD.rbf"
+if [ ! -f "$CORE_SRC" ] && [ -f "$CORE_DIR/Minimig.rbf" ]; then
+    echo "note: no AmigaCD.rbf; using Minimig.rbf (core tree predates the rename)" >&2
+    CORE_SRC="$CORE_DIR/Minimig.rbf"
+fi
+# Dated filename, because that is the only place the MiSTer menu gets a core's
+# date from. file_io.cpp's get_display_name() looks for "_20" in the .rbf name
+# and needs at least 6 characters after it; failing that it writes "------" into
+# the datecode, which menu.cpp renders next to the name as "--.--.--". That is
+# the dash row you see on an undated core, and it is not a missing build date
+# inside the bitstream -- there is nowhere in a .rbf for one to live.
+#
+# The date is the fit's mtime, so it means "when this bitstream was built"
+# rather than when it was staged. Restaging an old fit does not relabel it.
+#
+# Safe for everything that resolves the core by name: MiSTer.ini sections match
+# CONF_STR, not the filename (docs/deployment.md), and bootcore already matches
+# <core>_YYYYMMDD.rbf and picks the newest -- see matchesCore_yyyyMMdd_rbf() in
+# bootcore.cpp, which exists for exactly this convention.
+#
+# Staged under the name it gets ON THE CARD, rather than staged as amigacd.rbf
+# and renamed by hand on the way. The manifest used to say "copy amigacd.rbf to
+# _Computer/AmigaCD.rbf", and a rename a human performs is a rename a human
+# eventually performs differently.
+CORE_BASE="AmigaCD"
+CORE_DATE="$(date -r "$CORE_SRC" +%Y%m%d 2>/dev/null || echo "")"
+if [ -n "$CORE_DATE" ]; then
+    CORE_DST="$OUT/${CORE_BASE}_$CORE_DATE.rbf"
+else
+    # No mtime means no honest date. An undated name loses the stamp; a made-up
+    # one is worse, because the menu would then show a date that is not the
+    # build's.
+    echo "note: cannot read $CORE_SRC mtime; staging undated" >&2
+    CORE_DST="$OUT/$CORE_BASE.rbf"
+fi
 MENU_SRC="upstream/core-menu/output_files/menu.rbf"
 MENU_DST="$OUT/menu.rbf"
 
@@ -46,9 +85,32 @@ copy() {
 }
 
 echo "staging to $OUT/"
+
+# Dated names accumulate. Clear the staging directory's own older cores first,
+# so `output/` always holds exactly the one that was just staged -- otherwise a
+# copy of the whole directory to the card installs every build ever made, and
+# the menu shows a column of near-identical entries with only the date to tell
+# them apart.
+for old in "$OUT"/amigacd.rbf "$OUT"/amigacd_*.rbf \
+           "$OUT/$CORE_BASE.rbf" "$OUT/${CORE_BASE}_"*.rbf; do
+    [ -e "$old" ] || continue
+    [ "$old" = "$CORE_DST" ] && continue
+    echo "  removing stale $(basename "$old")"
+    rm -f "$old"
+done
+
 rc=0
 copy "$CORE_SRC" "$CORE_DST" || rc=1
 copy "$MENU_SRC" "$MENU_DST" || rc=1
+
+# The card is not ours to clean -- it is over ssh and the core directory is the
+# user's -- but a leftover undated amigacd.rbf there sits beside the new one and
+# both load, so say it once rather than leaving it to be noticed.
+if [ -f "$CORE_DST" ] && [ -n "$CORE_DATE" ]; then
+    echo "  note: delete any older AmigaCD.rbf / AmigaCD_*.rbf from the card --"
+    echo "        the dated file does not replace them, and all of them show in"
+    echo "        the menu as separate entries."
+fi
 
 if [ "${1:-}" = "--binary" ]; then
     # No ARM cross-toolchain on the dev machine, so the userspace binary always
@@ -95,9 +157,15 @@ fi
 cat > "$OUT/WHERE-THESE-GO.txt" <<'MANIFEST'
 Copy to the MiSTer SD card:
 
-  amigacd.rbf      -> /media/fat/_Computer/AmigaCD.rbf   (or wherever you keep cores)
-  menu.rbf         -> /media/fat/menu.rbf
-  MiSTer_AmigaCD   -> /media/fat/MiSTer_AmigaCD
+  AmigaCD_<date>.rbf -> /media/fat/_Computer/   (or wherever you keep cores)
+  menu.rbf           -> /media/fat/menu.rbf
+  MiSTer_AmigaCD     -> /media/fat/MiSTer_AmigaCD
+
+Copy the core under the name it already has -- do not drop the date. The MiSTer
+menu reads a core's date from its FILENAME (it looks for "_20" and takes the six
+characters after it); a core named without one shows "--.--.--" in the date
+column. Delete the older AmigaCD*.rbf from the card when you copy a new one:
+nothing replaces them and each one is its own menu entry.
 
 Do NOT overwrite /media/fat/MiSTer. Leave the stock binary alone -- see below.
 

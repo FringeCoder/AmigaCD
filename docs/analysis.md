@@ -102,7 +102,7 @@ Same shape for the CR-511, gated on `minimig_config.chipset & CONFIG_CDTV`. Same
 - `cdrom_read_raw_sector()` at line 1162 — returns one 2352-byte raw frame, handling
   CHD (2352 / 2336 / 2048 per-track sector sizes) and flat BIN/ISO.
 
-## Minimig-AGA-cd32-cdtv-native-akiko (`cd32-native-mvp`)
+## The CD32/CDTV core (`cd32-native-mvp`)
 
 RTL: `akiko.v`, `akiko_hps_bridge.v`, `akiko_nvram.v`, `akiko_bus_trace.v`, `cdda.v`,
 `cdtv_bridge.v`, `cdtv_hps_bridge.v`, `cdtv_nvram.v`, `cdtv_trace.v`.

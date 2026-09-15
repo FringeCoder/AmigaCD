@@ -1270,7 +1270,7 @@ int amigacd_apply_system(int sys)
 		// from df0 and hardfiles, which the Floppy and CD rows already cover.
 		//
 		// The 68000 here is fx68k, the same core the CDTV profile selects
-		// (cpucfg 0). Save states are refused in that mode -- Minimig.sv gates
+		// (cpucfg 0). Save states are refused in that mode -- AmigaCD.sv gates
 		// them on `ss_supported = |cpucfg` -- so an A500 cannot save state
 		// until fx68k gains an export and restore path.
 		minimig_config.cpu     = 0x00; // 68000

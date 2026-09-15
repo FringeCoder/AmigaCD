@@ -1,6 +1,6 @@
 `ifndef SS_STATE_VH
 `define SS_STATE_VH
-// Guarded because two files include it now: Minimig.sv and
+// Guarded because two files include it now: AmigaCD.sv and
 // ss_state_fanout.v. Without this the second include redefines both
 // macros and Quartus warns on every build.
 
@@ -19,14 +19,14 @@
 // Akiko). Phase 1A carries only what is needed to prove the framework: the
 // CPU's architectural registers and Gary's memory map state.
 //
-// Every name below is a wire in Minimig.sv. The plan put the vector in
+// Every name below is a wire in AmigaCD.sv. The plan put the vector in
 // minimig.v, but the CPU register file export lives on cpu_wrapper, which is
-// instantiated in Minimig.sv -- routing 632 bits down into minimig.v and the
+// instantiated in AmigaCD.sv -- routing 632 bits down into minimig.v and the
 // register read port back out again buys nothing. minimig.v exports the four
-// memory-map bits as ss_map[3:0] instead, and Minimig.sv unpacks them into
+// memory-map bits as ss_map[3:0] instead, and AmigaCD.sv unpacks them into
 // the four names used here.
 //
-// The list is used as an LVALUE as well as an rvalue (Phase 1B-1). Minimig.sv
+// The list is used as an LVALUE as well as an rvalue (Phase 1B-1). AmigaCD.sv
 // packs it into ss_state_in; ss_state_fanout, a module at the bottom of the
 // same file, declares nets of the same names and drives them with
 //
@@ -48,6 +48,29 @@
 // registers behind ss_map. The two decode bits stay in the vector for now
 // because removing them changes SS_STATE_W and therefore the on-disk payload
 // length; drop them when 1B-2 grows the vector and the format moves anyway.
+//
+// ---------------------------------------------------------------------------
+// Deliberately NOT captured, added 2026-08-31 with the CIA leftovers:
+//
+//   ciaa regportb            port B output register, 8 bits
+//   ciab sdr_buf/cnt/load    the serial shift register in flight, 13 bits
+//   cia_timera/b pb_tgl      the PB6/PB7 toggle flop, 1 bit each, x2 CIAs
+//
+// Not an oversight, a budget. SS_STATE_W is 2093 and STATE_WORDS rounds it to
+// 66 words = 2112 bits, so there are 19 bits of free padding to grow into
+// before the state section lengthens. The list above is 23 bits, which does
+// not fit -- and lengthening the section moves every section after it, which
+// is the 1.2 case in ss_ctrl.v's version notes and would refuse every save
+// file already on disk.
+//
+// What is lost is small and transient on ports that go nowhere on this
+// hardware. A restore starts the PB6/PB7 toggle at 0, gives back a port B
+// output register of 0, and drops a serial byte that was mid-shift along with
+// its SP interrupt. The last of those is the only one that could hang
+// software, and it is still strictly better than before: the shifter did not
+// exist, so SP never fired at all.
+//
+// If the format has to move for some other reason, take these with it.
 // ---------------------------------------------------------------------------
 
 `define SS_STATE_LIST { \

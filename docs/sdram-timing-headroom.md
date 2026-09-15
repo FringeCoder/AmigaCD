@@ -210,8 +210,8 @@ The data path is untouched, so the existing multicycles still govern it unchange
 **The mux half is NOT sound — do not build it.** The original suggestion here was to compute
 the slot-type decision and the address selection during state 15. That rests on the claim
 that `chipDMA`, `chipRW` and `chipAddr` are "stable long before state 0 arrives". They are
-not. `c_7m` is the Amiga `c1` phase (`Minimig.sv:657`), and `chipdma_arb` is clocked from
-that same `c1` (`Minimig.sv:701`) — so the arbiter's outputs change on the very edge that
+not. `c_7m` is the Amiga `c1` phase (`AmigaCD.sv:657`), and `chipdma_arb` is clocked from
+that same `c1` (`AmigaCD.sv:701`) — so the arbiter's outputs change on the very edge that
 resets `sdram_state` to 0. Sampling them during state 15 captures the **previous** Amiga
 cycle's request: a stale address handed to the SDRAM, which is the exact corruption mode
 this work is trying to avoid.
@@ -238,7 +238,7 @@ quartus_fit Minimig --seed=3 \
   --set=PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION=ON
 ```
 
-**Result: −0.358 ns — and the experiment was worthless.** `Minimig.qsf:35-38` already carries
+**Result: −0.358 ns — and the experiment was worthless.** `AmigaCD.qsf:35-38` already carries
 `PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON` and `PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON`,
 along with `PHYSICAL_SYNTHESIS_EFFORT EXTRA`. The run set options that were already set,
 which is precisely why it reproduced seed 3's slack exactly. It says nothing about whether

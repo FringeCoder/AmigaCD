@@ -5,13 +5,13 @@
 /////////////////////////////////////////////////////////////////////////////
 // Restore fan-out: the state vector, back into the machine.
 //
-// This exists as a module rather than as a block inside Minimig.sv for one
+// This exists as a module rather than as a block inside AmigaCD.sv for one
 // reason: it lets the restore side reuse `SS_STATE_LIST as an LVALUE.
 //
 //     assign `SS_STATE_LIST = state;
 //
 // The names in that macro are declared below as nets of this module, so the
-// same ordered list that Minimig.sv packs into ss_state_in is what unpacks
+// same ordered list that AmigaCD.sv packs into ss_state_in is what unpacks
 // here. There is no second list, so there is nothing to drift: adding a
 // register to the vector without giving it a home here is an undeclared
 // identifier, and removing one from the middle shifts BOTH directions
@@ -42,7 +42,7 @@
 // then Gary's memory map, then the sequencer re-seed. It is the whole of the
 // register-write half of a restore.
 //
-// It lived at the bottom of Minimig.sv, which meant no testbench could compile
+// It lived at the bottom of AmigaCD.sv, which meant no testbench could compile
 // it without the entire top level -- so the one part of a restore that decides
 // whether the CPU comes back with the right register file had no bench at all,
 // and the only extracted copy was a stale lint artefact under build/lint/.
@@ -143,7 +143,7 @@ assign akiko_out  = ss_akiko;
 // SystemVerilog, hence the .sv: Quartus 17.0 rejects $bits outright in a
 // Verilog-2001 file ("system function \"$bits\" is not supported for
 // synthesis"), and accepts it in a .sv one. The guard was written inside
-// Minimig.sv, which is .sv, so moving this module to a .v file broke a fit
+// AmigaCD.sv, which is .sv, so moving this module to a .v file broke a fit
 // that had never been run against it -- the extension was carrying the
 // feature.
 //
@@ -211,7 +211,7 @@ localparam [4:0] STEP_RES  = 5'd23;
 // goes out. The kernel wants the seed applied before the CPU clock enable
 // is released (TG68KdotC_Kernel.vhd's ss_resume comment), and dropping
 // running in the same edge that raised cpu_resume left that resting on
-// ss_load_busy still being high in Minimig.sv's ss_arm term -- another
+// ss_load_busy still being high in AmigaCD.sv's ss_arm term -- another
 // module's timing, for a property this module claims to enforce on its own.
 // Caught by ss_state_fanout_tb.
 localparam [4:0] STEP_DONE = 5'd24;

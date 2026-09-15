@@ -57,7 +57,7 @@ overwriting. It writes a manifest alongside the files; this section is the why.
 
 | File | Goes to |
 |---|---|
-| `amigacd.rbf` | `/media/fat/_Computer/` (or wherever you keep cores) |
+| `AmigaCD_<date>.rbf` | `/media/fat/_Computer/` (or wherever you keep cores) |
 | `menu.rbf` | `/media/fat/menu.rbf` |
 | `MiSTer_AmigaCD` | `/media/fat/MiSTer_AmigaCD` |
 | `MiSTer` | `/media/fat/MiSTer` — replaces the stock main binary |
@@ -68,10 +68,13 @@ keeps running whatever is at `/media/fat/MiSTer` — and the Menu core's SNAC pa
 navigation lives in *userspace*. Install only `MiSTer_AmigaCD` and the pad works
 in AmigaCD and does nothing in the menu, with no error to explain why.
 
-The AmigaCD core builds as `Minimig.rbf` because the Quartus project is still
-named Minimig; the staging script renames it. The filename is cosmetic either
-way — the core's identity comes from `CONF_STR`, which is why `docs/deployment.md`
-spends a section on it.
+The AmigaCD core builds as `AmigaCD.rbf` and is staged as
+`AmigaCD_YYYYMMDD.rbf` — the date is what the MiSTer menu shows beside the core
+name, and it comes from the filename or not at all (`docs/deployment.md`). It
+built as `Minimig.rbf` until the Quartus project was renamed on 2026-09-15, so a
+tree that has not been rebuilt since still has the old one; `stage-output.sh`
+accepts either. The filename is otherwise cosmetic: the core's identity comes
+from `CONF_STR`, which is why `docs/deployment.md` spends a section on that too.
 
 `menu.rbf` is built from the fork
 [`FringeCoder/Menu_MiSTer`](https://github.com/FringeCoder/Menu_MiSTer), branch
@@ -119,7 +122,7 @@ The Menu figure supersedes the 2026-08-06 run (6m 52s, +0.478 ns); that build
 predates the GunCon gate widening in `rtl/snac_psx.v`, which the Menu core
 carries only because the module is byte-identical across both cores.
 
-**The AmigaCD core needs `SEED 2`, pinned in `Minimig.qsf`.** This is not
+**The AmigaCD core needs `SEED 2`, pinned in `AmigaCD.qsf`.** This is not
 cosmetic: seed 5 closes timing for the pad-only build at +0.400 ns and *fails*
 at −0.180 ns once the light pen and read path are added. Seeds do not transfer
 across netlists. The core also required retiming the SDRAM state decode before
@@ -127,7 +130,7 @@ it would close at all — `docs/sdram-timing-headroom.md` is the whole story, an
 names the fix to reach for when this returns.
 
 **Never pass `--seed` or `--set` to `quartus_fit` in this repo.** They are not
-per-invocation: they rewrite `Minimig.qsf` permanently and expand its `source`
+per-invocation: they rewrite `AmigaCD.qsf` permanently and expand its `source`
 includes inline, leaving the design declared twice.
 
 Plan 1 brought the reader up in the Menu core rather than in AmigaCD precisely

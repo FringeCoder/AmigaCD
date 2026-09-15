@@ -102,14 +102,23 @@
 // one that was never the same ROM. See the CORE_WORDS comment below for why
 // payload word 0 and not a ninth header word.
 //
-// WIRING. Minimig.sv muxes the SDRAM CPU port on `ss_freeze | ss_rom_scan`.
-// Both scans now run frozen, so `rom_scan` is redundant with ss_freeze in both
-// directions; it is kept because it names the window the port is borrowed for,
-// and because the mux would have to change in lockstep with removing it.
+// WIRING. AmigaCD.sv muxes the SDRAM CPU port on `ss_freeze | ss_peek_scan`.
+// `rom_scan` is NOT in that OR any more. Both scans run frozen, so it was a
+// strict subset of ss_freeze and the term bought nothing -- and once ss_ctrl's
+// DDR3 read return was registered it became the binding path in the entire
+// design, eleven of the worst twelve, reaching the CPU cache's tag logic
+// through that mux as a mode flag timed at a single cycle. It is kept as an
+// output because it names the window the port is borrowed for and because
+// ssdiag reports it, but nothing depends on it functionally.
+//
+// The redundancy is proven by ss_ctrl_tb's sticky `scan_unfrozen` observer,
+// asserted as "never scans the ROM unfrozen". If a future change ever lets a
+// scan run with the machine going again, that assertion fails AND the term has
+// to go back into AmigaCD.sv's mux at the same time.
 //
 // The restore-side scan used to run with the machine still going, and the
 // ss_freeze term did not cover it. That was safe as far as the CPU went --
-// cpu_wrapper's ss_arm (Minimig.sv ties it to save_busy | load_busy | fan-out
+// cpu_wrapper's ss_arm (AmigaCD.sv ties it to save_busy | load_busy | fan-out
 // busy) parks the 68k at its next instruction boundary, milliseconds before
 // rom_scan can rise, so the CPU is not on its port to be robbed of it. What it
 // was not safe for is everything ss_arm does NOT stop. Parking the CPU is not
@@ -191,7 +200,7 @@ module ss_ctrl
 	//
 	// 12 MB, up from 4 MB, because a machine with 8 MB of Zorro II fast RAM
 	// has 11.5 MB of state and the four slots have to hold the largest case.
-	// The window moved down to 0x3C000000 to make room; see Minimig.sv.
+	// The window moved down to 0x3C000000 to make room; see AmigaCD.sv.
 	parameter SLOT_WORDS = 32'h300000,
 	// Clocks to wait for one SDRAM word during the ROM scan before concluding
 	// the CPU port is not being routed here at all. A cache hit answers in a
@@ -258,7 +267,7 @@ module ss_ctrl
 	output reg                rom_scan,
 
 	// Invalidate the 68020's cache at the end of a restore, before the machine
-	// is let go. Minimig.sv ORs this into cpu_cache_ctrl[3], the CACR clear
+	// is let go. AmigaCD.sv ORs this into cpu_cache_ctrl[3], the CACR clear
 	// bit, so this reuses the machine's own invalidate rather than adding a
 	// second one; cpu_cache_new edge-detects that bit (cpu_cache_clear).
 	//
@@ -277,7 +286,7 @@ module ss_ctrl
 	output reg                clut_wr_en,
 	output reg  [31:0]        clut_wr_data,
 
-	// Custom chipset register shadow (ss_regshadow, instantiated in Minimig.sv).
+	// Custom chipset register shadow (ss_regshadow, instantiated in AmigaCD.sv).
 	// Read out on a save, loaded back and replayed on a restore.
 	output reg  [7:0]         shadow_rd_addr,
 	input      [15:0]         shadow_rd_data,
@@ -316,7 +325,7 @@ module ss_ctrl
 	// completed and then crashed the Amiga all present as "nothing happened,
 	// and no toast".
 	//
-	// The consumer is Minimig.sv, which aggregates these with the outcome
+	// The consumer is AmigaCD.sv, which aggregates these with the outcome
 	// levels above and publishes the result on hps_ext.v's 0xF600 UIO read
 	// sub-channel; support/minimig/minimig_ssdiag.cpp polls that and logs it.
 	// See the header of that file for why the aggregation (the last non-idle
@@ -351,7 +360,7 @@ module ss_ctrl
 	output reg [127:0]        peek_data,     // four longwords, low address first
 	output reg                peek_valid,    // sticky until the next request
 
-	// High for the length of a peek. Minimig.sv ORs it into cpu_wrapper's
+	// High for the length of a peek. AmigaCD.sv ORs it into cpu_wrapper's
 	// ss_arm, which parks the 68k: the SDRAM CPU port is the CPU's, and it
 	// does not answer a borrowed request while the CPU is still driving it.
 	// The first live peek timed out for exactly that reason -- the ROM
@@ -366,7 +375,7 @@ module ss_ctrl
 	// Driving rom_scan from the peek states too widened its fan-in enough to
 	// fail setup by 0.136 ns -- the failing paths ended at rom_scan and came
 	// from the CRC and the payload index, i.e. the save path's own logic.
-	// Minimig.sv ORs the two into the port mux instead, which costs nothing.
+	// AmigaCD.sv ORs the two into the port mux instead, which costs nothing.
 	output reg                peek_scan,
 
 	// ---------------------------------------------------- restore post-mortem
@@ -827,7 +836,7 @@ reg        chip_wr_half;
 //
 // That is what rom_scan is for: it is high whenever this module needs the
 // SDRAM CPU port, which on the restore path is a time when `freeze` is low.
-// Minimig.sv currently muxes that port on ss_freeze alone; see the wiring note
+// AmigaCD.sv currently muxes that port on ss_freeze alone; see the wiring note
 // in the module header.
 reg [24:1] kick_addr;
 reg [23:0] kick_pairs;
@@ -1125,6 +1134,45 @@ begin
 end
 endtask
 
+// DDR3 read return, registered locally.
+//
+// Timing, not function. The f2sdram bridge sits a long way from this module on
+// the die and ddr_readdatavalid was reaching the state register directly across
+// that distance. report_timing on the seed 10 netlist had
+//
+//     0.117  f2sdram~FF_3780 -> ss_ctrl|state.S_L_KICK_CHK
+//     0.286  f2sdram~FF_3780 -> ss_ctrl|state.S_L_MAGIC
+//
+// as the worst setup path in the whole design and three more of the same shape
+// in the worst ten -- S_L_KICK_CHK and S_L_MAGIC are only ever entered from
+// S_L_RD_DATA's `if (ddr_readdatavalid) state <= rd_ret`, so the source really
+// is the valid strobe crossing the die. One long hop becomes two short ones.
+//
+// The cycle this costs is free. Both consumers -- S_FAST_DATA and S_L_RD_DATA --
+// sit and wait for the beat with nothing else to do, one 64-bit read already
+// costs tens of cycles of DDR3 latency, and a restore is a bulk transfer with
+// the machine frozen. It is not a real-time path and never was.
+//
+// ddr_waitrequest is deliberately NOT registered. Avalon requires it to be
+// sampled in the same cycle as the command, so delaying it would break the
+// protocol rather than relax it. The same goes for the write path, where
+// ddr_write is dropped on !ddr_waitrequest.
+//
+// readdatavalid is one beat per read here -- burstcount is 1, and reads are
+// issued one at a time, serialised against the write path by word_busy -- so a
+// one-cycle delay cannot merge or drop beats.
+reg [63:0] ddr_readdata_q;
+reg        ddr_readdatavalid_q;
+always @(posedge clk) begin
+	if (!rst_n) begin
+		ddr_readdatavalid_q <= 1'b0;
+	end
+	else begin
+		ddr_readdatavalid_q <= ddr_readdatavalid;
+		if (ddr_readdatavalid) ddr_readdata_q <= ddr_readdata;
+	end
+end
+
 always @(posedge clk) begin
 	if (!rst_n) begin
 		state            <= S_IDLE;
@@ -1268,7 +1316,7 @@ always @(posedge clk) begin
 			//
 			// They used to be cleared unconditionally at this point, which made
 			// each one a single clk cycle wide. This module runs at 113.5 MHz
-			// and Minimig.sv edge-detects these on clk_sys at 28.6 MHz: an 8.8 ns
+			// and AmigaCD.sv edge-detects these on clk_sys at 28.6 MHz: an 8.8 ns
 			// pulse against a 35 ns sample period is missed nearly every time,
 			// so the core's OSD toast never fired for a save. Measured on
 			// hardware -- the only toast a save produced was the host's own
@@ -1286,7 +1334,7 @@ always @(posedge clk) begin
 				// still running and freeze only at the end, on the reasoning
 				// that a refusal should not disturb a machine it was never
 				// going to touch. The reasoning was sound; the premise was
-				// not. `ss_arm` (Minimig.sv ties it to save/load/fan-out busy)
+				// not. `ss_arm` (AmigaCD.sv ties it to save/load/fan-out busy)
 				// parks the 68k for the whole of that validation, but parking
 				// the CPU is not freezing the Amiga: Agnus, Denise, Paula and
 				// the CIAs keep running. Measured on hardware, validation
@@ -1918,8 +1966,8 @@ always @(posedge clk) begin
 		end
 
 		S_FAST_DATA: begin
-			if (ddr_readdatavalid) begin
-				fast_dat <= ddr_readdata;
+			if (ddr_readdatavalid_q) begin
+				fast_dat <= ddr_readdata_q;
 				state    <= S_FAST_Q0;
 			end
 		end
@@ -2041,8 +2089,8 @@ always @(posedge clk) begin
 		// into an intermittent half-restore, which is a strictly worse thing to
 		// have to diagnose.
 		S_L_RD_DATA: begin
-			if (ddr_readdatavalid) begin
-				rd_data <= ddr_readdata;
+			if (ddr_readdatavalid_q) begin
+				rd_data <= ddr_readdata_q;
 				rd_pair <= {1'b0, rd_idx[23:1]};
 				state   <= rd_ret;
 			end
@@ -2118,7 +2166,7 @@ always @(posedge clk) begin
 						// The machine is already frozen -- S_L_FREEZE ran
 						// before any of this, so the scan and both directions
 						// of it now behave the same way. rom_scan still rises
-						// because Minimig.sv muxes the SDRAM CPU port on
+						// because AmigaCD.sv muxes the SDRAM CPU port on
 						// (ss_freeze | ss_rom_scan) and the scan needs that
 						// port; here it is redundant with ss_freeze, as it has
 						// always been on the save side.
