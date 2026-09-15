@@ -21,11 +21,31 @@ things:
 git clone https://github.com/dirkwhoffmann/vAmigaTS
 ```
 
-**A Kickstart is required** and is not ours to ship. The tests' own reference
-scripts say so (`regression setup A500_OCS_1MB /tmp/kick13.rom`), and a probe
-booted without one stops after printing its title — verified here against
-Copperline's bundled AROS, not assumed. The core needs a Kickstart to run at
-all, so this is not an extra hurdle, but the ROM must already be on the card.
+**A Kickstart is required** and is not ours to ship. It is Cloanto's, still sold
+as Amiga Forever, and the core's own README says where a legitimate copy comes
+from: dump the ROM from your own machine, or buy that. A probe booted without one
+stops after printing its title — verified against Copperline's bundled AROS, not
+assumed.
+
+This is not an extra hurdle. **The core cannot run without a Kickstart**, so if
+the core runs at all, the ROM is already on the card and the harness uses
+whatever is configured.
+
+**Which version, though, is a variable worth controlling.** vAmigaTS's
+references were taken with **Kickstart 1.3** — every `.retrosh` in the suite says
+`regression setup A500_OCS_1MB /tmp/kick13.rom`. The VPOS probes take the machine
+over completely (interrupts and DMA off, no OS calls), so they *should* be
+ROM-independent, and Copperline's `timing-test` README reports its display probes
+verified byte-identical between AROS and a Kickstart 1.3 boot. But "should" is
+not "were". If a probe disagrees with the photograph, the ROM version is the
+first thing to rule out, not the last:
+
+```sh
+./scripts/vamigats.sh kickstart
+```
+
+reports which Kickstart the core is configured with and which ROM files are on
+the card.
 
 ## Running a test
 

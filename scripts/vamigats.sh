@@ -21,13 +21,28 @@
 #
 #   git clone https://github.com/dirkwhoffmann/vAmigaTS
 #
-# A KICKSTART IS REQUIRED and is not ours to ship. The tests' own reference
-# scripts say so ("regression setup A500_OCS_1MB /tmp/kick13.rom"), and a probe
-# booted without one stops after printing its title -- verified, not assumed.
-# The core needs a Kickstart to run at all, so this is not an extra hurdle, but
-# it does mean the ROM must already be on the card.
+# A KICKSTART IS REQUIRED and is not ours to ship -- it is Cloanto's, still sold
+# as Amiga Forever, and the core's own README says to dump your machine's ROM or
+# buy that. This is not an extra hurdle: the core cannot run without one, so if
+# the core runs, the ROM is already on the card and this uses whatever is
+# configured.
+#
+# BUT WHICH ONE MATTERS, and it is not obvious. vAmigaTS's references were taken
+# with KICKSTART 1.3 -- every .retrosh in the suite says "regression setup
+# A500_OCS_1MB /tmp/kick13.rom". The VPOS probes take the machine over
+# completely (interrupts and DMA off, no OS calls), so they SHOULD be
+# ROM-independent, and Copperline's own timing-test README says its display
+# probes were verified byte-identical between AROS and a Kickstart 1.3 boot.
+# "Should" is not "were". If a probe disagrees with the reference, the ROM
+# version is the first variable to rule out, not the last -- run the kickstart
+# mode below and compare.
 #
 # MODES
+#
+#   ./scripts/vamigats.sh kickstart
+#       Report which Kickstart the core is configured with, and which ROM files
+#       are on the card. Worth running once before the first test -- see the
+#       note on 1.3 below.
 #
 #   ./scripts/vamigats.sh inventory <vamigats-path>
 #       What is in the suite and how much of it has a hardware reference.
@@ -77,6 +92,35 @@ host() {
 sshm() {
     ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
         "root@$1" "$2"
+}
+
+# ---------------------------------------------------------------------------
+cmd_kickstart() {
+    local H; H="$(host)" || return 1
+    echo "== MiSTer at $H"
+    echo
+    echo "-- Kickstart the core is configured with"
+    # minimig_config.kickstart[] is persisted in the core's .cfg; the config
+    # name follows user_io_get_core_name(), so AmigaCD.cfg is the slot-0 one.
+    # The path is stored as text inside a binary blob, so pull printable runs
+    # out of it rather than pretending to parse the struct.
+    sshm "$H" "for f in /media/fat/config/AmigaCD*.cfg; do [ -e \"\$f\" ] || continue; echo \"\$f:\"; strings -n 4 \"\$f\" 2>/dev/null | grep -iE '\\.rom\$|kick|aros' | head -4; done; true"
+    echo
+    echo "-- ROM files on the card"
+    sshm "$H" "ls -l /media/fat/*.rom /media/fat/Amiga*/*.rom /media/fat/games/Amiga/*.rom 2>/dev/null | head -10; true"
+    echo
+    cat <<'NOTE'
+WHAT TO LOOK FOR
+
+  vAmigaTS's reference images were taken with KICKSTART 1.3. The VPOS probes
+  take the machine over completely, so they should not care -- but that is an
+  expectation, not a measurement. If a probe's values disagree with the
+  photograph, check the ROM version before concluding anything about the RTL.
+
+  If you want to match the reference exactly, configure a 1.3 image for the test
+  runs and put the usual one back afterwards. The core's README says where a
+  legitimate ROM comes from: dump your own machine's, or Amiga Forever.
+NOTE
 }
 
 # ---------------------------------------------------------------------------
@@ -205,6 +249,7 @@ cmd_compare() {
 
 # ---------------------------------------------------------------------------
 case "${1:-}" in
+    kickstart) shift; cmd_kickstart "$@" ;;
     inventory) shift; cmd_inventory "$@" ;;
     run)       shift; cmd_run "$@" ;;
     compare)   shift; cmd_compare "$@" ;;
