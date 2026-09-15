@@ -326,6 +326,114 @@ static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
 // volume label, or a TOC-geometry UUID for discs without one.
 static const char *amigacd_ss_name();
 
+// ---------------------------------------------------------------------------
+// System row: show the choice now, apply it when the stepping stops
+// ---------------------------------------------------------------------------
+// Stepping CD32 -> CDTV -> A500 -> A1200 used to do the whole switch on every
+// press: write the leaving machine's config out, read the arriving one back,
+// resolve its ROMs, and re-open the CD image. Three presses to cross the list
+// meant three of those, so the row answered in its own time rather than in the
+// user's -- and two thirds of that work was for machines being passed through.
+//
+// So the press only moves a pending value, and the work happens once the row
+// has been still for AMIGACD_SYS_APPLY_MS. Same end state, one apply.
+//
+// The pending value is not a preview of something that might not happen: it is
+// committed on the timer, and committed immediately if the user leaves the row,
+// the page or the OSD first. There is no path that shows a machine in the row
+// and leaves a different one running -- that would be worse than being slow.
+#define AMIGACD_SYS_APPLY_MS 500
+
+static int      sys_pending = -1;      // -1 = nothing armed
+static uint32_t sys_pending_timer = 0;
+
+// The work itself, unchanged from when it ran inside the row handler -- only
+// when it runs has changed.
+static void amigacd_system_apply(int sys)
+{
+	int old_sys = amigacd_system();
+
+	// Each machine keeps its own settings. The machine being left is written
+	// out first, then the one arriving is read back if it has ever been
+	// configured -- so the discs, hard disks, RAM and ROM of both survive a
+	// round trip through the row.
+	if (!amigacd_switch_system(old_sys, sys))
+	{
+		// First time on this machine: build it from the profile. A missing
+		// default ROM is worth saying out loud -- the machine still boots, but
+		// as whatever Amiga the old ROM makes it, and the only other clue is
+		// the Main ROM row two menus away.
+		if (!amigacd_apply_system(sys))
+		{
+			const char *mname = 0;
+			amigacd_default_rom_names(sys, &mname, 0);
+			char msg[128];
+			snprintf(msg, sizeof(msg), "%s ROM %s not found",
+			         amigacd_system_name(sys), mname);
+			Info(msg, 2500);
+		}
+
+		// The A1200 has no CD drive, so a disc mounted under a previous system
+		// has to go with it -- otherwise the row keeps naming a disc that
+		// nothing can read.
+		if (sys == AMIGACD_SYS_A1200)
+		{
+			minimig_config.hardfile[0].filename[0] = 0;
+			ide_open(0, "");
+		}
+		// Refresh the active bridge with the mounted CD, if any.
+		else if (minimig_config.hardfile[0].filename[0])
+			ide_open(0, minimig_config.hardfile[0].filename);
+	}
+}
+
+// What the row should say: the pending choice while one is armed, otherwise the
+// machine actually running.
+static int amigacd_system_shown()
+{
+	return (sys_pending >= 0) ? sys_pending : amigacd_system();
+}
+
+// Commit now, whatever the timer says. Called when the timer expires and from
+// every path that leaves the row. Returns 1 if a machine was actually switched,
+// which is the caller's cue to redraw: the switch changes which rows the page
+// has, not just what this one says.
+static int amigacd_system_flush()
+{
+	if (sys_pending < 0) return 0;
+
+	int sys = sys_pending;
+	sys_pending = -1;
+	sys_pending_timer = 0;
+
+	if (sys == amigacd_system()) return 0;   // stepped all the way back round
+
+	amigacd_system_apply(sys);
+	return 1;
+}
+
+// Arm or re-arm. Each press pushes the deadline out, so holding a direction
+// walks the list at the menu's own repeat rate and applies once at the end.
+static void amigacd_system_arm(int sys)
+{
+	sys_pending = sys;
+	sys_pending_timer = GetTimer(AMIGACD_SYS_APPLY_MS);
+	// GetTimer can return 0, and 0 is this code's "nothing armed". The bluetooth
+	// icon timer above guards the same way for the same reason; without it the
+	// apply would wait for the user to leave the row instead of for the timer.
+	if (!sys_pending_timer) sys_pending_timer = 1;
+}
+
+// Called from the page's input state on every pass, which is what makes the
+// deadline a deadline rather than something only the next keypress notices.
+static int amigacd_system_tick()
+{
+	if (sys_pending >= 0 && sys_pending_timer && CheckTimer(sys_pending_timer))
+		return amigacd_system_flush();
+
+	return 0;
+}
+
 // Full-screen preview of what a save slot holds, shown while the cursor sits on
 // a Save slot row. The picture is the frame process_ss() captured at save time;
 // see ss_thumb_path_for_slot().
@@ -1285,6 +1393,15 @@ static void *close_pipe_async(void *arg)
 void HandleUI(void)
 {
 	PROFILE_FUNCTION();
+
+	// A pending System change belongs to the AmigaCD main page. Any other state
+	// means the row is gone -- moved off, paged away, OSD closed by something
+	// other than the menu key -- and the choice the row was showing has to be
+	// honoured rather than dropped.
+	if (menustate != MENU_AMIGACD_MAIN1 && menustate != MENU_AMIGACD_MAIN2)
+	{
+		amigacd_system_flush();
+	}
 
 	// The save state preview replaces the core's live video, so it must not be
 	// able to outlive the two pages that own it. Their draws turn it on and off
@@ -7003,7 +7120,7 @@ void HandleUI(void)
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " System   : ");
-		strcat(s, amigacd_system_name(amigacd_system()));
+		strcat(s, amigacd_system_name(amigacd_system_shown()));
 		OsdWrite(m++, s, menusub == 6, 0);
 
 		OsdWrite(m++, "", 0, 0);
@@ -7038,8 +7155,22 @@ void HandleUI(void)
 	}
 
 	case MENU_AMIGACD_MAIN2:
+		// The deadline has to be checked by something that runs, not by the
+		// next keypress -- the whole point is that there may not be one. A
+		// switch that lands here redraws, because it changes which rows the
+		// page has: the A1200 has no CD row.
+		if (amigacd_system_tick())
+		{
+			menustate = MENU_AMIGACD_MAIN1;
+			break;
+		}
+
 		if (menu)
 		{
+			// Leaving with a change still pending applies it now. The row has
+			// been showing that machine; walking away from it must not leave a
+			// different one running.
+			amigacd_system_flush();
 			menustate = MENU_NONE1;
 		}
 		else if (c == KEY_BACKSPACE && menusub == 0) // eject CD
@@ -7254,44 +7385,19 @@ void HandleUI(void)
 				{
 					// minus steps backwards so the row behaves like every
 					// other multi-value row in this menu.
-					int old_sys = amigacd_system();
+					//
+					// Stepping from the SHOWN machine, not the running one, so
+					// a second press while an apply is pending moves on from
+					// what the row says rather than jumping back.
+					int old_sys = amigacd_system_shown();
 					int sys = minus ? (old_sys + AMIGACD_SYS_COUNT - 1) % AMIGACD_SYS_COUNT
 					                : (old_sys + 1) % AMIGACD_SYS_COUNT;
 
-					// Each machine keeps its own settings. The machine being
-					// left is written out first, then the one arriving is read
-					// back if it has ever been configured -- so the discs, hard
-					// disks, RAM and ROM of both survive a round trip through
-					// the row.
-					if (!amigacd_switch_system(old_sys, sys))
-					{
-						// First time on this machine: build it from the
-						// profile. A missing default ROM is worth saying out
-						// loud -- the machine still boots, but as whatever
-						// Amiga the old ROM makes it, and the only other clue
-						// is the Main ROM row two menus away.
-						if (!amigacd_apply_system(sys))
-						{
-							const char *mname = 0;
-							amigacd_default_rom_names(sys, &mname, 0);
-							char msg[128];
-							snprintf(msg, sizeof(msg), "%s ROM %s not found",
-							         amigacd_system_name(sys), mname);
-							Info(msg, 2500);
-						}
-
-						// The A1200 has no CD drive, so a disc mounted under a
-						// previous system has to go with it -- otherwise the
-						// row keeps naming a disc that nothing can read.
-						if (sys == AMIGACD_SYS_A1200)
-						{
-							minimig_config.hardfile[0].filename[0] = 0;
-							ide_open(0, "");
-						}
-						// Refresh the active bridge with the mounted CD, if any.
-						else if (minimig_config.hardfile[0].filename[0])
-							ide_open(0, minimig_config.hardfile[0].filename);
-					}
+					// The work is deferred -- see amigacd_system_arm(). Three
+					// presses to cross the list should cost one switch, not
+					// three, and the two machines passed through do not need
+					// their configs written and read at all.
+					amigacd_system_arm(sys);
 					menustate = MENU_AMIGACD_MAIN1;
 				}
 			}
