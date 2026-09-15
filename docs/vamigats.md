@@ -44,8 +44,38 @@ first thing to rule out, not the last:
 ./scripts/vamigats.sh kickstart
 ```
 
-reports which Kickstart the core is configured with and which ROM files are on
-the card.
+reports which Kickstart the core is configured with, whether a `rom.key` is
+present, and sizes every ROM on the card against what the core accepts.
+
+### Amiga Forever ROMs need no decryption
+
+Copy them across as they are, along with `rom.key`. `UploadKickstart()` in
+`support/minimig/minimig_config.cpp` loads the key from the core's home
+directory or the card root and decrypts on upload.
+
+The key goes in **`/media/fat/games/Amiga/`** (or the card root). That is the
+core's home directory: `user_io_get_core_path` maps both `minimig` and `amigacd`
+to `Amiga` (`user_io.cpp:206`), so the two cores share ROMs and disks.
+
+**The core identifies a ROM by its size** — that is the whole detection
+mechanism, not a sanity check, and an unrecognised size fails with nothing but
+`Unsupported ROM file size!`:
+
+| bytes | what |
+|---|---|
+| 262,144 | 256 KB plain — **Kickstart 1.2/1.3**, the one vAmigaTS wants |
+| 262,155 | 256 KB Amiga Forever encrypted |
+| 524,288 | 512 KB plain — Kickstart 2.x/3.x |
+| 524,299 | 512 KB Amiga Forever encrypted |
+| 1,048,576 | 1 MB plain |
+| 8,192 / 8,203 | A1000 boot ROM, plain / encrypted |
+
+The encrypted forms are the plain size plus 11 bytes.
+
+**One gap worth knowing before it wastes an evening:** there are branches for
+encrypted 256 KB and 512 KB ROMs but **not** for an encrypted 1 MB one. A 1 MB
+Amiga Forever ROM (1,048,587 bytes) falls straight through to `Unsupported ROM
+file size!`. Use a decrypted 1 MB image, or a 512 KB ROM, in that case.
 
 ## Running a test
 

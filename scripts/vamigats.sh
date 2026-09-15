@@ -106,20 +106,54 @@ cmd_kickstart() {
     # out of it rather than pretending to parse the struct.
     sshm "$H" "for f in /media/fat/config/AmigaCD*.cfg; do [ -e \"\$f\" ] || continue; echo \"\$f:\"; strings -n 4 \"\$f\" 2>/dev/null | grep -iE '\\.rom\$|kick|aros' | head -4; done; true"
     echo
-    echo "-- ROM files on the card"
-    sshm "$H" "ls -l /media/fat/*.rom /media/fat/Amiga*/*.rom /media/fat/games/Amiga/*.rom 2>/dev/null | head -10; true"
+    echo "-- Amiga Forever key file"
+    # UploadKickstart() looks in HomeDir() then the card root. HomeDir() for
+    # this core resolves to "Amiga": user_io_get_core_path maps both "minimig"
+    # and "amigacd" to it (user_io.cpp:206), so Minimig and AmigaCD share ROMs.
+    sshm "$H" "ls -l /media/fat/games/Amiga/ROM.KEY /media/fat/games/Amiga/rom.key /media/fat/ROM.KEY /media/fat/rom.key 2>/dev/null || echo '  (none found -- only needed for ENCRYPTED Amiga Forever ROMs)'"
+    echo
+
+    echo "-- ROM files, sized against what the core accepts"
+    # The core identifies a ROM BY SIZE (minimig_config.cpp UploadKickstart),
+    # so the size is not trivia -- it is the whole detection mechanism, and an
+    # unrecognised one fails with nothing but "Unsupported ROM file size!".
+    sshm "$H" "ls -l /media/fat/*.rom /media/fat/games/Amiga/*.rom /media/fat/Amiga*/*.rom 2>/dev/null | head -12; true" \
+      | awk '
+          { print }
+          /\.[rR][oO][mM]$/ {
+            n = $5
+            # if/else rather than a ternary chain: mawk rejects a chain split
+            # across lines, and this has to survive whatever awk is to hand.
+            if      (n == 262144)  t = "256K plain (KS 1.2/1.3)"
+            else if (n == 262155)  t = "256K Amiga Forever encrypted (needs ROM.KEY)"
+            else if (n == 524288)  t = "512K plain (KS 2.x/3.x)"
+            else if (n == 524299)  t = "512K Amiga Forever encrypted (needs ROM.KEY)"
+            else if (n == 1048576) t = "1MB plain"
+            else if (n == 8192)    t = "A1000 boot ROM"
+            else if (n == 8203)    t = "A1000 boot ROM, encrypted"
+            else                   t = "SIZE NOT RECOGNISED -- this one will be refused"
+            print "       ^ " t
+          }'
     echo
     cat <<'NOTE'
 WHAT TO LOOK FOR
 
-  vAmigaTS's reference images were taken with KICKSTART 1.3. The VPOS probes
-  take the machine over completely, so they should not care -- but that is an
-  expectation, not a measurement. If a probe's values disagree with the
-  photograph, check the ROM version before concluding anything about the RTL.
+  vAmigaTS's reference images were taken with KICKSTART 1.3, which is a 256 KB
+  ROM. The VPOS probes take the machine over completely, so they should not
+  care -- but that is an expectation, not a measurement. If a probe's values
+  disagree with the photograph, check the ROM version before concluding
+  anything about the RTL.
 
-  If you want to match the reference exactly, configure a 1.3 image for the test
-  runs and put the usual one back afterwards. The core's README says where a
-  legitimate ROM comes from: dump your own machine's, or Amiga Forever.
+AMIGA FOREVER ROMS NEED NO DECRYPTION
+
+  Copy them across as they are, together with rom.key. The core loads the key
+  (from games/Amiga/ or the card root) and decrypts on upload -- the encrypted
+  forms are recognised by their size, which is the plain size plus 11 bytes.
+
+  ONE GAP, worth knowing before it wastes an evening: there is a branch for
+  encrypted 256 KB and 512 KB ROMs but NOT for an encrypted 1 MB one. A 1 MB
+  Amiga Forever ROM (1048587 bytes) falls through to "Unsupported ROM file
+  size!". Use a decrypted 1 MB image, or a 512 KB ROM, for that case.
 NOTE
 }
 
