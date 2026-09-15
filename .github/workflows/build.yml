@@ -213,5 +213,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # menu.sv in FringeCoder/Menu_MiSTer packs snac_state and snac_psx_poll()
+      # here unpacks it. Nothing connects the two but the word order, and getting
+      # it wrong makes every button a different button -- which looks like a
+      # broken pad reader rather than a field order. Neither repository can see
+      # the other in CI, so each is pinned to the table in
+      # docs/snac-state-contract.md; a change on either side that is not also a
+      # change to that table fails where it was made. The Menu core runs the
+      # same check on its packing side.
+      #
+      # If this fails, do NOT delete it as stale: the unpacking has moved, and
+      # the fields are about to be read out of the wrong words.
+      - name: snac_state word order matches the contract
+        run: ./snac_state_check.sh
+
       - name: Run native unit tests
         run: make -C tests
