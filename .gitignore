@@ -62,3 +62,10 @@ output/
 # Diagnostic tarballs pulled off the MiSTer by scripts/collect-diag.sh.
 # Machine state, not source: they carry the device's config and logs.
 diag/
+
+# Icarus bench artefacts. The rtl-sim workflow compiles into build/ and some
+# benches dump a .vcd beside themselves; CI builds in a fresh checkout so these
+# only appear after running the suite locally -- which is exactly when a
+# `git add -A` sweeps them in.
+build/
+*.vcd

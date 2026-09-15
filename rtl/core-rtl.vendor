@@ -1,0 +1,47 @@
+# Provenance of the RTL this repository copies from the AmigaCD core.
+#
+# NONE OF THE FILES BELOW ARE CANONICAL HERE. They are built in the core, which
+# is the only place they are synthesised; they exist here because their
+# testbenches do (rtl/tb/*_tb.v) and Icarus needs the sources beside them. Fix a
+# bug in the core and re-vendor. Fixing it in a copy means the two diverge and
+# the next sync quietly reverts you.
+#
+# rtl/snac_psx.v is NOT in this list and is the one exception: it is canonical
+# HERE, and both core repos take a copy of it. See rtl/README.md, which sets out
+# which way round each file goes and why.
+#
+# This is checked in CI: ./core_rtl_vendor_check.sh. If that step fails, do NOT
+# restamp to make it green -- restamping records whatever is here as correct,
+# which is the one thing the check exists to doubt.
+#
+# WHY IT EXISTS. It already went wrong, silently, for two commits. On 2026-09-15
+# rtl/ss_ctrl.v here was behind the core's: the core had registered its DDR3
+# read return (a timing fix, eleven of the design's worst twelve paths) and
+# dropped the rom_scan term from the SDRAM port mux, and neither had been copied
+# over. Both repositories' CI was green the whole time. rtl/tb/ss_ctrl_tb.v --
+# which the core's own source comments cite as the proof of that wiring -- was
+# running against a module the core had stopped building.
+#
+# repo_former is the core's name before its 2026-09-15 GitHub rename. The rename
+# is a settings action that had not happened when this stamp was written, so the
+# check accepts either name; delete that line once every clone has been
+# re-pointed.
+#
+# Refresh with: ./core_rtl_vendor_check.sh --stamp /path/to/core-checkout
+
+repo   = FringeCoder/AmigaCD_MiSTer
+repo_former = FringeCoder/Minimig-AGA-cd32-cdtv-native-akiko
+vendored = 2026-09-15
+
+# path                     sha256                                                           commit
+files:
+rtl/snac_cd32.v              15836ff777fde5b331f2badc0f1910df63657aa09ee85b70bf0fa9577a642013 7b1dbcfda1131b8c8e402538135cc52f827823fd
+rtl/ss_crc32.v               d830e8c182057ef03178df0b0760c18235c57df781b55ad1c7e0b7e930054f30 7b1dbcfda1131b8c8e402538135cc52f827823fd
+rtl/ss_ctrl.v                3443c1af356c780a7529b832bacb6bd3947c6a76706e3a24328480966c4a5296 e26a5e55f43b407d547094901c95f52491ce646e
+rtl/ss_dma.v                 7ee484804d221a64a4a4674dd68d29fe1bac32a496d59b27633cbfc80425c287 382f96b4531106d3f1dc79b2857e46a23f5573ec
+rtl/ss_freeze_phase.v        c2e11d3c6a34c8a8256c73121af337e9e8d9287d63c2f52769a7290af5d74cfa e26a5e55f43b407d547094901c95f52491ce646e
+rtl/ss_quiesce.v             15be7f3e5974b3a3f0244ee7148db01b61a6134afd3e812a7f80a6277c8897dd e26a5e55f43b407d547094901c95f52491ce646e
+rtl/ss_regshadow.v           4ca59a9a8ee6f2a8534859822afaa61739f31578ca04e558c6ae7be0f9542c45 e26a5e55f43b407d547094901c95f52491ce646e
+rtl/ss_serdes.v              5124b673b6f98bbb34171c427ca6cdb65eef96c159d3e63567e453a8b706005d 7b1dbcfda1131b8c8e402538135cc52f827823fd
+rtl/ss_state.vh              d5a5bf96061bfcf45c87a713b1cff890042f653f2b7526bfb9d435ac0bd90099 e26a5e55f43b407d547094901c95f52491ce646e
+rtl/ss_state_fanout.sv       9a86570ce3e82d2d70be8bd5f83ed9faad491b18fa0227b4611d889ccf013616 e26a5e55f43b407d547094901c95f52491ce646e

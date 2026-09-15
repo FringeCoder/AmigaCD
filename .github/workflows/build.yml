@@ -111,6 +111,26 @@ jobs:
       - name: Install Icarus Verilog
         run: sudo apt-get update && sudo apt-get install -y iverilog
 
+      # Ten of the files the benches below compile are COPIES of the AmigaCD
+      # core's. They are built there, not here; they exist here because their
+      # testbenches do. This checks each one still hashes to what
+      # rtl/core-rtl.vendor records, so a copy edited in place fails at the
+      # commit that did it instead of drifting.
+      #
+      # Runs FIRST, before any bench. A green bench against a stale copy is
+      # exactly the state this repository was in until 2026-09-15 -- ss_ctrl.v
+      # here was two commits behind what the core synthesised, and CI was green
+      # on both sides throughout. Knowing which module was tested comes before
+      # knowing that it passed.
+      #
+      # It cannot catch the core moving; that needs a checkout of the core,
+      # which CI has no token for. Deliberately a hard local check rather than a
+      # cross-repo one that degrades to "skipped" when a secret is absent.
+      #
+      # If this fails, do NOT restamp to make it green. See rtl/core-rtl.vendor.
+      - name: Vendored core RTL matches its stamp
+        run: ./core_rtl_vendor_check.sh
+
       # Two runs, because every timing constant in snac_psx.v is derived from
       # CLK_KHZ and a single-rate testbench cannot see a constant that failed to
       # scale -- the inter-poll gap was a raw counter for exactly this reason,
