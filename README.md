@@ -4,7 +4,7 @@ Work towards running the MiSTer **Amiga CD32 / CDTV cores from a real CD-ROM dri
 attached to the MiSTer, instead of from a CHD/CUE image on the SD card.
 
 **This is the userspace half** — a `Main_MiSTer` fork, which builds
-`MiSTer_AmigaCD`. The core half, the RTL that Quartus fits into `amigacd.rbf`,
+`MiSTer_AmigaCD`. The core half, the RTL that Quartus fits into the `.rbf`,
 is [`FringeCoder/AmigaCD_MiSTer`](https://github.com/FringeCoder/AmigaCD_MiSTer),
 and its README carries the feature list and its status. Several features here
 are split across the two repositories, so it is worth knowing which one you are

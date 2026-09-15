@@ -25,8 +25,31 @@ reason. To build and push from WSL instead:
 |---|---|
 | `MiSTer_AmigaCD` | `/media/fat/MiSTer_AmigaCD` |
 | `MiSTer` | `/media/fat/MiSTer` — replaces the stock main binary |
-| `amigacd.rbf` | wherever you keep cores — **on the dev machine that is `/media/fat/_Test/`** |
+| `AmigaCD_<date>.rbf` | wherever you keep cores — **on the dev machine that is `/media/fat/_Test/`** |
 | `menu.rbf` | `/media/fat/menu.rbf` |
+
+### The date beside the core name
+
+The MiSTer menu's core browser shows a date next to each core, and it gets it
+from the **filename**, not from anything inside the bitstream — there is nowhere
+in a `.rbf` for a build date to live. `get_display_name()` in `file_io.cpp`
+looks for `_20` in the name and takes the six characters after it; when that
+fails it writes `------`, which `menu.cpp` renders as `--.--.--`. That dash row
+is the only symptom, and it looks like a build problem rather than a naming one.
+
+So the core is staged as `AmigaCD_YYYYMMDD.rbf`, dated from the fit's mtime, and
+is copied to the card **under that name**. Dropping the date on the way puts the
+dashes back.
+
+Nothing resolves the core by filename, so the dated name is safe: `MiSTer.ini`
+sections match `CONF_STR` (see below), and `bootcore` already understands
+`<core>_YYYYMMDD.rbf` and picks the newest — `matchesCore_yyyyMMdd_rbf()` in
+`bootcore.cpp` exists for this convention.
+
+The one cost is that dated names accumulate. A new build does not replace the
+old one, and every `AmigaCD*.rbf` in the directory is its own menu entry, so
+delete the previous one when you copy a new one. `stage-output.sh` keeps the
+staging directory to a single core and says this on every run.
 
 ### Which core file is actually running
 
@@ -34,9 +57,9 @@ The table says "wherever you keep cores" because the answer is per machine and
 getting it wrong is silent: the copy succeeds, the version numbers all look
 right, and the machine keeps running the core it was already running.
 
-On the development MiSTer the live core is `/media/fat/_Test/amigacd.rbf`.
-There is also a `/media/fat/_Computer/Minimig.rbf`, which is an older AmigaCD
-build and is **not** what gets loaded. Ask the machine rather than guessing:
+On the development MiSTer the live core is under `/media/fat/_Test/`. There is
+also a `/media/fat/_Computer/Minimig.rbf`, which is an older AmigaCD build and
+is **not** what gets loaded. Ask the machine rather than guessing:
 
 ```bash
 ssh root@<mister> "ps aux | grep [M]iSTer_AmigaCD"
@@ -45,12 +68,13 @@ ssh root@<mister> "ps aux | grep [M]iSTer_AmigaCD"
 The running process shows both the binary and the `.rbf` path it was given:
 
 ```
-13989 root  /media/fat/MiSTer_AmigaCD /media/fat/_Test/amigacd.rbf
+13989 root  /media/fat/MiSTer_AmigaCD /media/fat/_Test/AmigaCD_20260915.rbf
 ```
 
-`_Test/` accumulates `amigacd.rbf.<label>` backups — add one rather than
-overwriting blind, since the previous core is the only way back if the new one
-misbehaves.
+`_Test/` accumulates `amigacd.rbf.<label>` backups from before the dated naming
+— keep the previous core around one way or the other, since it is the only way
+back if the new one misbehaves. With dated names that happens by itself, which
+is the other half of why they are worth the clutter.
 
 ### The binary cannot be overwritten while it is running
 
@@ -72,9 +96,14 @@ deploy is not live until the core is reloaded**.
 Both files, against the local copies in `output/`:
 
 ```bash
-ssh root@<mister> "md5sum /media/fat/MiSTer_AmigaCD /media/fat/_Test/amigacd.rbf"
-md5sum output/MiSTer_AmigaCD output/amigacd.rbf
+ssh root@<mister> "md5sum /media/fat/MiSTer_AmigaCD /media/fat/_Test/AmigaCD_*.rbf"
+md5sum output/MiSTer_AmigaCD output/AmigaCD_*.rbf
 ```
+
+If the card side lists more than one core, that is the accumulation the dated
+names cause — the extra ones are old builds still offered by the menu, and the
+core actually loaded is the one `ps aux` named above, not necessarily the
+newest.
 
 The binary also carries a build date — `grep -a -oE "[$]VER:[0-9]+"` prints
 `$VER:YYMMDD` — which is worth a glance but does not identify a commit: two

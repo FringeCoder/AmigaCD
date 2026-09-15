@@ -57,7 +57,7 @@ overwriting. It writes a manifest alongside the files; this section is the why.
 
 | File | Goes to |
 |---|---|
-| `amigacd.rbf` | `/media/fat/_Computer/` (or wherever you keep cores) |
+| `AmigaCD_<date>.rbf` | `/media/fat/_Computer/` (or wherever you keep cores) |
 | `menu.rbf` | `/media/fat/menu.rbf` |
 | `MiSTer_AmigaCD` | `/media/fat/MiSTer_AmigaCD` |
 | `MiSTer` | `/media/fat/MiSTer` — replaces the stock main binary |
@@ -68,12 +68,13 @@ keeps running whatever is at `/media/fat/MiSTer` — and the Menu core's SNAC pa
 navigation lives in *userspace*. Install only `MiSTer_AmigaCD` and the pad works
 in AmigaCD and does nothing in the menu, with no error to explain why.
 
-The AmigaCD core builds as `AmigaCD.rbf`; the staging script renames it to
-`amigacd.rbf`, the lowercase name the card uses. It built as `Minimig.rbf` until
-the Quartus project was renamed on 2026-09-15, so a tree that has not been
-rebuilt since still has the old one — `scripts/stage-output.sh` accepts either.
-The filename is cosmetic either way: the core's identity comes from `CONF_STR`,
-which is why `docs/deployment.md` spends a section on it.
+The AmigaCD core builds as `AmigaCD.rbf` and is staged as
+`AmigaCD_YYYYMMDD.rbf` — the date is what the MiSTer menu shows beside the core
+name, and it comes from the filename or not at all (`docs/deployment.md`). It
+built as `Minimig.rbf` until the Quartus project was renamed on 2026-09-15, so a
+tree that has not been rebuilt since still has the old one; `stage-output.sh`
+accepts either. The filename is otherwise cosmetic: the core's identity comes
+from `CONF_STR`, which is why `docs/deployment.md` spends a section on that too.
 
 `menu.rbf` is built from the fork
 [`FringeCoder/Menu_MiSTer`](https://github.com/FringeCoder/Menu_MiSTer), branch
