@@ -91,28 +91,59 @@ iterating costs seconds instead of a floppy image per attempt.
 `HARDWARE-RIG-PLAN.md` says phase 0 is built and validated with **no hardware
 attached yet**.
 
-### The practical obstacles, stated plainly
+### The route, with no serial cable: a burned CD
 
-- **A stock CD32 has no floppy drive.** The vAmigaTS tests are ADFs. The routes
-  are: burn tests to CD, use an SX-1/SX-32 expansion (which adds a floppy,
-  keyboard, IDE and a proper serial port), or upload over serial with
-  `probesrv`, which is what it exists for.
+Copperline already built this and it needs no cable. `tools/cd32-probe/` there
+is a small AmigaDOS program — the binary `PROBE` is committed — that renders
+**30 measurement rows on screen as hex, to be photographed**, the same approach
+the timing-test disk takes. `make-images.py` splices it into a copy of a
+commercial CD32 disc image in place of `SYS:FSCD`.
 
-- **The AUX port is serial at 0–5 V logic, not RS-232.** The CD32's 6-pin
-  mini-DIN carries keyboard data/clock plus serial TX (pin 2) and RX (pin 6),
-  and the hardware references warn the pins may not be adequately buffered —
-  connecting ±12 V RS-232 directly risks damaging the machine. A USB-TTL
-  adapter with a level-appropriate buffer is the route; a straight serial cable
-  is not.
+That splice is the clever part, and it solves a problem we would otherwise have
+had. A bootable CD32 disc needs a `.TM` trademark block from the Commodore
+developer kit, located by a pointer in the ISO9660 primary volume descriptor —
+no more ours to ship than a Kickstart. Reusing a real disc's boot structure
+means never needing one. (Reportedly `CDTV.TM` works on both machines where
+`CD32.TM` does not, if you ever do build one from scratch.)
 
-- **It is a recapped machine you presumably care about.** None of the above is
-  worth a risk to it. The measurements are valuable; the CD32 is less
-  replaceable than the data.
+**The same ISO goes to all three targets**, which is what makes the comparison
+worth anything:
 
-### Where it would pay off first
+| target | how |
+|---|---|
+| real CD32 | burn it — slow, 4×–8×; CD32 drives dislike fast burns |
+| our core | `scripts/cd32-probe.sh run <iso>` (mounts via `mount_cd`) |
+| Copperline | `--model CD32 --insert-cd-after 0 <iso>` |
+
+`docs/reference/cd32-probe-copperline.tsv` holds Copperline's column for all 30
+rows with what each measures. **Rows 14–23 are the CD seek and read costs** —
+Akiko's behaviour, the thing nothing else can measure. Rows 24–29 are bus-cycle
+costs against the CIA E-clock, which bear on the memory router and DDR3 paths.
+
+You supply the game image; Copperline's README says which variant answers which
+rows, and the data-only padded variant is the one for the seek rows.
+
+### Still true, and worth keeping in mind
+
+- **A stock CD32 has no floppy drive**, so the vAmigaTS ADFs do not run on it
+  without an SX-1/SX-32. That is fine — as above, they are the wrong machine
+  class anyway. The CD route reaches what actually matters.
+- **Do not use the AUX port as RS-232.** If you ever do get a cable: the 6-pin
+  mini-DIN carries serial at 0–5 V logic, and the hardware references warn the
+  pins may not be adequately buffered. ±12 V RS-232 straight in risks the
+  machine. A USB-TTL adapter with a level-appropriate buffer, or nothing.
+- **It is a recapped machine you presumably care about.** Burning a CD-R risks
+  nothing; that is the other reason this is the right route.
+
+### Where it pays off first
 
 `akiko-sector-slot-order` — the order and timing with which Akiko delivers
-sectors. We implement it, Copperline implements it, and neither of us has ever
-seen what the chip actually does. One capture would settle a question two
-projects are currently guessing at, and it is the kind of thing that shows up as
-a game that boots on hardware and not in emulation.
+sectors. We implement it, Copperline implements it, and neither of us has seen
+what the chip actually does. Rows 14–23 are that question. One photograph
+settles what two projects are currently guessing at, and it is the class of
+thing that shows up as a game booting on hardware and not in emulation.
+
+A row where our core and the real machine disagree is a finding about this core.
+A row where **Copperline** and the real machine disagree is worth sending them:
+their `HARDWARE-RIG-PLAN.md` says the rig is built and validated with no
+hardware ever attached.

@@ -1,0 +1,58 @@
+# The cd32-probe row map, with Copperline's column.
+#
+# WHAT THIS IS FOR. A real CD32 running Copperline's tools/cd32-probe displays
+# 30 measurement rows on screen as hex. Photograph the screen, mount the SAME
+# ISO on our core with scripts/cd32-probe.sh, and the three columns -- real
+# hardware, Copperline, us -- line up row for row.
+#
+# WHY IT MATTERS MORE THAN THE REST. Rows 14-23 are CD seek and read costs:
+# Akiko's behaviour, which is this core's speciality and the one area where no
+# test suite exists at all. Copperline's own HARDWARE-RIG-PLAN.md lists
+# akiko-sector-slot-order-no-ground-truth as an open item. A photograph of these
+# rows on a real CD32 would be the first measurement either project has.
+#
+# Rows 24-29 are bus-cycle costs against the CIA E-clock -- unmapped, ROM and
+# chip reads and writes -- which bear on the memory_router and ddram paths.
+#
+# THE COPPERLINE COLUMN IS NOT GROUND TRUTH. It is what one emulator predicts.
+# Where a row is written "~139 ms" rather than as hex, Copperline's README gives
+# it as an approximation, so treat the hex rows as the comparable ones and the
+# rest as order-of-magnitude.
+#
+# Source: tools/cd32-probe/README.md in CopperlineHQ/Copperline @ e868a66.
+# Copperline's values are for the FULL variant (probe track 1 plus the game's
+# audio tracks). The data-only padded variant answers rows 15-23 across the full
+# seek stroke instead, and its layout rows describe the early-boot path -- that
+# is expected, not a disagreement.
+#
+# row	label	copperline	meaning
+00	CLITASK	00025700	FindTask(NULL): the boot CLI process address. Its low word decides the game's buggy freeanim version check (signed <= 40 passes)
+01	LARGEST0	0011FE50	AvailMem(CHIP|LARGEST) at entry
+02	FREE0	0019A4C8	AvailMem(CHIP) at entry
+03	ANIMPORT	001FD320	FindPort("Startup Animation")
+04	FANFARE0	00187020	FindTask("Fanfare") at entry
+05	BUGOPEN	00000000	OpenLibrary(freeanim, version = CLITASK): the game's exact call. Nonzero here on real hardware = the game's bug passes there
+06	BUGCLOSE	0	E-ticks its CloseLibrary blocked (teardown wait)
+07	OLDOPEN	0000FD08	OldOpenLibrary(freeanim), only tried if BUGOPEN failed
+08	OLDCLOSE	~00022CBC (2.0 s)	E-ticks its CloseLibrary blocked
+09	LARGEST1	001CB0B0	largest chip chunk after teardown
+10	FREE1	001CF450	chip free after teardown
+11	FANFARE1	00000000	FindTask("Fanfare") after (0 = task exited)
+12	EFREQ	000AD303	ReadEClock frequency (PAL 709379)
+13	ENTRYTIM	~12.1 s	E-ticks at probe entry since power-on (/EFREQ = seconds)
+14	SKSW100	000001B3	CD_SEEK +100: driver-internal, no drive motion
+15	RD500	~139 ms	min E-ticks, 1-sector read at +500 after repositioning to LBA 1000
+16	RD1K	~139 ms	.. +1000
+17	RD10K	~158 ms	.. +10000 (data only on the padded disc; times out on full)
+18	RD100K	~451 ms	.. +100000
+19	RD200K	~542 ms	.. +200000
+20	PL10K	~1.01 s	CD_PLAYLSN 1 s of audio at LBA 11000, DoIO duration: value - 1 s = locate cost (audio discs only; errors on the padded disc)
+21	PL100K	~1.02 s	.. at 101000
+22	PL200K	~1.02 s	.. at 201000
+23	RDRATE64	00049BD7 (426 ms)	E-ticks for 64 sequential sectors at LBA 1201 (as CDInit configured: 2x = 150/s)
+24	URD	0000B363 (14.0 clk/iter)	E-ticks, 65536x `CMP.W (A4)+,D2 / DBF` over $A80000 (unmapped FMV window)
+25	ROMRD	000099CA (12.0 clk)	.. over $F80000 (Kickstart ROM)
+26	CHIPRD	0000CDEA (16.1 clk)	.. over chip RAM (display on)
+27	UWR	00008030 (10.0 clk)	65536x `MOVE.W D2,(A4)+` over $A80000 (unmapped write -- currently billed free in Copperline)
+28	CHIPWR	0000670D (8.1 clk)	.. over chip RAM
+29	ULRD	00008CFx	32768x `MOVE.L (A4)+,D1` over $A80000
