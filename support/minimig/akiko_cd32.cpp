@@ -627,6 +627,112 @@ static drive_t *cd_find_drive(void)
 	return NULL;
 }
 
+// ---------------------------------------------------------------------------
+// Disc identity for the OSD. Declared in akiko_cd32.h.
+//
+// The label is CACHED, and that is not an optimisation. Reading it costs a seek
+// to LBA 16, the OSD redraws its rows on every refresh, and on a physical drive
+// a seek during CD audio is something you can hear. So it is read at most once
+// per mounted disc, on the first ask after the TOC exists, and the result --
+// including "there is no label" -- is kept until the disc changes.
+//
+// Everything else (the track counts) is already in memory and is recomputed on
+// every call, so a TOC that arrives late is not stuck behind a cache.
+static char cd_label[64] = {};
+static bool cd_label_known = false;
+
+static void cd_label_forget(void)
+{
+	cd_label[0] = 0;
+	cd_label_known = false;
+}
+
+// Where an ISO9660 volume descriptor's user data starts inside a RAW frame.
+//
+// We read raw because it is the one call that works for a CHD, a cue+bin and a
+// physical drive alike. A raw frame carries 16 bytes of header before MODE1
+// user data and 24 before MODE2 form 1. Rather than decide from the mode byte,
+// look for the descriptor itself at each offset: that tests the thing we
+// actually need, and a disc whose LBA 16 is not a volume descriptor at all
+// then reports no label instead of 32 bytes of whatever was lying there.
+static int pvd_user_offset(const uint8_t *raw)
+{
+	static const int cand[2] = { 16, 24 };
+	for (int i = 0; i < 2; i++) {
+		const uint8_t *u = raw + cand[i];
+		// Type 1 (primary), the standard identifier, version 1.
+		if (u[0] == 1 && !memcmp(u + 1, "CD001", 5) && u[6] == 1) return cand[i];
+	}
+	return -1;
+}
+
+// Copy an ISO9660 volume identifier out of a descriptor: 32 bytes at offset 40,
+// space padded. Non-printable bytes become spaces rather than being dropped, so
+// a mangled label still lines up with what other tools show for the same disc.
+static void cd_label_from_pvd(const uint8_t *pvd)
+{
+	char lbl[33];
+	memcpy(lbl, pvd + 40, 32);
+	lbl[32] = 0;
+
+	int end = 32;
+	while (end > 0 && (lbl[end - 1] == ' ' || lbl[end - 1] == 0)) end--;
+	lbl[end] = 0;
+
+	for (int i = 0; i < end; i++) {
+		if ((uint8_t)lbl[i] < 0x20 || (uint8_t)lbl[i] > 0x7E) lbl[i] = ' ';
+	}
+
+	snprintf(cd_label, sizeof(cd_label), "%s", lbl);
+}
+
+int akiko_cd32_disc_info(char *label, int labelsz, int *tracks, int *audio)
+{
+	if (label && labelsz > 0) label[0] = 0;
+	if (tracks) *tracks = 0;
+	if (audio)  *audio  = 0;
+
+	drive_t *drv = cd_find_drive();
+	if (!drv) return 0;
+
+	// track_cnt includes the lead-out entry ide_cdrom.cpp appends after the
+	// real tracks (cdrom_parse), which is not a track anything was written to.
+	int real = drv->track_cnt > 0 ? drv->track_cnt - 1 : 0;
+	const int max_tracks = (int)(sizeof(drv->track) / sizeof(drv->track[0]));
+	if (real > max_tracks) real = max_tracks;
+
+	if (tracks) *tracks = real;
+	if (audio) {
+		int n = 0;
+		// attr & 0x40 is a data track; everything else is CDDA. Same test the
+		// CDDA fetch uses, so the count cannot disagree with what will play.
+		for (int i = 0; i < real; i++) if (!(drv->track[i].attr & 0x40)) n++;
+		*audio = n;
+	}
+
+	if (!cd_label_known && real > 0) {
+		cd_label_known = true;          // one attempt per disc, pass or fail
+		if (drv->phys) {
+			// The physical layer already knows how to find the descriptor on a
+			// mixed-mode disc (its first DATA track, not LBA 16 of the disc),
+			// so use it rather than a second, worse copy of that logic.
+			char lbl[64];
+			if (physical_disc_disc_label(lbl, sizeof(lbl)) > 0)
+				snprintf(cd_label, sizeof(cd_label), "%s", lbl);
+		}
+		else {
+			uint8_t raw[2352];
+			if (!cdrom_read_raw_sector(drv, 16, raw)) {
+				int off = pvd_user_offset(raw);
+				if (off >= 0) cd_label_from_pvd(raw + off);
+			}
+		}
+	}
+
+	if (label && labelsz > 0) snprintf(label, labelsz, "%s", cd_label);
+	return 1;
+}
+
 // Read the level the poll last announced to the guest, not the mount state.
 // Between a swap's removal edge and its arrival there IS a drive with media,
 // and telling the guest so at that moment collapses the swap back into no
@@ -2312,6 +2418,11 @@ static bool akiko_handle_sec_req(void)
 void akiko_cd32_set_cd_path(const char *path)
 {
 	cd_media_event = true;
+	// Before the same-slot early return below. That return asks whether the
+	// SAVE FILE changed; this cache is about the disc in the drive. A remount
+	// of the same image hashes to the same save and returns early, and the
+	// label should still be re-read -- it costs one seek, once.
+	cd_label_forget();
 
 	char new_path[256] = {0};
 	if (path && *path) {

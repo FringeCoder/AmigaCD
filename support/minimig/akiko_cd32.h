@@ -15,6 +15,24 @@ void akiko_cd32_poll(void);
 void akiko_cd32_set_cd_path(const char *path);
 
 // ---------------------------------------------------------------------------
+// What is in the drive, for the OSD.
+//
+// Returns 0 when no drive has media, 1 otherwise. On success:
+//
+//   label   the ISO9660 volume identifier, trimmed, or "" when there is none
+//           to read. Empty is a normal answer, not a failure -- a CD32
+//           pressing is not obliged to carry one, and several well known ones
+//           do not (Simon the Sorcerer ships as "CD32_TEST").
+//   tracks  tracks on the disc, lead-out excluded
+//   audio   how many of those are CDDA
+//
+// The counts are the point. Several CD32 titles circulate both as a data-only
+// rip and as the full disc with its music, they mount identically, and the
+// difference is only audible once you are in the game. Any of the three
+// pointers may be NULL.
+int akiko_cd32_disc_info(char *label, int labelsz, int *tracks, int *audio);
+
+// ---------------------------------------------------------------------------
 // Save state, host side.
 //
 // Akiko's registers live in the FPGA and travel in the core payload. The DRIVE

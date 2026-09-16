@@ -68,6 +68,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "support/physical_disc/physical_disc.h"
 #include "support/physical_disc/physical_disc_autoboot.h"
 #include "support/minimig/minimig_ssdiag.h"
+#include "support/minimig/akiko_cd32.h"        // akiko_cd32_disc_info for the CD row
 #include "profiling.h"
 #include "str_util.h"
 #include "autofire.h"
@@ -7073,6 +7074,23 @@ void HandleUI(void)
 		// mister_floppy_status rides in the core's OSD mask: bit 6 board
 		// detected, bit 7 IBM/PC vs Shugart, bit 8 cable straight vs crossed.
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
+
+		// What is actually on the mounted disc, for the detail line under the
+		// CD row. Two rips of the same CD32 title -- data only, and the full
+		// disc with its music -- mount identically and look identical here,
+		// and the difference only turns up as silence once you are playing.
+		// The track counts settle it before that.
+		//
+		// Drawn whenever there is a disc rather than only when the cursor is
+		// on the row: a line that appears and disappears as the cursor moves
+		// makes the rows below it jump, and the answer is worth seeing without
+		// having to go and look for it.
+		char cd_label[64] = {};
+		int  cd_tracks = 0, cd_audio = 0;
+		const int cd_detail = amigacd_has_cd
+		                   && akiko_cd32_disc_info(cd_label, sizeof(cd_label), &cd_tracks, &cd_audio)
+		                   && cd_tracks > 0;
+
 		m = 0;
 		OsdWrite(m++, "", 0, 0);
 
@@ -7095,6 +7113,23 @@ void HandleUI(void)
 		}
 		else strcat(s, "* no disc *");
 		OsdWrite(m++, s, menusub == 0, !amigacd_has_cd);
+
+		if (cd_detail)
+		{
+			// The OSD line is 32 characters (OSDLINELEN is 256 pixels at 8 per
+			// character), so the counts get their space first and the label
+			// takes what is left. The label is the part that can be any
+			// length, and it is the part you can do without: the counts are
+			// why this line exists.
+			char counts[24];
+			if (cd_audio) snprintf(counts, sizeof(counts), "%d trk  %d CDDA", cd_tracks, cd_audio);
+			else          snprintf(counts, sizeof(counts), "%d trk  no CDDA", cd_tracks);
+
+			int budget = 32 - 3 - 2 - (int)strlen(counts);
+			if (cd_label[0] && budget > 0) sprintf(s, "   %.*s  %s", budget, cd_label, counts);
+			else                           sprintf(s, "   %s", counts);
+			OsdWrite(m++, s, 0, 1);
+		}
 
 		// Physical CD-ROM drive attached to the MiSTer. Mounting parks the
 		// sentinel in hardfile[0].filename, which is what ide_open matches on.
@@ -7171,7 +7206,12 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == (uint32_t)(4 + hu), 0);
 		}
 
-		OsdWrite(m++, "", 0, 0);
+		// The detail line above is paid for here rather than out of the page's
+		// height. Sixteen lines with Reset and exit pinned to the last two
+		// leaves exactly one spare, which the Eject hint at the bottom uses;
+		// without this the hint would silently stop fitting whenever a disc
+		// was mounted, which is precisely when it is wanted.
+		if (!cd_detail) OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " System   : ");
 		strcat(s, amigacd_system_name(amigacd_system_shown()));
