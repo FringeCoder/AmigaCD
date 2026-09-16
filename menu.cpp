@@ -809,6 +809,32 @@ static int recent_open(int idx)
 	return recent_init(idx);
 }
 
+// Put the current MGL item's file into selPath, the way MENU_MINIMIG_* has
+// always resolved it: an absolute path is used as given, "../" resolves from
+// the storage root, anything else from the core's home directory.
+//
+// A helper rather than a fourth copy, because the AmigaCD tree has three mount
+// handlers that need it and a resolution rule that differs between them by a
+// line is a .mgl that works for a floppy and not for a disc.
+static void mgl_selpath(char *selPath, size_t selPathSize)
+{
+	const char *p = mgl_get()->item[mgl_get()->current].path;
+
+	if (p[0] == '/') snprintf(selPath, selPathSize, "%s", p);
+	else if (p[0] == '.' && p[1] == '.') snprintf(selPath, selPathSize, "%s/%s", getRootDir(), p);
+	else snprintf(selPath, selPathSize, "%s/%s", HomeDir(), p);
+
+	// Same /tmp/ breadcrumbs the other MGL paths leave, so a script watching
+	// them sees an AmigaCD launch the way it sees every other core's.
+	if (cfg.log_file_entry)
+	{
+		const char *fname = strrchr(selPath, '/');
+		MakeFile("/tmp/FULLPATH", selPath);
+		MakeFile("/tmp/CURRENTPATH", fname ? fname + 1 : selPath);
+		MakeFile("/tmp/FILESELECT", "selected");
+	}
+}
+
 static advancedButtonMap abm_edit_map = {};
 static advancedButtonMap *abm_edit_ptr = NULL;
 static int abm_dev_num = 0;
@@ -7390,6 +7416,59 @@ void HandleUI(void)
 		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 11, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
+
+		// A .mgl launched this core. MENU_MINIMIG_MAIN1 has had this since
+		// floppies, but it jumps straight here for the console variant and
+		// breaks before reaching it, so an .mgl mounted nothing at all on
+		// AmigaCD -- the OSD opened invisibly and sat there until the item's
+		// delay ran out. That is the standard way every other MiSTer CD core
+		// is launched: a game list, a favourites folder, bootcore.
+		//
+		// index picks the drive, and 0..3 keep meaning floppies so an .mgl
+		// written for Minimig still works:
+		//
+		//   0, 1   df0, df1        (2, 3 are drives this machine does not have)
+		//   4      the CD
+		//   5, 6   Hard Disk 0, Hard Disk 1
+		//
+		// type is not checked, matching MENU_MINIMIG_MAIN1: every .mgl in the
+		// wild writes type="f" and refusing the others would only break files
+		// that work today.
+		//
+		// Nothing here resets the machine. The .mgl format has <reset/> for
+		// that, so it stays the author's decision -- and a CD does not need it
+		// anyway: the akiko bridge sees cd_is_mounted() go false -> true and
+		// handles the TOC rebuild and its own deferred reset itself.
+		if (!mgl->done)
+		{
+			const int idx = mgl->item[mgl->current].index;
+			if (idx == 0 || idx == 1)
+			{
+				amigacd_fdd_unit = idx;
+				menustate = MENU_AMIGACD_ADFFILE_SELECTED;
+			}
+			else if (idx == 4 && amigacd_has_cd)
+			{
+				menustate = MENU_AMIGACD_CDFILE_SELECTED;
+			}
+			else if (idx == 5 || idx == 6)
+			{
+				amigacd_hdf_slot = idx - 4;     // 5 -> hardfile[1], 6 -> hardfile[2]
+				menustate = MENU_AMIGACD_HDFFILE_SELECTED;
+			}
+			else
+			{
+				// An index this machine has no drive for -- either an index
+				// with no drive behind it at all, or the CD on the A1200
+				// profile, which has no drive. Skip the item rather than
+				// stall: state 3 advances to the next one, so the rest of the
+				// .mgl still runs and a typo costs one mount, not the launch.
+				printf("MGL: AmigaCD (%s) has no drive at index %d, skipping\n",
+				       amigacd_system_name(amigacd_system()), idx);
+				mgl->state = 3;
+				menustate = MENU_NONE1;
+			}
+		}
 		break;
 	}
 
@@ -8194,8 +8273,16 @@ void HandleUI(void)
 		break;
 
 	case MENU_AMIGACD_CDFILE_SELECTED:
+		// Reached either from the file browser, with selPath already set, or
+		// from a .mgl, which supplies it. Everything below is then identical,
+		// which is the point: a disc mounted by an .mgl is mounted by the same
+		// four lines as one picked by hand.
+		if (!mgl->done) mgl_selpath(selPath, sizeof(selPath));
 		memcpy(Selected_S[0], selPath, sizeof(Selected_S[0]));
-		recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_CD);
+		// Not recorded as "recent" when an .mgl put it there, matching what
+		// every other MGL path in this file does: the list is of things you
+		// chose in this OSD.
+		if (mgl->done) recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_CD);
 		{
 			uint len = strlen(selPath);
 			if (len > sizeof(minimig_config.hardfile[0].filename) - 1) len = sizeof(minimig_config.hardfile[0].filename) - 1;
@@ -8206,13 +8293,19 @@ void HandleUI(void)
 		ide_open(0, minimig_config.hardfile[0].filename);
 		menusub = 0;
 		menustate = MENU_AMIGACD_MAIN1;
+		if (!mgl->done)
+		{
+			mgl->state = 3;             // on to the next .mgl item
+			menustate = MENU_NONE1;     // and do not draw a menu nobody opened
+		}
 		break;
 
 	case MENU_AMIGACD_HDFFILE_SELECTED:
 		// amigacd_hdf_slot was set by the row that opened the browser: 1 for
 		// Hard Disk 0 (IDE0 slave) and 2 for Hard Disk 1 (IDE1 master).
+		if (!mgl->done) mgl_selpath(selPath, sizeof(selPath));
 		memcpy(Selected_S[amigacd_hdf_slot], selPath, sizeof(Selected_S[0]));
-		recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_HDF(amigacd_hdf_slot));
+		if (mgl->done) recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_HDF(amigacd_hdf_slot));
 		{
 			uint len = strlen(selPath);
 			if (len > sizeof(minimig_config.hardfile[amigacd_hdf_slot].filename) - 1)
@@ -8228,14 +8321,25 @@ void HandleUI(void)
 		ide_open(amigacd_hdf_slot, minimig_config.hardfile[amigacd_hdf_slot].filename);
 		menusub = 4 + (amigacd_hdf_slot - 1);
 		menustate = MENU_AMIGACD_MAIN1;
+		if (!mgl->done)
+		{
+			mgl->state = 3;
+			menustate = MENU_NONE1;
+		}
 		break;
 
 	case MENU_AMIGACD_ADFFILE_SELECTED:
+		if (!mgl->done) mgl_selpath(selPath, sizeof(selPath));
 		memcpy(Selected_F[amigacd_fdd_unit], selPath, sizeof(Selected_F[0]));
-		recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_DF(amigacd_fdd_unit));
+		if (mgl->done) recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_DF(amigacd_fdd_unit));
 		InsertFloppy(&df[amigacd_fdd_unit], selPath);
 		menusub = 2 + amigacd_fdd_unit;  // back to the row that opened the browser
 		menustate = MENU_AMIGACD_MAIN1;
+		if (!mgl->done)
+		{
+			mgl->state = 3;
+			menustate = MENU_NONE1;
+		}
 		break;
 
 	case MENU_AMIGACD_ROMFILE_SELECTED:

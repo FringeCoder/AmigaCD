@@ -103,3 +103,11 @@ longer needs the OSD.
 
 Not yet exercised on hardware: the Real CD reset paths, and everything CDTV.
 See "Still to do" in [`docs/integration-plan.md`](docs/integration-plan.md).
+
+## Using it
+
+| | |
+|---|---|
+| Building and copying to the card | [`docs/deployment.md`](docs/deployment.md) |
+| Launching a game straight from the MiSTer menu | [`docs/mgl.md`](docs/mgl.md) |
+| Comparing the core against real hardware | [`docs/vamigats.md`](docs/vamigats.md), [`docs/timing-probe.md`](docs/timing-probe.md) |
