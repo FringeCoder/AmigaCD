@@ -7660,43 +7660,72 @@ void HandleUI(void)
 				// back to watching a frozen menu for several seconds.
 				menustate = MENU_NONE1;
 
-				if (amigacd_ss_name()[0])
-					process_ss(amigacd_ss_name(), 1);
+				// Refuse rather than fire the edge at an unloaded window.
+				//
+				// The save row above already does this (minimig_ss_request_save
+				// returns early with a toast when there is no name); the load path
+				// never got the same treatment, and the asymmetry was the bug. The
+				// name comes from the mounted media -- amigacd_ss_name() is the CD,
+				// or the HDF when there is no CD -- so with nothing mounted it is
+				// empty, process_ss() was skipped, and status[54] was set anyway.
+				//
+				// process_ss() is what maps the four DDR3 windows, ZEROES them and
+				// reads the .ss files in. Skipping it does not leave the window
+				// empty, it leaves it untouched -- so the core validated whatever
+				// DDR3 happened to hold. Usually that fails SS_MAGIC and the machine
+				// is left alone, which is why this was not noticed. But mount a game,
+				// save or restore, unmount it, then press restore: the previous
+				// payload is still resident, passes magic, CRC and the Kickstart
+				// check, and the core restores a machine belonging to media that is
+				// not in the drive. It does not fail -- it succeeds at the wrong
+				// thing, which is the worse of the two.
+				const char *ss_name = amigacd_ss_name();
+				if (!ss_name || !ss_name[0])
+				{
+					// Say why. The Z3 and 68000 refusals grey the row out so the
+					// user is told rather than left pressing SELECT at nothing; this
+					// one cannot be known until the press, so it toasts instead.
+					Info("No disc or HDF - nothing to restore", 2500);
+				}
+				else
+				{
+					process_ss(ss_name, 1);
 
-				// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge)
-				// exactly as status[51] is. A level here would restore over and
-				// over -- ss_ctrl re-arms out of idle on any cycle load_req is
-				// high -- and the bit being cleared by userspace must not be
-				// what stands between the user and a machine that never runs
-				// again. The set/clear pair below is housekeeping on the
-				// persisted status word, not the safety property.
-				//
-				// Everything after this is the core's: it validates the window
-				// with the Amiga still running, refuses without freezing if any
-				// gate fails, and reports the outcome as an OSD toast either
-				// way (AmigaCD.sv's ss_info_* block).
-				user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
-				// The drive travels beside the payload rather than in it: where
-				// the head is and what was playing are userspace state that the
-				// core cannot see. Applied here so the restored machine's first
-				// sector request is served from the position it was saved at.
-				ss_apply_host_state(minimig_config.ss_slot & 3);
-				user_io_status_set("[54]", 1);
-				user_io_status_set("[54]", 0);
-				// Close the OSD rather than returning to the Settings page.
-				//
-				// The outcome arrives as a toast ~250 ms later, and Info()
-				// draws only while menustate <= MENU_INFO (== 2). Staying on
-				// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
-				// far above it, so every toast this feature produces was
-				// silently discarded -- measured on hardware: "Save state:
-				// saved" and "Save state: FAILED" both logged as DROPPED at
-				// menustate=98, and the video-mode toasts with them.
-				//
-				// Closing also matches what the press means. The user asked
-				// the machine to do something and wants to watch it happen,
-				// not sit in a menu while it does.
-				menustate = MENU_NONE1;
+					// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge)
+					// exactly as status[51] is. A level here would restore over and
+					// over -- ss_ctrl re-arms out of idle on any cycle load_req is
+					// high -- and the bit being cleared by userspace must not be
+					// what stands between the user and a machine that never runs
+					// again. The set/clear pair below is housekeeping on the
+					// persisted status word, not the safety property.
+					//
+					// Everything after this is the core's: it validates the window
+					// with the Amiga still running, refuses without freezing if any
+					// gate fails, and reports the outcome as an OSD toast either
+					// way (AmigaCD.sv's ss_info_* block).
+					user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+					// The drive travels beside the payload rather than in it: where
+					// the head is and what was playing are userspace state that the
+					// core cannot see. Applied here so the restored machine's first
+					// sector request is served from the position it was saved at.
+					ss_apply_host_state(minimig_config.ss_slot & 3);
+					user_io_status_set("[54]", 1);
+					user_io_status_set("[54]", 0);
+					// Close the OSD rather than returning to the Settings page.
+					//
+					// The outcome arrives as a toast ~250 ms later, and Info()
+					// draws only while menustate <= MENU_INFO (== 2). Staying on
+					// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
+					// far above it, so every toast this feature produces was
+					// silently discarded -- measured on hardware: "Save state:
+					// saved" and "Save state: FAILED" both logged as DROPPED at
+					// menustate=98, and the video-mode toasts with them.
+					//
+					// Closing also matches what the press means. The user asked
+					// the machine to do something and wants to watch it happen,
+					// not sit in a menu while it does.
+					menustate = MENU_NONE1;
+				}
 			}
 			else if (menusub == 7 && select) // Back
 			{

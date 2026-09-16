@@ -1,0 +1,102 @@
+# Values read off REAL AMIGA HARDWARE, transcribed from the vAmigaTS reference
+# photographs.
+#
+# This file is the durable part of the vAmigaTS work. The suite is 3.6 GB and
+# its references are photographs of a CRT -- neither of which belongs in this
+# repository, and neither of which a test can consume. What a test CAN consume
+# is the numbers in those photographs, and once they are written down here a
+# bench can hold the RTL to them forever without the suite, the disk, the
+# camera, or the machine.
+#
+# It is the only ground truth this project has. Every other route we have --
+# our Icarus benches, the Copperline tables, WinUAE's source read by eye --
+# compares one model against another. These are silicon.
+#
+# PROVENANCE AND ITS LIMIT. Each row names the photograph it came from. The
+# transcription is BY EYE from a JPEG of a CRT: the digits are large and clear,
+# but nothing has checked them except a careful read, so a single wrong nibble
+# is the failure mode to expect. Anything built on this file should say so, and
+# a disagreement with the RTL is worth re-reading the photograph before it is
+# worth believing. Re-transcribe rather than "correct" a value that looks wrong.
+#
+# SCOPE. vAmigaTS's hardware references are an Amiga 500 (2,967 images), plus
+# 18 of an A1200. So these are OCS/ECS values. They do not describe AGA, and
+# they do not describe a CD32 -- see docs/vamigats.md on what a real CD32 could
+# add here that nothing else can.
+#
+# WHAT THE PROBES DO (Agnus/Registers/VPOS/README.md):
+#   probe1..probe13  probe VHPOSR at 16 locations and display the result
+#   vprobe1..vprobe4 probe VPOSR while crossing the vertical boundary
+#                    (vpos changes from $FF to $100)
+#   ersy1, ersy2     as the probes, with ERSY set/reset
+#
+# 13*16 + 4*16 + 2*16 = 304 -- which is exactly the "304 probe rows" the core
+# repo's T7 cites. T7's numbers came from this suite.
+#
+# STATUS: 2 of 19 probes transcribed. The remaining 17 are a reading exercise,
+# not a research one: the photographs are in the suite, and scripts/vamigats.sh
+# compare prints their paths.
+#
+# test	machine	index	value	source
+
+probe6	A500_OCS	0	$FFBE	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	1	$FFC8	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	2	$FFD2	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	3	$FFDC	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	4	$0003	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	5	$000D	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	6	$0017	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	7	$0021	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	8	$002B	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	9	$0035	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	10	$003F	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	11	$0049	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	12	$0053	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	13	$005D	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	14	$0067	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+probe6	A500_OCS	15	$0071	Agnus/Registers/VPOS/probe6/probe6_A500_OCS.JPG
+
+vprobe1	A500_OCS	0	$8000	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	1	$8000	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	2	$8000	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	3	$8000	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	4	$8000	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	5	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	6	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	7	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	8	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	9	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	10	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	11	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	12	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	13	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	14	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+vprobe1	A500_OCS	15	$8001	Agnus/Registers/VPOS/vprobe1/vprobe1_A500_OCS.JPG
+
+# READING NOTES, because the numbers alone do not carry what they mean.
+#
+# probe6 -- THE TRANSCRIPTION CHECKS ITSELF, which is worth more than the care
+# taken over it: consecutive VHPOSR reads differ by $0A, ten colour clocks, which is
+# what one `move.w VHPOSR(a1),d5` plus `move.w d5,(a2)+` costs on a 7 MHz 68000
+# reading a custom register. Index 3 to 4 is the line wrap: $FFDC -> $0003, so
+# hpos went 220 -> 3. 220 + 10 = 230, and 230 - 227 = 3, which pins the PAL line
+# at 227 colour clocks and shows the wrap arithmetic directly. The vpos low byte
+# goes $FF -> $00 across the same step.
+#
+# All sixteen values step by exactly $0A, and the one that does not is the wrap,
+# which closes to the colour clock. A misread nibble would break that chain, so
+# the arithmetic is a checksum on the reading. It does not prove the values are
+# what the machine showed -- a consistent misreading of the whole column would
+# survive it -- but it rules out the single-digit slip that is the likely error.
+#
+# vprobe1 -- VPOSR across the vpos $FF -> $100 boundary. Bit 15 (LOF) is 1
+# throughout; bit 0 is vpos[8]. Real silicon steps 0 -> 1 cleanly between reads
+# 4 and 5: no intermediate value, no glitch, no readback describing a line the
+# beam was not on.
+#
+# That last point is worth holding onto. The core repo's beam bench found that
+# Copperline, at the frame wrap, reassembles VPOSR and VHPOSR into line 256 --
+# a line the beam was never on -- while our RTL reassembles to the previous
+# line. vprobe1 does not settle that directly, because it reads VPOSR alone and
+# not the pair. But it does show the vertical bit itself behaving monotonically
+# on hardware, which is the half of the question we can check today.
