@@ -590,6 +590,128 @@ static int minimig_ss_request_save()
 	return 1;
 }
 
+// Ask the core for a restore, from either the menu row or the hotkey.
+//
+// Lifted out of the Settings row so the two cannot drift: a hotkey that armed
+// process_ss() differently from the row would be a second, subtly different
+// restore path, and the whole reason this refuses rather than firing blind is
+// that the difference is invisible until it succeeds at the wrong thing.
+//
+// The caller closes the OSD if it has one open. This does not touch menustate:
+// the hotkey path has no menu to close, and Info() below needs menustate at or
+// below MENU_INFO to draw at all.
+//
+// Returns 0 without asking the core for anything when there is no name to
+// restore from.
+static int minimig_ss_request_restore()
+{
+	const char *ss_name = amigacd_ss_name();
+	if (!ss_name || !ss_name[0])
+	{
+		// Refuse rather than fire the edge at an unloaded window.
+		//
+		// The save path already did this; the load path did not, and the
+		// asymmetry was the bug. The name comes from the mounted media --
+		// amigacd_ss_name() is the CD, or the HDF when there is no CD -- so
+		// with nothing mounted it is empty, process_ss() was skipped, and
+		// status[54] was set anyway.
+		//
+		// process_ss() is what maps the four DDR3 windows, ZEROES them and
+		// reads the .ss files in. Skipping it does not leave the window empty,
+		// it leaves it untouched -- so the core validated whatever DDR3
+		// happened to hold. Usually that fails SS_MAGIC and the machine is left
+		// alone, which is why this was not noticed. But mount a game, save or
+		// restore, unmount it, then press restore: the previous payload is
+		// still resident, passes magic, CRC and the Kickstart check, and the
+		// core restores a machine belonging to media that is not in the drive.
+		// It does not fail -- it succeeds at the wrong thing, which is the
+		// worse of the two.
+		//
+		// The Z3 and 68000 refusals grey the row out so the user is told rather
+		// than left pressing SELECT at nothing; this one cannot be known until
+		// the press, so it toasts instead.
+		Info("No disc or HDF - nothing to restore", 2500);
+		return 0;
+	}
+
+	// This is not housekeeping, it is the load. process_ss() maps the four DDR3
+	// windows AND reads the four .ss files off disk into them. Nothing else on
+	// this core ever calls it but the save path, so without this the window the
+	// core is about to validate holds whatever was there, and a restore after a
+	// power cycle -- the whole point of the feature -- could never work.
+	//
+	// It re-reads all four slots every press, ~16 MB. That is the cost of
+	// always validating the freshest file on disk rather than a stale window,
+	// on a keypress the user made deliberately. It also resets the poller's
+	// counters, so it cannot itself trigger a spurious write back to disk.
+	process_ss(ss_name, 1);
+
+	// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge) exactly as
+	// status[51] is. A level here would restore over and over -- ss_ctrl
+	// re-arms out of idle on any cycle load_req is high -- and the bit being
+	// cleared by userspace must not be what stands between the user and a
+	// machine that never runs again. The set/clear pair below is housekeeping
+	// on the persisted status word, not the safety property.
+	//
+	// Everything after this is the core's: it validates the window with the
+	// Amiga still running, refuses without freezing if any gate fails, and
+	// reports the outcome as an OSD toast either way (AmigaCD.sv ss_info_*).
+	user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+	// The drive travels beside the payload rather than in it: where the head is
+	// and what was playing are userspace state the core cannot see. Applied
+	// here so the restored machine's first sector request is served from the
+	// position it was saved at.
+	ss_apply_host_state(minimig_config.ss_slot & 3);
+	user_io_status_set("[54]", 1);
+	user_io_status_set("[54]", 0);
+	return 1;
+}
+
+// Save states without opening the OSD. Called from user_io_kbd(), which is the
+// only place a keypress is visible while the OSD is CLOSED -- HandleUI's key
+// switch never runs then, because menu_key_set() is only called when the OSD is
+// up. The screenshot hotkey lives in the same chain for the same reason.
+//
+// Returns 1 when it acted, which is also what tells the caller the key was
+// consumed. It always returns 1 for this core, refusals included: a hotkey that
+// silently passed Ctrl+Alt+F1 to the Amiga on a machine that cannot save states
+// would be worse than one that says why.
+int amigacd_ss_hotkey(int action)
+{
+	if (!is_amigacd()) return 0;
+
+	if (minimig_ss_blocked())
+	{
+		// The same two conditions that grey the Settings rows out. There they
+		// are visible before the press; here there is nothing to grey.
+		Info("Save states need 020 and no Z3 RAM", 2500);
+		return 1;
+	}
+
+	switch (action)
+	{
+	case SS_HOTKEY_SLOT:
+	{
+		int slot = (minimig_config.ss_slot + 1) & 3;
+		minimig_config.ss_slot = (unsigned char)slot;
+		char msg[32];
+		sprintf(msg, "Save slot %d", slot + 1);
+		Info(msg, 1500);
+		return 1;
+	}
+
+	case SS_HOTKEY_SAVE:
+		minimig_ss_request_save();
+		return 1;
+
+	case SS_HOTKEY_RESTORE:
+		minimig_ss_request_restore();
+		return 1;
+	}
+
+	return 1;
+}
+
 #define DPAD_NAMES 4
 #define DPAD_BUTTON_NAMES 12  //DPAD_NAMES + 6 buttons + start/select
 
@@ -609,7 +731,8 @@ static char helptext_custom[1024];
 
 enum HelpText_Message
 {
-	HELPTEXT_NONE, HELPTEXT_CUSTOM, HELPTEXT_MAIN, HELPTEXT_HARDFILE, HELPTEXT_CHIPSET, HELPTEXT_MEMORY, HELPTEXT_EJECT, HELPTEXT_CLEAR
+	HELPTEXT_NONE, HELPTEXT_CUSTOM, HELPTEXT_MAIN, HELPTEXT_HARDFILE, HELPTEXT_CHIPSET, HELPTEXT_MEMORY, HELPTEXT_EJECT, HELPTEXT_CLEAR,
+	HELPTEXT_SSHOTKEY
 };
 
 static const char *helptexts[] =
@@ -622,8 +745,13 @@ static const char *helptexts[] =
 	"                                Minimig can make use of up to 2 megabytes of Chip RAM, up to 1.5 megabytes of Slow RAM (A500 Trapdoor RAM), and up to 384 megabytes of Fast RAM (8MB max for 68000 mode). To use the HRTmon feature you will need a file on the SD card named hrtmon.rom.",
 	"                                Backspace key (or B-hold + A on gamepad) to unmount",
 	"                                Backspace key (or B-hold + A on gamepad) to clear stored option. You have to reload the core to be able to use default value.",
+	// The hotkeys have nowhere else to be announced: this page is exactly full
+	// at sixteen lines, and a hotkey nobody is told about is not a feature.
+	"                                Save states also work with this menu closed, which is the point of them: Ctrl+Alt+F1 saves to the selected slot, Ctrl+Alt+F2 restores it, Ctrl+Alt+F3 steps to the next slot. The Amiga never sees those keys. Clear NVRAM erases the CD32 saved games for the disc in the drive, which is not the same thing as a save state.",
 };
 
+// One per helptexts[] entry, and they must stay the same length: helptext_idx
+// indexes both.
 static const uint32_t helptext_timeouts[] =
 {
 	10000,
@@ -633,8 +761,16 @@ static const uint32_t helptext_timeouts[] =
 	10000,
 	10000,
 	10000,
+	10000,
 	10000
 };
+
+// helptext_idx indexes both, and nothing else makes them agree -- adding a
+// message and forgetting its timeout reads a uint32_t past the end of this
+// array, which is a bad way to find out.
+static_assert(sizeof(helptexts) / sizeof(helptexts[0])
+              == sizeof(helptext_timeouts) / sizeof(helptext_timeouts[0]),
+              "helptexts[] and helptext_timeouts[] must have one entry each per HelpText_Message");
 
 static const char *info_top = "\x80\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x82";
 static const char *info_bottom = "\x85\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x84";
@@ -7570,7 +7706,7 @@ void HandleUI(void)
 	case MENU_AMIGACD_SETTINGS1:
 	{
 		OsdSetTitle("Settings", 0);
-		helptext_idx = 0;
+		helptext_idx = HELPTEXT_SSHOTKEY;
 		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
 		// Save state(5), Restore state(6), CD speed(7), Clear NVRAM(8),
 		// Back(9) -- ten rows, so 0x3FF.
@@ -7821,72 +7957,13 @@ void HandleUI(void)
 				// back to watching a frozen menu for several seconds.
 				menustate = MENU_NONE1;
 
-				// Refuse rather than fire the edge at an unloaded window.
-				//
-				// The save row above already does this (minimig_ss_request_save
-				// returns early with a toast when there is no name); the load path
-				// never got the same treatment, and the asymmetry was the bug. The
-				// name comes from the mounted media -- amigacd_ss_name() is the CD,
-				// or the HDF when there is no CD -- so with nothing mounted it is
-				// empty, process_ss() was skipped, and status[54] was set anyway.
-				//
-				// process_ss() is what maps the four DDR3 windows, ZEROES them and
-				// reads the .ss files in. Skipping it does not leave the window
-				// empty, it leaves it untouched -- so the core validated whatever
-				// DDR3 happened to hold. Usually that fails SS_MAGIC and the machine
-				// is left alone, which is why this was not noticed. But mount a game,
-				// save or restore, unmount it, then press restore: the previous
-				// payload is still resident, passes magic, CRC and the Kickstart
-				// check, and the core restores a machine belonging to media that is
-				// not in the drive. It does not fail -- it succeeds at the wrong
-				// thing, which is the worse of the two.
-				const char *ss_name = amigacd_ss_name();
-				if (!ss_name || !ss_name[0])
-				{
-					// Say why. The Z3 and 68000 refusals grey the row out so the
-					// user is told rather than left pressing SELECT at nothing; this
-					// one cannot be known until the press, so it toasts instead.
-					Info("No disc or HDF - nothing to restore", 2500);
-				}
-				else
-				{
-					process_ss(ss_name, 1);
-
-					// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge)
-					// exactly as status[51] is. A level here would restore over and
-					// over -- ss_ctrl re-arms out of idle on any cycle load_req is
-					// high -- and the bit being cleared by userspace must not be
-					// what stands between the user and a machine that never runs
-					// again. The set/clear pair below is housekeeping on the
-					// persisted status word, not the safety property.
-					//
-					// Everything after this is the core's: it validates the window
-					// with the Amiga still running, refuses without freezing if any
-					// gate fails, and reports the outcome as an OSD toast either
-					// way (AmigaCD.sv's ss_info_* block).
-					user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
-					// The drive travels beside the payload rather than in it: where
-					// the head is and what was playing are userspace state that the
-					// core cannot see. Applied here so the restored machine's first
-					// sector request is served from the position it was saved at.
-					ss_apply_host_state(minimig_config.ss_slot & 3);
-					user_io_status_set("[54]", 1);
-					user_io_status_set("[54]", 0);
-					// Close the OSD rather than returning to the Settings page.
-					//
-					// The outcome arrives as a toast ~250 ms later, and Info()
-					// draws only while menustate <= MENU_INFO (== 2). Staying on
-					// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
-					// far above it, so every toast this feature produces was
-					// silently discarded -- measured on hardware: "Save state:
-					// saved" and "Save state: FAILED" both logged as DROPPED at
-					// menustate=98, and the video-mode toasts with them.
-					//
-					// Closing also matches what the press means. The user asked
-					// the machine to do something and wants to watch it happen,
-					// not sit in a menu while it does.
-					menustate = MENU_NONE1;
-				}
+				// The load itself, and its refusal when there is nothing
+				// mounted to name a save after, both live in
+				// minimig_ss_request_restore() -- shared with the Ctrl+Alt+F2
+				// hotkey so the two paths cannot drift. Closing the OSD above
+				// is also what lets its Info() and process_ss()'s progress bar
+				// draw at all.
+				minimig_ss_request_restore();
 			}
 			else if (menusub == 7) // CD speed
 			{
