@@ -282,6 +282,30 @@ static int amigacd_fdd_unit = 0;
 // reason amigacd_fdd_unit above exists.
 static int amigacd_hdf_slot = 1;
 
+// Which recent-files list each AmigaCD row owns.
+//
+// One per row, because the list a row offers is also the list the file
+// browser's ` key opens and the list "Clear the List" empties. Two rows
+// sharing one list is not a cosmetic problem: picking an entry in a recent
+// list jumps straight to that row's fs_MenuSelect (menu.cpp, MENU_RECENT2),
+// so an HDF offered in the CD row's list was mounted as a CD image -- cfg=2,
+// ide_open(0, ...) -- and an ISO offered in a Hard Disk row became a fixed
+// disk. Both rows wrote 500 and both read 500, so that was every session.
+//
+// 0 and 1 are df0 and df1, which is what the floppy rows already read
+// (recent_init(fu)); only the write was wrong, pinned at 0, so df1's list
+// could never fill and df0's collected both drives' disks.
+//
+// 501 is CD images, which is what the full Minimig tree already calls its
+// CD32 list (MENU_MINIMIG_MAIN2). The two trees share a namespace whenever
+// /media/fat/amigacd_force puts a Minimig-named core into this OSD -- the
+// file is <core name>_recent_<idx>.cfg -- so agreeing on the meaning is
+// better than picking a free number. 502 is that tree's CDTV list and is
+// left to it; 503 and 504 are new.
+#define AMIGACD_RECENT_DF(u)    (u)              // df0 -> 0, df1 -> 1
+#define AMIGACD_RECENT_CD       501
+#define AMIGACD_RECENT_HDF(s)   (502 + (s))      // hardfile 1 -> 503, 2 -> 504
+
 const char *config_joystick_mode[] = { "Digital", "Analog", "CD32", "Analog" };
 const char *config_button_turbo_msg[] = { "OFF", "FAST", "MEDIUM", "SLOW" };
 const char *config_button_turbo_choice_msg[] = { "A only", "B only", "A & B" };
@@ -612,6 +636,32 @@ static uint32_t fs_Options;
 static uint32_t fs_MenuSelect;
 static uint32_t fs_MenuCancel;
 static int fs_RecentIdx = -1;
+
+// Which recent list the browser is currently working with.
+//
+// fs_RecentIdx is what the caller of SelectFile asked for; the rest is the
+// guess for callers that asked for nothing, which is where a core with more
+// than one kind of mountable file ends up reading somebody else's list.
+//
+// It takes ioctl_index as an argument because that is a static local of
+// HandleUI, not a file-scope one.
+static int recent_idx_active(int ioctl_index)
+{
+	if (fs_RecentIdx >= 0) return fs_RecentIdx;
+	return (fs_Options & SCANO_CORES)  ? -1
+	     : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500
+	                                   : ioctl_index;
+}
+
+// Open a recent list straight from a menu row, without going through the file
+// browser. SelectFile is what normally sets fs_RecentIdx, so a row that skips
+// it left the previous browse's index in place -- and "Clear the List" then
+// emptied whatever that was.
+static int recent_open(int idx)
+{
+	fs_RecentIdx = idx;
+	return recent_init(idx);
+}
 
 static advancedButtonMap abm_edit_map = {};
 static advancedButtonMap *abm_edit_ptr = NULL;
@@ -5747,7 +5797,7 @@ void HandleUI(void)
 			helptext_idx = 0;
 		}
 
-		if (recent && recent_init((fs_RecentIdx >= 0) ? fs_RecentIdx : (fs_Options & SCANO_CORES) ? -1 : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500 : ioctl_index))
+		if (recent && recent_init(recent_idx_active(ioctl_index)))
 		{
 			menustate = MENU_RECENT1;
 		}
@@ -6062,7 +6112,11 @@ void HandleUI(void)
 			OsdWrite(OsdGetSize() / 2, "    Clearing the recents", 0, 0);
 			OsdUpdate();
 			sleep(1);
-			recent_clear((fs_Options & SCANO_CORES) ? -1 : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500 : ioctl_index);
+			// Was the same expression as the ` key above but without the
+			// fs_RecentIdx arm, so a caller that named its list explicitly --
+			// every AmigaCD row, presets, the ST drives -- cleared a different
+			// list from the one it was showing.
+			recent_clear(recent_idx_active(ioctl_index));
 			menustate = fs_MenuCancel;
 			menusub = menusub_last;
 			if (is_menu()) menustate = MENU_FILE_SELECT1;
@@ -7200,9 +7254,10 @@ void HandleUI(void)
 						if (!Selected_S[0][0]
 						    && strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
 							memcpy(Selected_S[0], minimig_config.hardfile[0].filename, sizeof(Selected_S[0]));
-						SelectFile(Selected_S[0], fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel);
+						SelectFile(Selected_S[0], fs_pFileExt, fs_Options, fs_MenuSelect,
+						           fs_MenuCancel, AMIGACD_RECENT_CD);
 					}
-					else if (recent_init(500)) menustate = MENU_RECENT1;
+					else if (recent_open(AMIGACD_RECENT_CD)) menustate = MENU_RECENT1;
 				}
 			}
 			else if (menusub == 1) // Real CD: mount the physical drive
@@ -7351,8 +7406,9 @@ void HandleUI(void)
 					// that cannot open.
 					const char *fext = caps_init() ? "ADFSCPIPF" : "ADFSCP";
 					strcpy(fs_pFileExt, fext);
-					if (select) SelectFile(Selected_F[fu], fext, fs_Options, fs_MenuSelect, fs_MenuCancel);
-					else if (recent_init(fu)) menustate = MENU_RECENT1;
+					if (select) SelectFile(Selected_F[fu], fext, fs_Options, fs_MenuSelect,
+					                       fs_MenuCancel, AMIGACD_RECENT_DF(fu));
+					else if (recent_open(AMIGACD_RECENT_DF(fu))) menustate = MENU_RECENT1;
 				}
 			}
 			else if (menusub == 4 || menusub == 5) // Hard Disk 0 / 1: select an HDF
@@ -7374,9 +7430,10 @@ void HandleUI(void)
 							       minimig_config.hardfile[amigacd_hdf_slot].filename,
 							       sizeof(Selected_S[amigacd_hdf_slot]));
 						SelectFile(Selected_S[amigacd_hdf_slot], fs_pFileExt, fs_Options,
-						           fs_MenuSelect, fs_MenuCancel);
+						           fs_MenuSelect, fs_MenuCancel,
+						           AMIGACD_RECENT_HDF(amigacd_hdf_slot));
 					}
-					else if (recent_init(500)) menustate = MENU_RECENT1;
+					else if (recent_open(AMIGACD_RECENT_HDF(amigacd_hdf_slot))) menustate = MENU_RECENT1;
 				}
 			}
 			else if (menusub == 6) // System: cycle CD32 -> CDTV -> A500 -> A1200
@@ -7867,7 +7924,7 @@ void HandleUI(void)
 
 	case MENU_AMIGACD_CDFILE_SELECTED:
 		memcpy(Selected_S[0], selPath, sizeof(Selected_S[0]));
-		recent_update(SelectedDir, selPath, SelectedLabel, 500);
+		recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_CD);
 		{
 			uint len = strlen(selPath);
 			if (len > sizeof(minimig_config.hardfile[0].filename) - 1) len = sizeof(minimig_config.hardfile[0].filename) - 1;
@@ -7884,7 +7941,7 @@ void HandleUI(void)
 		// amigacd_hdf_slot was set by the row that opened the browser: 1 for
 		// Hard Disk 0 (IDE0 slave) and 2 for Hard Disk 1 (IDE1 master).
 		memcpy(Selected_S[amigacd_hdf_slot], selPath, sizeof(Selected_S[0]));
-		recent_update(SelectedDir, selPath, SelectedLabel, 500);
+		recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_HDF(amigacd_hdf_slot));
 		{
 			uint len = strlen(selPath);
 			if (len > sizeof(minimig_config.hardfile[amigacd_hdf_slot].filename) - 1)
@@ -7904,7 +7961,7 @@ void HandleUI(void)
 
 	case MENU_AMIGACD_ADFFILE_SELECTED:
 		memcpy(Selected_F[amigacd_fdd_unit], selPath, sizeof(Selected_F[0]));
-		recent_update(SelectedDir, selPath, SelectedLabel, 0);
+		recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_DF(amigacd_fdd_unit));
 		InsertFloppy(&df[amigacd_fdd_unit], selPath);
 		menusub = 2 + amigacd_fdd_unit;  // back to the row that opened the browser
 		menustate = MENU_AMIGACD_MAIN1;
