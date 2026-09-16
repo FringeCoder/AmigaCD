@@ -1880,7 +1880,13 @@ static void akiko_push_sector(const uint8_t *buf)
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	int64_t now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
 
-	const int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, AKIKO_SECTOR_PERIOD_US);
+	// Read per push rather than latched at mount: changing the setting then has
+	// an effect on the disc already in the drive, which is how you would want
+	// to compare the two without reloading a game to do it.
+	const int64_t period_us = (minimig_config.cd_speed == mmcd_2x)
+	                        ? AKIKO_SECTOR_PERIOD_2X_US : AKIKO_SECTOR_PERIOD_US;
+
+	const int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, period_us);
 	if (wait_us > 0) {
 		usleep((useconds_t)wait_us);
 		clock_gettime(CLOCK_MONOTONIC, &ts);

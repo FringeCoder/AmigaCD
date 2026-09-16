@@ -54,6 +54,14 @@
 // at all. Removing it is then a hardware test, not an assumption.
 #define AKIKO_SECTOR_PERIOD_US 1700
 
+// What a CD32 actually is: a 2x unit, 150 sectors/s, one sector every 6667 us.
+// Selectable from the OSD (mm_cdSpeed in minimig_config.h) rather than
+// compiled in, because which of the two you want is a judgement about the
+// machine you are after -- faithful loading times, or short ones -- and not
+// something this file can settle. Nothing above changes: the floor stays the
+// default, so a machine nobody has touched behaves exactly as it always has.
+#define AKIKO_SECTOR_PERIOD_2X_US 6667
+
 // How long to wait, in microseconds, before starting a push, so that it begins
 // at least period_us after the previous one began.
 //

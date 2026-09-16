@@ -4,7 +4,12 @@
 # linux/cdrom.h, which does not exist on the Windows dev machine.
 
 CXX      ?= g++
-CXXFLAGS  = -std=gnu++14 -Wall -Wextra -O1 -g
+# -MMD -MP writes a .d file listing every header each binary actually included,
+# which is pulled back in below. Without it a test binary depended on the .cpp
+# files alone, so editing a HEADER rebuilt nothing and `make` happily re-ran the
+# previous binary -- which silently defeats the first thing anyone does to a new
+# check, mutating the constant it is about and expecting a failure.
+CXXFLAGS  = -std=gnu++14 -Wall -Wextra -O1 -g -MMD -MP
 BUILDDIR  = build
 
 SRC = ../support/minimig/minimig_savestate.cpp \
@@ -32,6 +37,8 @@ shell-tests:
 $(BUILDDIR)/%: %.cpp $(SRC)
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(SRC)
+
+-include $(addprefix $(BUILDDIR)/,$(addsuffix .d,$(TESTS)))
 
 clean:
 	rm -rf $(BUILDDIR)

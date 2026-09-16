@@ -117,7 +117,36 @@ typedef struct
 	mm_hardfileTYPE cd32_drive;
 	mm_hardfileTYPE cdtv_drive;
 	uint8_t         a2065_mode;
+	// How fast sectors are handed to the CD32. See mm_cdSpeed below.
+	//
+	// Appended, and DELIBERATELY zero-defaulted to the shipped rate. The
+	// struct was exactly full at 7280 bytes, so this byte grows it to 7284
+	// and every config on a card is now smaller than sizeof(minimig_config).
+	// That is the one case minimig_cfg_load's final rung already handles
+	// correctly: it zeroes the destination, reads the short file in, and
+	// copies the lot -- so this field arrives as 0 and an existing config
+	// keeps behaving exactly as it did. A migration rung of its own would
+	// only restate that, so there is not one.
+	uint8_t         cd_speed;
 } mm_configTYPE;
+
+// CD sector delivery rate.
+//
+// mmcd_fast is the floor the core has always shipped with (see
+// AKIKO_SECTOR_PERIOD_US in akiko_pace.h): roughly 588 sectors/s, about 8x,
+// and not a rate any real machine produces. It exists because sectors
+// delivered faster than ~0.4 ms apart would not boot with Z2 fast RAM on.
+//
+// mmcd_2x is what a CD32 actually is -- a 2x unit, 150 sectors/s -- which is
+// more faithful, gives about four times the margin over that knee, and costs
+// about four times the load time. Which is right is a judgement about the
+// machine you want, so it is a choice and not a constant.
+enum mm_cdSpeed
+{
+	mmcd_fast = 0,
+	mmcd_2x   = 1,
+	mmcd_count
+};
 
 extern mm_configTYPE minimig_config;
 

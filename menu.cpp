@@ -327,6 +327,13 @@ const char *config_scale[] = { "Normal", "V-Integer", "HV-Integer-", "HV-Integer
 // 1-4 for the user; the wire value in status[53:52] is 0-3.
 static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
 
+// CD sector delivery rate, mm_cdSpeed. The multipliers are what they measure
+// against a 1x drive's 75 sectors/s: the shipped floor of one sector every
+// 1700 us is 588/s, near enough 8x and not a rate any real machine produces;
+// a CD32 is a 2x unit at 150/s. Labelled by what they are rather than "Fast"
+// and "Slow", because the slow one is the accurate one.
+const char *config_cd_speed_msg[] = { "Fast (~8x)", "CD32 (2x)" };
+
 // Save states are refused in two configurations. The OSD greys the rows out so
 // the user is told, rather than pressing SELECT and having nothing happen:
 //
@@ -7565,9 +7572,9 @@ void HandleUI(void)
 		OsdSetTitle("Settings", 0);
 		helptext_idx = 0;
 		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
-		// Save state(5), Restore state(6), Clear NVRAM(7), Back(8) -- nine
-		// rows, so 0x1FF.
-		menumask = 0x1FF;
+		// Save state(5), Restore state(6), CD speed(7), Clear NVRAM(8),
+		// Back(9) -- ten rows, so 0x3FF.
+		menumask = 0x3FF;
 		parentstate = menustate;
 
 		m = 0;
@@ -7632,13 +7639,29 @@ void HandleUI(void)
 			OsdWrite(m++, " Restore state", menusub == 6, ss_blocked);
 		}
 
+		// How fast sectors reach the machine. Grouped with the NVRAM rows
+		// below rather than with the CPU rows above because it is about the
+		// drive, and greyed out on the A1200 profile, which has no drive at
+		// all -- same reasoning as the CD rows on the main page.
+		OsdWrite(m++, "", 0, 0);
+		{
+			const int has_cd = (amigacd_system() != AMIGACD_SYS_A1200);
+			// Range-checked rather than trusted: this byte arrives from a file,
+			// and the row has to render something rather than read past the
+			// end of the table if the file is old, hand-edited or truncated.
+			const int spd = (minimig_config.cd_speed < mmcd_count)
+			              ? (int)minimig_config.cd_speed : (int)mmcd_fast;
+			strcpy(s, " CD speed : ");
+			strcat(s, config_cd_speed_msg[spd]);
+			OsdWrite(m++, s, menusub == 7, !has_cd);
+		}
+
 		// Per-game NVRAM. A CD32 save lives in a file named after a hash of
 		// the disc, in a directory nobody browses, and nothing anywhere said
 		// which one was live -- so "my save vanished" had no answer short of
 		// ssh. Worse, when a load fails its verify pass the writes stop
 		// happening on purpose (see cd_save_load_failed in akiko_cd32.cpp) and
 		// the player is never told; that is what the "not saving!" marker is.
-		OsdWrite(m++, "", 0, 0);
 		{
 			char nvr_path[256];
 			int  nvr_exists = 0, nvr_failed = 0;
@@ -7663,11 +7686,11 @@ void HandleUI(void)
 			// Greyed rather than hidden when there is nothing to clear: the row
 			// keeps its position, and a row that is there and dim says "not
 			// now" where a row that vanishes says "you imagined it".
-			OsdWrite(m++, " Clear NVRAM", menusub == 7, !have_nvr);
+			OsdWrite(m++, " Clear NVRAM", menusub == 8, !have_nvr);
 		}
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 8, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 9, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -7865,7 +7888,19 @@ void HandleUI(void)
 					menustate = MENU_NONE1;
 				}
 			}
-			else if (menusub == 7 && select) // Clear NVRAM
+			else if (menusub == 7) // CD speed
+			{
+				// -/+ and SELECT all cycle it: two values, so there is nothing
+				// for a direction to mean, and SELECT is what a controller can
+				// reach without the keyboard.
+				if (amigacd_system() != AMIGACD_SYS_A1200)
+				{
+					minimig_config.cd_speed = (minimig_config.cd_speed == mmcd_2x)
+					                        ? mmcd_fast : mmcd_2x;
+				}
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 8 && select) // Clear NVRAM
 			{
 				// Confirmed, because this deletes somebody's saves. The row is
 				// greyed when there is nothing to clear, but a greyed row still
@@ -7876,7 +7911,7 @@ void HandleUI(void)
 					menustate = MENU_AMIGACD_NVRCLEAR1;
 				}
 			}
-			else if (menusub == 8 && select) // Back
+			else if (menusub == 9 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 7;   // Settings row -- 5 was Hard Disk 1, see above
@@ -7932,7 +7967,7 @@ void HandleUI(void)
 				// result -- it is the result: the disc has no save, which is
 				// the state a disc that was never saved on is in.
 				menustate = MENU_AMIGACD_SETTINGS1;
-				menusub = 7;
+				menusub = 8;
 			}
 			else
 			{
@@ -7947,7 +7982,7 @@ void HandleUI(void)
 		else if (select || menu || back || left)
 		{
 			menustate = MENU_AMIGACD_SETTINGS1;
-			menusub = 7;
+			menusub = 8;
 		}
 		break;
 
