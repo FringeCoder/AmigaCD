@@ -15,6 +15,28 @@ void akiko_cd32_poll(void);
 void akiko_cd32_set_cd_path(const char *path);
 
 // ---------------------------------------------------------------------------
+// Per-game NVRAM, for the OSD.
+//
+// akiko_cd32_nvram_info returns 1 when a save file is in use and 0 when there
+// is none -- no disc, or a machine with no CD drive. On 1:
+//
+//   path    full path of the save file this disc maps to
+//   exists  whether that file is on disk yet. A disc that has never been saved
+//           has a path and no file, which is not an error and is worth saying
+//           rather than showing a filename that is not there.
+//   failed  the last load of this file failed its verify pass, so writes to it
+//           are being refused (see cd_save_load_failed). Nothing else surfaces
+//           that, and a player whose saves have silently stopped persisting has
+//           no way to find out.
+//
+// akiko_cd32_nvram_clear deletes the save and zeroes the mirror in FPGA BRAM.
+// Returns 1 on success, 0 when there was nothing to clear or the unlink failed.
+// Zeroing matters as much as the delete: without it the running machine still
+// holds the old contents and the next dirty write puts them straight back.
+int akiko_cd32_nvram_info(char *path, int pathsz, int *exists, int *failed);
+int akiko_cd32_nvram_clear(void);
+
+// ---------------------------------------------------------------------------
 // What is in the drive, for the OSD.
 //
 // Returns 0 when no drive has media, 1 otherwise. On success:

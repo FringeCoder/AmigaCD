@@ -1794,6 +1794,75 @@ static bool akiko_nvram_save_to_disk(void)
 	return akiko_nvram_save_to_path(target);
 }
 
+// ---------------------------------------------------------------------------
+// Per-game NVRAM, for the OSD. Declared in akiko_cd32.h.
+//
+// None of this state was visible anywhere. A CD32 save lives in a file named
+// after a hash of the disc, in a directory nobody browses, and when a load
+// fails its verify pass the writes stop happening silently -- correctly, to
+// avoid overwriting a real save with a half-loaded one, but with no way for
+// the player to learn that their saves are no longer being kept.
+
+int akiko_cd32_nvram_info(char *path, int pathsz, int *exists, int *failed)
+{
+	if (path && pathsz > 0) path[0] = 0;
+	if (exists) *exists = 0;
+	if (failed) *failed = 0;
+
+	if (!cd_save_path_active[0]) return 0;
+
+	if (path && pathsz > 0) snprintf(path, pathsz, "%s", cd_save_path_active);
+	if (exists) {
+		struct stat st;
+		// Right size as well as present: a truncated file is one
+		// akiko_nvram_load_from_path will refuse, so calling it "there" would
+		// be describing a save that will not load.
+		*exists = (!stat(cd_save_path_active, &st) && st.st_size == AKIKO_NVRAM_BYTES);
+	}
+	if (failed) *failed = cd_save_load_failed ? 1 : 0;
+	return 1;
+}
+
+int akiko_cd32_nvram_clear(void)
+{
+	if (!cd_save_path_active[0]) return 0;
+
+	// Delete FIRST. The poll's dirty-detect can fire between these two steps,
+	// and with the file already gone the worst it can do is write the old
+	// contents back out -- which the zeroing below then supersedes. The other
+	// order leaves a window where the machine's copy is written to a file we
+	// are about to remove, and the delete then looks like it did nothing.
+	if (unlink(cd_save_path_active) && errno != ENOENT) {
+		akiko_diag("[akiko] NVR clear FAILED: unlink(%s) errno=%d",
+		           cd_save_path_active, errno);
+		return 0;
+	}
+
+	// Zero the mirror in BRAM. Without this the running machine still holds
+	// the save and the next dirty write puts it straight back, so the file
+	// reappears and the clear looks like it was ignored.
+	//
+	// All-zero is what an unwritten NVRAM looks like to the CD32: the BIOS
+	// does not recognise it and rebuilds the empty FlashFile bootstrap in
+	// bytes 0..24, which is the state a machine that has never been saved on
+	// is in. That is also why the bootstrap-overwrite guard in
+	// akiko_nvram_save_to_path exists, and why it will not fight this: it only
+	// refuses when the DISK file still has entry data, and it no longer does.
+	uint8_t zero[AKIKO_NVRAM_BYTES] = {};
+	akiko_ext_block_write(AKIKO_NVRAM_ADDR, zero, AKIKO_NVRAM_BYTES);
+
+	// The save is gone, so nothing has been dirtied since it was loaded and no
+	// load has failed. Leaving cd_save_dirty_observed set would make the next
+	// disc swap flush this machine's now-empty NVRAM to a file that should not
+	// exist; leaving cd_save_load_failed set would keep refusing writes to a
+	// slot whose problem has just been deleted.
+	cd_save_dirty_observed = false;
+	cd_save_load_failed    = false;
+
+	akiko_diag("[akiko] NVR cleared: %s removed, BRAM zeroed", cd_save_path_active);
+	return 1;
+}
+
 // Push one sector to the akiko sector_buffer as 1176 16-bit words over the
 // ext bus. The old hps_io disk-slot path (UIO_SECTOR_RD on a dedicated VDNUM
 // slot, ~0.95 ms/sector) is gone: akiko.v takes words now, and the word-wide

@@ -207,6 +207,8 @@ enum MENU
 	MENU_AMIGACD_SETTINGS2,
 	MENU_AMIGACD_ADVANCED1,
 	MENU_AMIGACD_ADVANCED2,
+	MENU_AMIGACD_NVRCLEAR1,
+	MENU_AMIGACD_NVRCLEAR2,
 	MENU_AMIGACD_CDFILE_SELECTED,
 	MENU_AMIGACD_HDFFILE_SELECTED,
 	MENU_AMIGACD_ADFFILE_SELECTED,
@@ -7563,8 +7565,9 @@ void HandleUI(void)
 		OsdSetTitle("Settings", 0);
 		helptext_idx = 0;
 		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
-		// Save state(5), Restore state(6), Back(7) -- eight rows, so 0xFF.
-		menumask = 0xFF;
+		// Save state(5), Restore state(6), Clear NVRAM(7), Back(8) -- nine
+		// rows, so 0x1FF.
+		menumask = 0x1FF;
 		parentstate = menustate;
 
 		m = 0;
@@ -7629,8 +7632,42 @@ void HandleUI(void)
 			OsdWrite(m++, " Restore state", menusub == 6, ss_blocked);
 		}
 
+		// Per-game NVRAM. A CD32 save lives in a file named after a hash of
+		// the disc, in a directory nobody browses, and nothing anywhere said
+		// which one was live -- so "my save vanished" had no answer short of
+		// ssh. Worse, when a load fails its verify pass the writes stop
+		// happening on purpose (see cd_save_load_failed in akiko_cd32.cpp) and
+		// the player is never told; that is what the "not saving!" marker is.
+		OsdWrite(m++, "", 0, 0);
+		{
+			char nvr_path[256];
+			int  nvr_exists = 0, nvr_failed = 0;
+			const int have_nvr = akiko_cd32_nvram_info(nvr_path, sizeof(nvr_path),
+			                                           &nvr_exists, &nvr_failed);
+
+			strcpy(s, " NVRAM    : ");
+			if (!have_nvr) strcat(s, "* no disc *");
+			else if (nvr_failed) strcat(s, "NOT SAVING - load failed");
+			else
+			{
+				// The basename is the identifying part and the directory is
+				// always the same one, so the path is worth nothing here and
+				// the 32-column line has no room for it either.
+				const char *base = strrchr(nvr_path, '/');
+				base = base ? base + 1 : nvr_path;
+				strncat(s, base, 20);
+				if (!nvr_exists) strcat(s, " (new)");
+			}
+			OsdWrite(m++, s, 0, 1);
+
+			// Greyed rather than hidden when there is nothing to clear: the row
+			// keeps its position, and a row that is there and dim says "not
+			// now" where a row that vanishes says "you imagined it".
+			OsdWrite(m++, " Clear NVRAM", menusub == 7, !have_nvr);
+		}
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 7, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 8, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -7644,7 +7681,11 @@ void HandleUI(void)
 		else if (back || left)
 		{
 			menustate = MENU_AMIGACD_MAIN1;
-			menusub = 4;
+			// The Settings row, which is 7 -- CD, Real CD, two floppies, two
+			// hard disks, System, Settings. This said 4, which was right
+			// before the two Hard Disk rows went in and has been landing the
+			// cursor on Hard Disk 0 ever since.
+			menusub = 7;
 		}
 		else if (select || minus || plus)
 		{
@@ -7824,11 +7865,89 @@ void HandleUI(void)
 					menustate = MENU_NONE1;
 				}
 			}
-			else if (menusub == 7 && select) // Back
+			else if (menusub == 7 && select) // Clear NVRAM
+			{
+				// Confirmed, because this deletes somebody's saves. The row is
+				// greyed when there is nothing to clear, but a greyed row still
+				// takes SELECT, so re-check rather than trusting the drawing.
+				if (akiko_cd32_nvram_info(0, 0, 0, 0))
+				{
+					menusub = 0;   // default the confirm page to "No"
+					menustate = MENU_AMIGACD_NVRCLEAR1;
+				}
+			}
+			else if (menusub == 8 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
-				menusub = 5;   // Settings row
+				menusub = 7;   // Settings row -- 5 was Hard Disk 1, see above
 			}
+		}
+		break;
+
+	// Confirming a Clear NVRAM. Its own page rather than a press-twice, because
+	// the thing on the other side of it is a player's saved games and there is
+	// no undo. Shaped like MENU_RECENT3/4, which confirms the other destructive
+	// action in this OSD.
+	case MENU_AMIGACD_NVRCLEAR1:
+	{
+		menumask = 0x03;
+		parentstate = menustate;
+
+		char nvr_path[256];
+		int  nvr_exists = 0;
+		const int have_nvr = akiko_cd32_nvram_info(nvr_path, sizeof(nvr_path), &nvr_exists, 0);
+		const char *base = "";
+		if (have_nvr)
+		{
+			const char *p = strrchr(nvr_path, '/');
+			base = p ? p + 1 : nvr_path;
+		}
+
+		m = 0;
+		while (m < 4) OsdWrite(m++);
+		OsdWrite(m++, "      Erase saved games?");
+		OsdWrite(m++);
+		// Name the file. "Erase saved games?" with no object is a question
+		// about the machine; with the filename it is a question about a disc,
+		// which is what it actually is.
+		sprintf(s, "  %.28s", base);
+		OsdWrite(m++, s, 0, 1);
+		if (!nvr_exists) OsdWrite(m++, "  (nothing saved yet)", 0, 1);
+		OsdWrite(m++);
+		OsdWrite(m++, "             No", menusub == 0);
+		OsdWrite(m++, "             Yes", menusub == 1);
+		while (m < OsdGetSize()) OsdWrite(m++);
+
+		menustate = MENU_AMIGACD_NVRCLEAR2;
+		break;
+	}
+
+	case MENU_AMIGACD_NVRCLEAR2:
+		if (select && menusub == 1)
+		{
+			if (akiko_cd32_nvram_clear())
+			{
+				// No toast on success. The row this returns to now reads
+				// "(new)", and that is not a near-enough description of the
+				// result -- it is the result: the disc has no save, which is
+				// the state a disc that was never saved on is in.
+				menustate = MENU_AMIGACD_SETTINGS1;
+				menusub = 7;
+			}
+			else
+			{
+				// A failure leaves the row exactly as it was, so it has to be
+				// said. Closing the OSD first is what makes it render: Info()
+				// is dropped unless menustate <= MENU_INFO (== 2), which is
+				// the gate that used to swallow every save state toast.
+				menustate = MENU_NONE1;
+				Info("NVRAM clear FAILED - see log", 3000);
+			}
+		}
+		else if (select || menu || back || left)
+		{
+			menustate = MENU_AMIGACD_SETTINGS1;
+			menusub = 7;
 		}
 		break;
 
@@ -7916,7 +8035,7 @@ void HandleUI(void)
 		else if (back || left)
 		{
 			menustate = MENU_AMIGACD_MAIN1;
-			menusub = 6;   // Advanced row
+			menusub = 8;   // Advanced row -- 6 was the System row, see SETTINGS2
 		}
 		else if (select || minus || plus)
 		{
