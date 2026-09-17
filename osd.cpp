@@ -243,10 +243,42 @@ static void draw_title(const unsigned char *p)
 	osdbuf[osdbufpos++] = 0;
 }
 
+// A row drawn on a line OsdUpdate() will not transmit is invisible, and nothing
+// has ever said so. osd_start() masks the line to 0x1F and osdbuf holds 32, so
+// the write is harmless -- it lands in a buffer nobody sends. That silence has
+// cost real time: the Minimig System page put its Ethernet row on the line
+// after the last transmitted one and it was missing for several commits, on a
+// page whose own comment warned it was exactly full.
+//
+// Log-only, and once per line, because this fires from a draw that runs on
+// every OSD pass -- a warning per frame would bury the log it is written to.
+// The bound is read the same way OsdUpdate() computes it rather than from
+// osd_size alone, so a page that legitimately uses the menu core's extra lines
+// cannot trip it.
+//
+// MenuWrite() clamps and returns before reaching here, so this only ever sees
+// the fixed-layout pages that count their rows by hand -- which is the class
+// that gets it wrong.
+static void osd_check_line(unsigned char n)
+{
+	const int sent = is_menu() ? 19 : osd_size;
+	if (n < sent) return;
+
+	static uint32_t warned = 0;
+	if (n < 32)
+	{
+		if (warned & (1u << n)) return;
+		warned |= 1u << n;
+	}
+	printf("OSD: line %u is past the %d lines OsdUpdate() sends -- row not drawn\n",
+	       (unsigned)n, sent);
+}
+
 // write a null-terminated string <s> to the OSD buffer starting at line <n>
 void OsdWriteOffset(unsigned char n, const char *s, unsigned char invert, unsigned char stipple, char offset, char leftchar, char usebg, int maxinv, int mininv)
 {
 	//printf("OsdWriteOffset(%d)\n", n);
+	osd_check_line(n);
 	unsigned short i;
 	unsigned char b;
 	const unsigned char *p;

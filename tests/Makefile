@@ -17,10 +17,11 @@ SRC = ../support/minimig/minimig_savestate.cpp \
       ../support/minimig/minimig_profile.cpp \
       ../support/minimig/akiko_pace.cpp \
       ../support/minimig/rom_crypt.cpp \
-      ../support/minimig/mgl_rbf.cpp
+      ../support/minimig/mgl_rbf.cpp \
+      ../support/minimig/cd_savename.cpp
 
 TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_crypt \
-        test_mgl_rbf
+        test_mgl_rbf test_cd_savename
 
 # Shell tests, run before the compiled ones because they need no compiler and
 # because of what they cover: prune_list() in scripts/deploy-core.sh is the only
