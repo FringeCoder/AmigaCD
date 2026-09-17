@@ -8538,8 +8538,9 @@ void HandleUI(void)
 		OsdSetTitle("Advanced", 0);
 		helptext_idx = 0;
 		int snac = (minimig_config.userport == mmup_snacpsx);
-		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet, Back
-		menumask = snac ? 0x3F : 0xF;
+		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet,
+		// Fast-IDE, Back
+		menumask = snac ? 0x7F : 0x1F;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 
@@ -8614,8 +8615,34 @@ void HandleUI(void)
 		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
 		OsdWrite(m++, " is always present either way.", 0, 0);
 
+		// Fast-IDE, which lives on MENU_MINIMIG_DISK1 -- a page this variant
+		// cannot open, and one that would drag in four IDE slot rows the CD and
+		// Hard Disk rows already cover. So it gets a row here rather than a
+		// route there.
+		//
+		// The bit is INVERTED: ide_cfg & 0x20 clear means on. Read straight off
+		// the Drives page rather than reasoned about, because a setting whose
+		// sense is backwards is exactly the one to get wrong from memory.
+		//
+		// Greyed on the same three conditions that page uses: no IDE, a CDTV
+		// (whose bridge is not IDE at all), or a CPU that is not an 020 -- the
+		// transfer path this speeds up only exists on the 020.
+		OsdWrite(m++, "", 0, 0);
+		{
+			const int cdtv_on = (minimig_config.chipset & CONFIG_CDTV) != 0;
+			const int ide_on  = (minimig_config.ide_cfg & 1) != 0;
+			const int ok      = ide_on && !cdtv_on && (minimig_config.cpu & 2);
+
+			strcpy(s, " Fast-IDE : ");
+			if (cdtv_on)      strcat(s, "N/A (CDTV)");
+			else if (!ide_on) strcat(s, "N/A (no IDE)");
+			else if (!(minimig_config.cpu & 2)) strcat(s, "N/A (68000)");
+			else strcat(s, (minimig_config.ide_cfg & 0x20) ? "Off" : "On");
+			OsdWrite(m++, s, menusub == (uint32_t)(snac ? 5 : 3), !ok);
+		}
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 5 : 3), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 6 : 4), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -8637,7 +8664,8 @@ void HandleUI(void)
 			// Ethernet and Back slide down the menusub list when it is.
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
 			uint32_t eth_row  = snac ? 4 : 2;
-			uint32_t back_row = snac ? 5 : 3;
+			uint32_t ide_row  = snac ? 5 : 3;
+			uint32_t back_row = snac ? 6 : 4;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -8678,6 +8706,19 @@ void HandleUI(void)
 				}
 				a2065_set_iface(m2);
 				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == ide_row && select) // Fast-IDE
+			{
+				// The same three conditions the row greys on, re-checked:
+				// greying is presentation, and toggling a bit that has no
+				// effect on this machine would still persist into the config.
+				const int cdtv_on = (minimig_config.chipset & CONFIG_CDTV) != 0;
+				const int ide_on  = (minimig_config.ide_cfg & 1) != 0;
+				if (ide_on && !cdtv_on && (minimig_config.cpu & 2))
+				{
+					minimig_config.ide_cfg ^= 0x20;
+					menustate = MENU_AMIGACD_ADVANCED1;
+				}
 			}
 			else if (menusub == back_row && select) // Back
 			{
