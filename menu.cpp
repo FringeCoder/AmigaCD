@@ -512,6 +512,54 @@ static void amigacd_ss_preview(int on, int slot)
 	shown_slot = slot;
 }
 
+// What is actually in a save state slot, for the Save slot row.
+//
+// The row used to read "Save slot: 2" and nothing else. The thumbnail preview
+// beside it only appears when a .png exists, so an empty slot, a slot saved
+// before thumbnails existed and a slot belonging to media that is not mounted
+// all looked identical -- four numbers with nothing behind them, which is not
+// a choice anyone can make. The file is already named by
+// FileGenerateSavestatePath(); one stat says whether it is there and when it
+// was written.
+//
+// The longest thing it writes is a timestamp, "16 Sep 21:35", at 12
+// characters. " Save slot: N  " is 15, so the row tops out at 27 of the 32
+// columns a line has.
+static void amigacd_ss_slot_label(int slot, char *out, size_t outsz)
+{
+	if (!out || outsz < 2) return;
+	out[0] = 0;
+
+	// No disc and no HDF means there is nothing to name a save after, so the
+	// slots do not refer to anything yet. Saying so here is the same refusal
+	// minimig_ss_request_save() gives on the press, one step earlier.
+	const char *media = amigacd_ss_name();
+	if (!media || !media[0])
+	{
+		snprintf(out, outsz, "(no media)");
+		return;
+	}
+
+	// Side effect worth knowing about: this also mkdir()s the savestates
+	// directory. It is silent, it is the same call the thumbnail preview
+	// already makes, and mkdir on an existing directory is a cheap EEXIST.
+	char path[1024];
+	FileGenerateSavestatePath(media, path, (slot & 3) + 1);
+
+	struct stat64 *st = getPathStat(path);
+	if (!st || !st->st_size)
+	{
+		snprintf(out, outsz, "(empty)");
+		return;
+	}
+
+	// Day, month and time rather than a full date: the year is noise for a
+	// file you wrote this week, and the line has no room for it.
+	time_t t = (time_t)st->st_mtime;
+	struct tm tm = *localtime(&t);
+	strftime(out, outsz, "%d %b %H:%M", &tm);
+}
+
 static const char *amigacd_ss_name()
 {
 	static char name[256];
@@ -7870,8 +7918,12 @@ void HandleUI(void)
 		{
 			int ss_blocked = minimig_ss_blocked();
 
-			strcpy(s, " Save slot: ");
-			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
+			{
+				char slotinfo[24];
+				amigacd_ss_slot_label(minimig_config.ss_slot & 3, slotinfo, sizeof(slotinfo));
+				sprintf(s, " Save slot: %s  %s",
+				        config_ss_slot_msg[minimig_config.ss_slot & 3], slotinfo);
+			}
 			OsdWrite(m++, s, menusub == 4, ss_blocked);
 
 			amigacd_ss_preview(menusub == 4 && !ss_blocked, minimig_config.ss_slot & 3);
