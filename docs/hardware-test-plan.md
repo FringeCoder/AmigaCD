@@ -1,7 +1,7 @@
 # Hardware test plan
 
 Everything in PRs #52–#57, plus the menu fixes added since, was written without
-a machine. Twenty-six changes, none verified. This is the list, ordered so
+a machine. Twenty-seven changes, none verified. This is the list, ordered so
 that the things other things depend on come first.
 
 The value here is not the steps — those are mostly obvious — it is the **failure
@@ -145,6 +145,32 @@ a draw that only runs on real hardware, and the state it reports requires a page
 edited to overflow. It is in the plan rather than the test suite for that
 reason: the check is that it stays quiet, and if it ever speaks, believe it --
 the Minimig System page hid its Ethernet row this way for several commits.
+
+---
+
+### 1f. Screen position, and that it is per video mode
+
+`Settings -> Video & Audio` now reports the current mode above the adjust row.
+The point of the line is that the stored position is keyed by video mode, which
+nothing said before.
+
+| Check | Pass |
+|---|---|
+| Open the page with no disc, on a CD32 | The line above `Adjust screen position` reads the current mode, e.g. `320x256: not adjusted yet` |
+| `Adjust screen position`, move with the arrows, Enter | Toasts `Stored`, and the line **immediately** reads `position saved` -- not after the next mode change |
+| Esc instead of Enter | `Canceled`, the picture reverts, and the line still says what it said before |
+| Reload the core, reopen the page | Still `position saved`. It lives in `<core>_vadjust.dat`, not in the config slots |
+| `Save settings`, then `Configs -> Load a config` | The screen position is untouched either way. It is deliberately not part of a config |
+| **Boot a game that runs at another resolution** | The line reads that resolution and `not adjusted yet`, and the picture is at the default position. **This is the behaviour the line exists to explain, not a bug** |
+| Adjust in that mode too, then switch back and forth | Each mode keeps its own position |
+| Before the Kickstart has produced video | `(no video mode reported yet)` rather than a stale or invented mode |
+
+**What is still missing, and needs RTL:** there is no test pattern. You are
+aligning against whatever the Amiga is drawing -- a boot animation on a CD32 --
+so there are no known edges to align to, and no way to pre-calibrate a mode
+before something displays it. A pattern generator in the video path is the real
+fix; it needs a Quartus fit and a display, and the design has 0.117 ns of setup
+margin, so it is not free. Not attempted.
 
 ---
 
