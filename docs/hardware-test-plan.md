@@ -1,7 +1,7 @@
 # Hardware test plan
 
 Everything in PRs #52–#57, plus the menu fixes added since, was written without
-a machine. Twenty-three changes, none verified. This is the list, ordered so
+a machine. Twenty-six changes, none verified. This is the list, ordered so
 that the things other things depend on come first.
 
 The value here is not the steps — those are mostly obvious — it is the **failure
@@ -105,6 +105,8 @@ too. Both now open a chooser with a disk already in.
 | Swap four or five times over | No slowdown, no failure to open. `InsertFloppy` does not close the outgoing file itself, so a leaked descriptor per swap would show up here first |
 | Backspace and A+B on the row | Still eject, as the hint says |
 | Swap in df1, then in df0 | Each row swaps its own drive |
+| Assign `External Drive 0` with LEFT/RIGHT, then SELECT and **cancel** | The assignment is **still there**. It used to be cleared before the browser opened, so a cancelled press dropped it |
+| Assign an external drive, then actually pick an image | The image wins and the assignment goes |
 
 ### 1c. The two new rows
 
@@ -127,6 +129,22 @@ too. Both now open a chooser with a disk already in.
 | The wording on a CD32 | Names the last save state |
 | The wording on an A500 | Says the machine cannot take a save state -- it is a 68000, and `AmigaCD.sv` refuses them |
 | **Ctrl+LAlt+RAlt** | Resets **straight away, with no confirmation.** Deliberate: it is the binding for when the Amiga is wedged and the OSD will not open. If this starts asking, that is the bug |
+
+---
+
+### 1e. Two that only show up in the log or the corner
+
+| Check | Pass |
+|---|---|
+| Mount **only** `Hard Disk 1`, no CD and no HD0, on a CD32 or A1200 | `Save state` works and names the file after that HDF. It used to refuse: only HD0 was consulted |
+| Then mount HD0 as well | The name comes from HD0, as the row order implies |
+| `dmesg`/the MiSTer log after browsing every page of this OSD | **No** `OSD: line N is past the ... lines` messages. The diagnostic is new; any line it prints names a page whose rows do not fit and a row nobody can see |
+
+**The OSD line diagnostic has no test and cannot have one here.** It fires from
+a draw that only runs on real hardware, and the state it reports requires a page
+edited to overflow. It is in the plan rather than the test suite for that
+reason: the check is that it stays quiet, and if it ever speaks, believe it --
+the Minimig System page hid its Ethernet row this way for several commits.
 
 ---
 

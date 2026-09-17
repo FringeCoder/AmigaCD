@@ -572,12 +572,21 @@ static const char *amigacd_ss_name()
 	static char name[256];
 	const char *f = minimig_config.hardfile[0].filename;
 
-	// No CD: name the state after the hard disk instead. The A1200 profile has
+	// No CD: name the state after a hard disk instead. The A1200 profile has
 	// no CD drive at all, and its software lives in the HDF -- without this a
 	// machine that can be saved has nothing to name the file after, and
 	// process_ss is never armed, so the save is captured into DDR3 and never
 	// reaches the card.
-	if (!f[0]) return minimig_config.hardfile[1].filename;
+	//
+	// Both hard disks, in row order. This consulted hardfile[1] alone and
+	// stopped, so a machine with only Hard Disk 1 filled -- the IDE1 master,
+	// which is a perfectly good place to keep a Workbench install -- had media
+	// mounted, could be saved, and was refused for want of a name.
+	if (!f[0])
+	{
+		if (minimig_config.hardfile[1].filename[0]) return minimig_config.hardfile[1].filename;
+		return minimig_config.hardfile[2].filename;
+	}
 
 	if (strcmp(f, PHYSICAL_DISC_SENTINEL)) return f;   // an image path: use it
 
@@ -8090,10 +8099,11 @@ void HandleUI(void)
 				// hint says and what the CD row above has always done.
 				else if (select || recent)
 				{
-					// A chosen image overrides any external-drive assignment.
-					minimig_config.floppy.extDrives[fu] = 0;
-					minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
-					                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
+					// The external-drive assignment is dropped where the image
+					// arrives, not here. Clearing it before a browser that can
+					// be cancelled loses the assignment for a press the user
+					// took back -- the same mistake as clearing df[fu].status
+					// here, and it was sitting in the same three lines.
 					ioctl_index = 0;
 					amigacd_fdd_unit = fu;
 					// The disk in the drive stays in it until another is
@@ -9208,6 +9218,15 @@ void HandleUI(void)
 		// through. FileClose on a closed file is a no-op, so the first insert
 		// into an empty drive is unaffected.
 		if (df[amigacd_fdd_unit].status & DSK_INSERTED) FileClose(&df[amigacd_fdd_unit].file);
+		// A chosen image overrides any external-drive assignment on this unit.
+		// Here rather than at the row, so a cancelled browse keeps it: the two
+		// cannot both drive one unit, and it is the image that wins.
+		if (minimig_config.floppy.extDrives[amigacd_fdd_unit])
+		{
+			minimig_config.floppy.extDrives[amigacd_fdd_unit] = 0;
+			minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
+			                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
+		}
 		InsertFloppy(&df[amigacd_fdd_unit], selPath);
 		menusub = 2 + amigacd_fdd_unit;  // back to the row that opened the browser
 		menustate = MENU_AMIGACD_MAIN1;
