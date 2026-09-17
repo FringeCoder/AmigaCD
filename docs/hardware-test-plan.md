@@ -1,8 +1,8 @@
 # Hardware test plan
 
-Everything in PRs #52–#56, plus the row hints added since, was written without
-a machine. Seventeen changes, none verified. This is the list, ordered so that
-the things other things depend on come first.
+Everything in PRs #52–#57, plus the menu fixes added since, was written without
+a machine. Twenty-three changes, none verified. This is the list, ordered so
+that the things other things depend on come first.
 
 The value here is not the steps — those are mostly obvious — it is the **failure
 modes**. Several of these fail silently or misleadingly, and knowing which
@@ -88,6 +88,45 @@ and build date, that is the finding.
 The row count is guarded at compile time (one hint per selectable row, checked
 against each page's `menumask`), so the failure that reaches hardware is a hint
 that is *wrong*, not one that is missing.
+
+---
+
+### 1b. Swapping a floppy
+
+The floppy rows used to eject on SELECT, which meant the recent-disc key ejected
+too. Both now open a chooser with a disk already in.
+
+| Check | Pass |
+|---|---|
+| SELECT on `Floppy 0` with a disk in | The file browser opens. It does **not** eject |
+| The ` key on the same row | The recent list opens, showing disks used before |
+| Pick a different disk | It swaps; the Amiga sees a disk change, as on a first insert |
+| **Cancel out of the browser instead** | The original disk is **still mounted**. This is the regression to watch: `df[fu].status` is no longer cleared when the browser opens, and if it were, a cancel would silently eject |
+| Swap four or five times over | No slowdown, no failure to open. `InsertFloppy` does not close the outgoing file itself, so a leaked descriptor per swap would show up here first |
+| Backspace and A+B on the row | Still eject, as the hint says |
+| Swap in df1, then in df0 | Each row swaps its own drive |
+
+### 1c. The two new rows
+
+| Check | Pass |
+|---|---|
+| `Advanced -> FDD Turbo` | Reads `On`/`Off` and toggles. It has never been reachable from this OSD, so **there is no prior behaviour to compare against** |
+| With it On, load a multi-disk ADF game | Faster than with it Off. No difference means the setting is not reaching the core |
+| `Configs -> Reset <machine> to defaults` | Names the machine you are on. Asks. `No` returns to Configs |
+| `Yes` | RAM, ROMs, CPU and IDE go back to the profile, and the machine restarts |
+| Discs and hard disks after it | **Still mounted.** The page promises this |
+| Re-open the OSD after it | Settings read as defaults, and nothing was written to disk unless you press Save settings |
+| On a machine whose default ROM is missing | Toasts which ROM, and still restarts |
+
+### 1d. Reset now asks
+
+| Check | Pass |
+|---|---|
+| `Reset` on the main page | A confirm page. `No` returns to the Reset row, not to exit |
+| `Yes` | Restarts |
+| The wording on a CD32 | Names the last save state |
+| The wording on an A500 | Says the machine cannot take a save state -- it is a 68000, and `AmigaCD.sv` refuses them |
+| **Ctrl+LAlt+RAlt** | Resets **straight away, with no confirmation.** Deliberate: it is the binding for when the Amiga is wedged and the OSD will not open. If this starts asking, that is the bug |
 
 ---
 

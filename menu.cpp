@@ -212,6 +212,10 @@ enum MENU
 	MENU_AMIGACD_NVRCLEAR2,
 	MENU_AMIGACD_CONFIGS1,
 	MENU_AMIGACD_CONFIGS2,
+	MENU_AMIGACD_DEFAULTS1,
+	MENU_AMIGACD_DEFAULTS2,
+	MENU_AMIGACD_RESET1,
+	MENU_AMIGACD_RESET2,
 	MENU_AMIGACD_CDFILE_SELECTED,
 	MENU_AMIGACD_HDFFILE_SELECTED,
 	MENU_AMIGACD_ADFFILE_SELECTED,
@@ -914,7 +918,7 @@ static constexpr unsigned rowhint_rows(uint32_t mask)
 // anything is wrong.
 #define AMIGACD_MAIN_MENUMASK     0x3FFFu
 #define AMIGACD_SETTINGS_MENUMASK 0x7FFu
-#define AMIGACD_CONFIGS_MENUMASK  0x07u
+#define AMIGACD_CONFIGS_MENUMASK  0x0Fu
 #define AMIGACD_ADV_MENUMASK_SNAC 0xFFu
 #define AMIGACD_ADV_MENUMASK      0x3Fu
 
@@ -7611,7 +7615,7 @@ void HandleUI(void)
 			/* 9 Save      */ "Write these settings, including what is mounted, as the startup config. Loaded again the next time the core starts.",
 			/*10 Configs   */ "Load a saved config, or save this one to any of ten slots.",
 			/*11 Write mgl */ "Write an .mgl beside the mounted disc, so the MiSTer menu can launch straight into this core with it. Names the core running now.",
-			/*12 Reset     */ "Restart the Amiga. Ctrl+LAlt+RAlt does the same without opening this menu.",
+			/*12 Reset     */ "Restart the Amiga; asks first. Ctrl+LAlt+RAlt does it straight away, without the menu and without asking.",
 			/*13 exit      */ "Close the menu. Esc or F12 does the same from anywhere.",
 		};
 		static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_MAIN_MENUMASK),
@@ -8215,8 +8219,17 @@ void HandleUI(void)
 			}
 			else if (menusub == 12 && select) // Reset
 			{
-				menustate = MENU_NONE1;
-				minimig_reset();
+				// Asks first. The row is pinned second from the bottom, one
+				// row above exit, and what it throws away is everything since
+				// the last save state -- on a machine whose save states are
+				// refused outright on two of its four profiles.
+				//
+				// The keyboard reset is deliberately NOT routed through here.
+				// Ctrl+LAlt+RAlt is a three-key chord nobody presses by
+				// accident, and it is the binding you reach for when the Amiga
+				// is wedged and this menu is the thing that will not open.
+				menustate = MENU_AMIGACD_RESET1;
+				menusub = 0;                 // land on No
 			}
 			else if (menusub == 13 && select) // Exit
 			{
@@ -8605,13 +8618,14 @@ void HandleUI(void)
 			{
 				/* 0 Load     */ "Load one of the saved configs. Restarts the Amiga: the load re-uploads the Kickstart and resets the CPU.",
 				/* 1 Save slot*/ "Save these settings to one of ten slots. The first is the startup config, which is what Save settings on the main page writes.",
-				/* 2 back     */ "Back to the main page.",
+				/* 2 Defaults */ "Put this machine back to the settings it starts with. Asks first. Leaves the discs and hard disks mounted, and does not save.",
+				/* 3 back     */ "Back to the main page.",
 			};
 			static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_CONFIGS_MENUMASK),
 				"AmigaCD configs page: one hint per selectable row");
 			helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
 		}
-		menumask = AMIGACD_CONFIGS_MENUMASK;  // Load(0), Save to slot(1), Back(2)
+		menumask = AMIGACD_CONFIGS_MENUMASK;  // Load(0), Save(1), Defaults(2), Back(3)
 		parentstate = menustate;
 
 		m = 0;
@@ -8621,6 +8635,16 @@ void HandleUI(void)
 		OsdWrite(m++, " Load a config   (resets)", menusub == 0, 0);
 		OsdWrite(m++, " Save to a config slot", menusub == 1, 0);
 
+		// The way back out of a config that boots to a black screen.
+		// amigacd_apply_system() writes a machine's defaults, but it only ever
+		// ran on a SWITCH -- and switching away and back loads that machine's
+		// saved config, not its defaults. So a saved config with a bad ROM
+		// pairing or RAM the game will not take could only be undone by
+		// deleting the file over SSH, from a machine that may well be the one
+		// that will not boot.
+		sprintf(s, " Reset %s to defaults", amigacd_system_name(amigacd_system_shown()));
+		OsdWrite(m++, s, menusub == 2, 0);
+
 		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Save settings on the main", 0, 1);
 		OsdWrite(m++, " page writes the startup", 0, 1);
@@ -8628,7 +8652,7 @@ void HandleUI(void)
 		OsdWrite(m++, " slot in both lists.", 0, 1);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 2, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 3, 0);
 
 		menustate = MENU_AMIGACD_CONFIGS2;
 		break;
@@ -8639,7 +8663,7 @@ void HandleUI(void)
 		{
 			menustate = MENU_NONE1;
 		}
-		else if (back || left || (select && menusub == 2))
+		else if (back || left || (select && menusub == 3))
 		{
 			menustate = MENU_AMIGACD_MAIN1;
 			menusub = 10;                // the Configs row
@@ -8656,6 +8680,133 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_SAVECONFIG1;
 				menusub = 0;
 			}
+			else if (menusub == 2)
+			{
+				// Land on No. This one resets the machine.
+				menustate = MENU_AMIGACD_DEFAULTS1;
+				menusub = 0;
+			}
+		}
+		break;
+
+	// Confirming the Reset row. Same shape as the two pages below it, and the
+	// same argument: no undo on the other side.
+	case MENU_AMIGACD_RESET1:
+	{
+		menumask = 0x03;
+		parentstate = menustate;
+
+		m = 0;
+		while (m < 4) OsdWrite(m++);
+		sprintf(s, "      Restart the %s?", amigacd_system_name(amigacd_system()));
+		OsdWrite(m++, s);
+		OsdWrite(m++);
+		// Name the save state slot only when one could actually be taken.
+		// Telling an A500 player to save first, when AmigaCD.sv refuses save
+		// states on a 68000, is advice that cannot be followed.
+		if (!minimig_ss_blocked())
+		{
+			OsdWrite(m++, "  Anything since the last", 0, 1);
+			OsdWrite(m++, "  save state is lost.", 0, 1);
+		}
+		else
+		{
+			OsdWrite(m++, "  Anything unsaved is lost,", 0, 1);
+			OsdWrite(m++, "  and this machine cannot", 0, 1);
+			OsdWrite(m++, "  take a save state.", 0, 1);
+		}
+		OsdWrite(m++);
+		OsdWrite(m++, "             No", menusub == 0);
+		OsdWrite(m++, "             Yes", menusub == 1);
+		while (m < OsdGetSize()) OsdWrite(m++);
+
+		menustate = MENU_AMIGACD_RESET2;
+		break;
+	}
+
+	case MENU_AMIGACD_RESET2:
+		if (select && menusub == 1)
+		{
+			menustate = MENU_NONE1;
+			minimig_reset();
+		}
+		else if (select || menu || back || left)
+		{
+			menustate = MENU_AMIGACD_MAIN1;
+			menusub = 12;                // the Reset row
+		}
+		break;
+
+	// Confirming a "Reset <machine> to defaults". Shaped like the Clear NVRAM
+	// page below, and confirmed for the same reason: what is on the other side
+	// of it cannot be undone. Settings are not saved games, but a config you
+	// spent an evening arriving at is no less gone.
+	case MENU_AMIGACD_DEFAULTS1:
+	{
+		menumask = 0x03;
+		parentstate = menustate;
+
+		m = 0;
+		while (m < 3) OsdWrite(m++);
+		sprintf(s, "   Reset %s settings?", amigacd_system_name(amigacd_system()));
+		OsdWrite(m++, s);
+		OsdWrite(m++);
+		// Say what survives, not just what goes. "Reset to defaults" reads as
+		// "lose everything" unless the exceptions are on the page, and the two
+		// that matter are the mounted media -- which this does not touch -- and
+		// the saved config, which is only rewritten if Save settings is pressed
+		// afterwards.
+		OsdWrite(m++, "  RAM, ROMs, CPU and IDE go", 0, 1);
+		OsdWrite(m++, "  back to this machine's own", 0, 1);
+		OsdWrite(m++, "  defaults, and it restarts.", 0, 1);
+		OsdWrite(m++);
+		OsdWrite(m++, "  Discs and hard disks stay", 0, 1);
+		OsdWrite(m++, "  mounted. Nothing is saved", 0, 1);
+		OsdWrite(m++, "  until you Save settings.", 0, 1);
+		OsdWrite(m++);
+		OsdWrite(m++, "             No", menusub == 0);
+		OsdWrite(m++, "             Yes", menusub == 1);
+		while (m < OsdGetSize()) OsdWrite(m++);
+
+		menustate = MENU_AMIGACD_DEFAULTS2;
+		break;
+	}
+
+	case MENU_AMIGACD_DEFAULTS2:
+		if (select && menusub == 1)
+		{
+			// The machine actually running, not amigacd_system_shown(): a
+			// pending switch is committed before this page can be reached (the
+			// main page flushes on every exit), and defaulting to the machine
+			// on the row rather than the one in the core is how you reset the
+			// wrong one.
+			const int sys = amigacd_system();
+
+			// Same call the first-time-on-this-machine path makes, and the same
+			// report when a default ROM is missing -- the machine still comes
+			// up, as whatever Amiga the old ROM makes it, and nothing else on
+			// screen would say so.
+			if (!amigacd_apply_system(sys))
+			{
+				const char *mname = 0;
+				amigacd_default_rom_names(sys, &mname, 0);
+				char msg[128];
+				snprintf(msg, sizeof(msg), "%s ROM %s not found",
+				         amigacd_system_name(sys), mname);
+				Info(msg, 2500);
+			}
+
+			// apply_system pushes CPU, chipset and floppy itself, but memory
+			// and the ROMs only take effect through ApplyConfiguration, which
+			// is what minimig_reset() runs. Without this the page would claim
+			// defaults the running machine does not have.
+			menustate = MENU_NONE1;
+			minimig_reset();
+		}
+		else if (select || menu || back || left)
+		{
+			menustate = MENU_AMIGACD_CONFIGS1;
+			menusub = 2;
 		}
 		break;
 
@@ -9050,6 +9201,13 @@ void HandleUI(void)
 		if (!mgl->done) mgl_selpath(selPath, sizeof(selPath));
 		memcpy(Selected_F[amigacd_fdd_unit], selPath, sizeof(Selected_F[0]));
 		if (mgl->done) recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_DF(amigacd_fdd_unit));
+		// Swapping a disk lands here with the old one still open. InsertFloppy
+		// calls FileOpenEx straight onto drive->file without closing what was
+		// there, so the outgoing descriptor has to be closed here -- it used to
+		// be closed by the eject-on-select branch that a swap was forced
+		// through. FileClose on a closed file is a no-op, so the first insert
+		// into an empty drive is unaffected.
+		if (df[amigacd_fdd_unit].status & DSK_INSERTED) FileClose(&df[amigacd_fdd_unit].file);
 		InsertFloppy(&df[amigacd_fdd_unit], selPath);
 		menusub = 2 + amigacd_fdd_unit;  // back to the row that opened the browser
 		menustate = MENU_AMIGACD_MAIN1;
