@@ -14,9 +14,11 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
+| ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
 | `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
+| ^ **upstream has moved to `c1134ac` "Add real floppy drive support (#245)"** -- NOT taken, see below | | | 2026-09-17 |
 | ^ previous pin, superseded 2026-09-14 | | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
 | ^ our core's fork point | | `3ab91cd` "Release 20260220." | 2026-02-20 |
 
@@ -28,6 +30,25 @@ core side. It is a content superset, and it contains `7317947` — the
 physical-disc fork's own base, which our line predates by four months. See
 [userspace-branch-move.md](userspace-branch-move.md) for the gained/lost
 analysis and why moving first makes the physical-disc merge much smaller.
+
+## Minimig-AGA upstream has merged real floppy support, and we already have some
+
+`c1134ac` "Add real floppy drive support (#245)" landed upstream after the
+`da7632e` pin. **It is not taken, and it must not be taken blind**, because the
+core already carries MiSTer Floppy from a different source: `rtl/MiSTerFloppy*.v`
+are in the tree today and the core builds `feature/misterfloppy` (see "Which core
+branch to build").
+
+So this is not a missing feature, it is two implementations of one feature
+arriving from two directions. What the sync needs is a file-by-file comparison of
+upstream's `rtl/MiSTerFloppy*.v`, `rtl/paula_floppy.v` and `rtl/userio.v` against
+ours, and a decision per file -- exactly the shape of the `ss_*` ownership
+question T25 settled in the core repo.
+
+Taking it as a merge would either duplicate the modules or silently replace a
+version the fork has been testing against, and the symptom is a floppy that does
+not read on hardware nobody has in front of them. Left for a sync that can be
+given that comparison properly.
 
 **Check what your local clone is actually on.** As of 2026-08-07 the
 `upstream/main-cd32-cdtv` working tree was checked out on `master` — the branch
