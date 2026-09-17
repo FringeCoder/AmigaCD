@@ -286,7 +286,15 @@ int mister_scaler_read(mister_scaler *ms, unsigned char *gbuf, mister_scaler_for
 #else
 
 // no NEON available, do all scalar
-int mister_scaler_read(mister_scaler *ms, unsigned char *gbuf, mister_scaler_format_t format = RGB)
+//
+// The default argument is the header's (ARGB32) and is NOT repeated here.
+// Repeating it is ill-formed C++ whatever the target, so this branch has never
+// compiled -- the ARM builds all define __ARM_NEON and take the branch above,
+// which is the only reason nothing noticed. It was also the WRONG default: the
+// header says ARGB32 and this said RGB, so the one call that omits the
+// argument -- the screenshot path below -- would have asked the two branches
+// for different pixel formats.
+int mister_scaler_read(mister_scaler *ms, unsigned char *gbuf, mister_scaler_format_t format)
 {
     #ifdef PROFILING
         PROFILE_FUNCTION();
@@ -298,7 +306,13 @@ int mister_scaler_read(mister_scaler *ms, unsigned char *gbuf, mister_scaler_for
         unsigned char *pixbuf = &buffer[ms->header + y * ms->line];
         unsigned char *outbuf;
 
-        if (format == RGBA || format == BGRA)
+        // ARGB32 belongs here: it is four bytes per pixel like RGBA and BGRA.
+        // It was missing, so the ARGB32 case below wrote a 4-byte pixel into a
+        // 3-byte stride -- rows overlapping and the last one running off the
+        // end of the buffer. The NEON branch above has always had it right,
+        // and ARGB32 is the header's DEFAULT, which is what the screenshot
+        // path asks for.
+        if (format == RGBA || format == BGRA || format == ARGB32)
             outbuf = &gbuf[y * (ms->width * 4)];
         else
             outbuf = &gbuf[y * (ms->width * 3)];
@@ -337,7 +351,11 @@ int mister_scaler_read(mister_scaler *ms, unsigned char *gbuf, mister_scaler_for
                 }
                 break;
             case ARGB32:
-            for (int x = limit; x < ms->width; x++) {
+            // From 0, not from `limit`. That name belongs to the NEON branch,
+            // where it counts the pixels the vector loop already did and the
+            // scalar tail picks up after it. Copied across to a branch with no
+            // vector loop, it does not exist.
+            for (int x = 0; x < ms->width; x++) {
             #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
                 outbuf[x * 4 + 0] = pixbuf[x * 3 + 2]; // B
                 outbuf[x * 4 + 1] = pixbuf[x * 3 + 1]; // G
