@@ -7236,10 +7236,17 @@ void HandleUI(void)
 
 	case MENU_MINIMIG_CHIPSET1:
 		helptext_idx = HELPTEXT_CHIPSET;
-		// 15 selectable rows: 0..10 from this fork, 11..12 save states,
-		// 13 = upstream's A2065 Ethernet row (menusub 9 upstream, renumbered
-		// twice on merge), 14 = Back.
-		menumask = 0x7FFF;
+		// 16 selectable rows: 0..11 from this fork (FDD Turbo is 11), 12..13
+		// save states, 14 = upstream's A2065 Ethernet row (menusub 9 upstream,
+		// renumbered twice on merge), 15 = Back.
+		//
+		// This said fifteen rows with the save states at 11..12, which missed
+		// that FDD Turbo below is an eleventh fork row and already held 11. Two
+		// rows drew as selected whenever menusub was 11, and CHIPSET2 read 11
+		// as the save-slot stepper, so FDD Turbo could be highlighted and never
+		// toggled. The row count on this page is stated here and nowhere else,
+		// which is why a miscount here was invisible.
+		menumask = 0xFFFF;
 		OsdSetTitle("System");
 		parentstate = menustate;
 
@@ -7309,7 +7316,7 @@ void HandleUI(void)
 		strcat(s, (minimig_config.memory & 0x40) ? "enabled " : "disabled");
 		OsdWrite(m++, s, menusub == 10, 0);
 		sprintf(s, " FDD Turbo: %s", minimig_config.floppy.speed ? "On" : "Off");
-		MenuWrite(m++, s, menusub == 11, 0);
+		OsdWrite(m++, s, menusub == 11, 0);
 
 		// Save states. The core is the active party in the protocol: these rows
 		// only pick a slot and raise a request bit, the capture itself is
@@ -7324,21 +7331,21 @@ void HandleUI(void)
 
 			strcpy(s, " Save slot : ");
 			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
-			OsdWrite(m++, s, menusub == 11, ss_blocked);
+			OsdWrite(m++, s, menusub == 12, ss_blocked);
 
-			amigacd_ss_preview(menusub == 11 && !ss_blocked, minimig_config.ss_slot & 3);
+			amigacd_ss_preview(menusub == 12 && !ss_blocked, minimig_config.ss_slot & 3);
 
-			OsdWrite(m++, " Save state", menusub == 12, ss_blocked);
+			OsdWrite(m++, " Save state", menusub == 13, ss_blocked);
 		}
 
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		// Upstream renders this at menusub 9; this fork has four extra rows
-		// ahead of it, so it lands at 13 and Back moves to 14.
-		OsdWrite(m++, s, menusub == 13, 0);
+		// Upstream renders this at menusub 9; this fork has five extra rows
+		// ahead of it, so it lands at 14 and Back moves to 15.
+		OsdWrite(m++, s, menusub == 14, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 14, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 15, 0);
 
 		menustate = MENU_MINIMIG_CHIPSET2;
 		break;
@@ -7488,7 +7495,15 @@ void HandleUI(void)
 				minimig_config.memory ^= 0x40;
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
-			else if (menusub == 11 && !minimig_ss_blocked())
+			else if (menusub == 11)
+			{
+				// FDD Turbo. It had no handler at all: this index was the save
+				// slot's, so the row rendered and did nothing.
+				minimig_config.floppy.speed ^= 1;
+				minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
+				menustate = MENU_MINIMIG_CHIPSET1;
+			}
+			else if (menusub == 12 && !minimig_ss_blocked())
 			{
 				// Save slot 1..4, stored 0..3. Kept in minimig_config so it
 				// survives "Save settings"; it is NOT pushed to status[53:52]
@@ -7501,7 +7516,7 @@ void HandleUI(void)
 				minimig_config.ss_slot = (unsigned char)slot;
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
-			else if (menusub == 12 && select && !minimig_ss_blocked())
+			else if (menusub == 13 && select && !minimig_ss_blocked())
 			{
 				// Everything this needs -- arming the writer included -- is in
 				// the shared helper. This row used to do the raise on its own
@@ -7510,7 +7525,7 @@ void HandleUI(void)
 				minimig_ss_request_save();
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
-			else if (menusub == 13)
+			else if (menusub == 14)
 			{
 				// A2065 ethernet: OFF -> eth0 -> eth1 -> macvlan -> tap0,
 				// skipping anything this box cannot support (no second NIC,
@@ -7527,8 +7542,8 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
 			// Back. Upstream puts the A2065 row at menusub 9 and Back at 10;
-			// this fork has four extra rows ahead of them, so both shift up.
-			else if (menusub == 14)
+			// this fork has five extra rows ahead of them, so both shift up.
+			else if (menusub == 15)
 			{
 				menustate = MENU_MINIMIG_MAIN1;
 				menusub = 8;
@@ -7762,7 +7777,7 @@ void HandleUI(void)
 
 		// The detail line above is paid for here rather than out of the page's
 		// height. Sixteen lines with Reset and exit pinned to the last two
-		// leaves exactly one spare, which the Eject hint at the bottom uses;
+		// leaves exactly one spare, which the hint line at the bottom uses;
 		// without this the hint would silently stop fitting whenever a disc
 		// was mounted, which is precisely when it is wanted.
 		if (!cd_detail) OsdWrite(m++, "", 0, 0);
@@ -7773,8 +7788,8 @@ void HandleUI(void)
 
 		// The blank that used to sit here paid for the Load settings row below.
 		// Sixteen lines with Reset and exit pinned to the last two leaves one
-		// spare, and the Eject hint has it -- the hint being the only place the
-		// Backspace/A+B binding is written down, it does not lose a fight with
+		// spare, and the hint line has it -- the hints being the only place the
+		// Backspace/A+B binding is written down, they do not lose a fight with
 		// a blank line.
 		OsdWrite(m++, " Settings                 \x16", menusub == 7, 0);
 		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
@@ -7801,9 +7816,10 @@ void HandleUI(void)
 		// straight into this core with it. A row rather than the + / - binding
 		// it started as: a keypress announced only in the scrolling helptext is
 		// not a feature anyone finds, and a launcher nobody finds is not a
-		// launcher. The line it occupies is the one the Eject hint had -- the
-		// binding that hint carried is now in the helptext instead, which is
-		// the weaker home, and this is the trade that was chosen deliberately.
+		// launcher. The line it occupies is the one a contextual Eject hint row
+		// used to have. That binding moved to the bottom line, and since the
+		// hints became per-row it is back on the drive rows themselves, which
+		// is where it was legible in the first place.
 		//
 		// Greyed with no disc IMAGE, which includes the physical drive being
 		// selected: a disc in a real tray has no path to put in a file.
@@ -8056,12 +8072,18 @@ void HandleUI(void)
 					                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
 					menustate = MENU_AMIGACD_MAIN1;
 				}
-				else if (df[fu].status & DSK_INSERTED) // eject
-				{
-					df[fu].status = 0;
-					FileClose(&df[fu].file);
-					menustate = MENU_AMIGACD_MAIN1;
-				}
+				// SELECT and the recent key both open a chooser, whether or not
+				// a disk is already in. Upstream ejects instead when one is
+				// (menu.cpp:6860), and this page inherited that: with a disk in
+				// df0 the recent key ejected it rather than listing the disks
+				// you had used -- which is the one moment that list is worth
+				// having, since swapping to disk 2 of a four-disk game is what
+				// it is for. Two presses to swap, and the second one could not
+				// reach the list at all.
+				//
+				// Ejecting is not lost: Backspace and A+B still do it, on this
+				// row and on every other mountable row, which is what the row's
+				// hint says and what the CD row above has always done.
 				else if (select || recent)
 				{
 					// A chosen image overrides any external-drive assignment.
@@ -8070,7 +8092,10 @@ void HandleUI(void)
 					                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
 					ioctl_index = 0;
 					amigacd_fdd_unit = fu;
-					df[fu].status = 0;
+					// The disk in the drive stays in it until another is
+					// chosen. Clearing status here would eject on a browser
+					// CANCEL, which now matters: this branch is reachable with
+					// a disk mounted. InsertFloppy sets status itself.
 					fs_Options = SCANO_DIR;
 					fs_MenuSelect = MENU_AMIGACD_ADFFILE_SELECTED;
 					fs_MenuCancel = MENU_AMIGACD_MAIN1;
