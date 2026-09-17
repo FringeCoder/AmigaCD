@@ -91,6 +91,44 @@ function synthetic listings and checks exactly which lines come back. It runs
 under `make -C tests`, and its header records the mutations it was falsified
 against.
 
+## Copying the Menu core: `scripts/deploy-menu.sh`
+
+```bash
+./scripts/deploy-menu.sh              # copy output/menu.rbf into place, refresh the spare
+./scripts/deploy-menu.sh --check      # is the live one still the one you deployed?
+./scripts/deploy-menu.sh --restore    # put the spare back, after update_all
+```
+
+`menu.rbf` was the last file here that reached the machine by hand, and it has
+the nastiest failure mode of anything in this project. Three things compound:
+
+- **Nothing sent it.** `stage-output.sh` puts the build in `output/menu.rbf` and
+  stops; every remote copy in this repository sends only the userspace binary.
+- **It cannot be protected from `update_all`.** Downloader filters are
+  category/core level, there is no per-file exclusion, and the boot menu *must*
+  be named `menu.rbf`, so renaming is out.
+- **When it is taken back, nothing says so.** The SNAC pad stops answering in
+  the boot menu with a `menu.rbf` present and a plausible version on screen —
+  which reads as the pad, or the adapter, or `snac_psx=1`, or SW[1].
+
+The documented defence has always been two commands run by hand after every
+update. The script is those two commands plus the part nobody can do by hand,
+which is remembering to check.
+
+`--check` has five answers, not two: matching, taken, **no spare** (a future
+`update_all` would be unrecoverable), **no live** (the machine will not boot to
+a menu), and nothing deployed yet. That verdict is the one piece of logic here
+with a test — `tests/test_deploy_menu_check.sh` — because a check that reports
+a clobbered core as `ok` puts the invisibility back while sounding reassuring.
+
+The transit-name trick matters more here than for a game core: a truncated
+`AmigaCD_<date>.rbf` is a core that will not load, a truncated `menu.rbf` is the
+thing that boots.
+
+The spare is refreshed **from the file just published**, not copied a second
+time from here, so the two are the same bytes by construction and `--check`
+cannot report a difference that is only a second transfer.
+
 ### Which core file is actually running
 
 The table says "wherever you keep cores" because the answer is per machine and
