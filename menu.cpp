@@ -6036,7 +6036,17 @@ void HandleUI(void)
 	case MENU_MT32PI_MAIN2:
 		if (menu || back || left || (select && menusub == 6))
 		{
-			if (is_minimig())
+			// is_minimig() is true for the console variant too, so without this
+			// the page returned to MENU_MINIMIG_MAIN1 row 10 -- which redirects
+			// to MENU_AMIGACD_MAIN1, where row 10 is Configs. A different page
+			// and an unrelated row, the same mistake the Audio & Video and
+			// config pages made before they were given a variant-aware return.
+			if (is_amigacd())
+			{
+				menustate = MENU_AMIGACD_ADVANCED1;
+				menusub = 1;                  // the MT32-pi settings row
+			}
+			else if (is_minimig())
 			{
 				menustate = MENU_MINIMIG_MAIN1;
 				menusub = 10;
@@ -8528,7 +8538,8 @@ void HandleUI(void)
 		OsdSetTitle("Advanced", 0);
 		helptext_idx = 0;
 		int snac = (minimig_config.userport == mmup_snacpsx);
-		menumask = snac ? 0x1F : 0x7;   // User Port[, Port 1, Port 2], Ethernet, Back
+		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet, Back
+		menumask = snac ? 0x3F : 0xF;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 
@@ -8561,6 +8572,20 @@ void HandleUI(void)
 		// Per-port SNAC mode. Pad and mouse are independent signals in
 		// userio.v, so both at once is deliberate: mouse in port 1, joystick
 		// in port 2, the classic Amiga arrangement.
+		// The MT32-pi page, which this OSD could not reach.
+		//
+		// The row above SELECTS MT32-Pi as the user port's tenant. Its settings
+		// -- synth, Munt ROM, soundfont, what it shows on screen -- live on
+		// MENU_MT32PI_MAIN1, and that page is routed from MENU_MINIMIG_MAIN2
+		// and from the Atari ST tree, neither of which this variant reaches.
+		// So the OSD could turn a device on and then offer no way to set it up.
+		//
+		// Greyed rather than hidden when another tenant is selected: the row
+		// explains what the User Port row above it leads to, which is worth
+		// seeing before the switch rather than only after.
+		OsdWrite(m++, " MT32-pi settings         \x16", menusub == 1,
+		         minimig_config.userport != mmup_mp32pi);
+
 		if (snac)
 		{
 			// Sized to the full 3-bit field the RTL reads, not just the enum's
@@ -8572,7 +8597,7 @@ void HandleUI(void)
 			for (int p = 0; p < 2; p++)
 			{
 				sprintf(s, "   Port %d  : %s", p + 1, modes[minimig_config.snac[p] & 0x07]);
-				OsdWrite(m++, s, menusub == (uint32_t)(1 + p), 0);
+				OsdWrite(m++, s, menusub == (uint32_t)(2 + p), 0);
 			}
 		}
 
@@ -8583,14 +8608,14 @@ void HandleUI(void)
 		// drift apart in behaviour.
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 3 : 1), 0);
+		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 4 : 2), 0);
 
 		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
 		OsdWrite(m++, " is always present either way.", 0, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 4 : 2), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 5 : 3), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -8611,8 +8636,8 @@ void HandleUI(void)
 			// Two SNAC port rows only exist while SNAC is the tenant, so
 			// Ethernet and Back slide down the menusub list when it is.
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
-			uint32_t eth_row  = snac ? 3 : 1;
-			uint32_t back_row = snac ? 4 : 2;
+			uint32_t eth_row  = snac ? 4 : 2;
+			uint32_t back_row = snac ? 5 : 3;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -8620,9 +8645,21 @@ void HandleUI(void)
 				minimig_ConfigSnac();
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (snac && (menusub == 1 || menusub == 2)) // SNAC port 1/2 mode
+			else if (menusub == 1 && select) // MT32-pi settings
 			{
-				uint32_t p = menusub - 1;
+				// Re-checked rather than trusting the greying, which is
+				// presentation and not a lock. Opening the page for a device
+				// that is not the current tenant would show settings that
+				// cannot take effect.
+				if (minimig_config.userport == mmup_mp32pi)
+				{
+					menustate = MENU_MT32PI_MAIN1;
+					menusub = 0;
+				}
+			}
+			else if (snac && (menusub == 2 || menusub == 3)) // SNAC port 1/2 mode
+			{
+				uint32_t p = menusub - 2;
 				minimig_config.snac[p] = (minimig_config.snac[p] + 1) % 5;
 				minimig_ConfigSnac();
 				menustate = MENU_AMIGACD_ADVANCED1;
