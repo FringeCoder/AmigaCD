@@ -1,8 +1,8 @@
 # Hardware test plan
 
-Everything in PRs #52–#56 was written without a machine. Sixteen changes, none
-verified. This is the list, ordered so that the things other things depend on
-come first.
+Everything in PRs #52–#56, plus the row hints added since, was written without
+a machine. Seventeen changes, none verified. This is the list, ordered so that
+the things other things depend on come first.
 
 The value here is not the steps — those are mostly obvious — it is the **failure
 modes**. Several of these fail silently or misleadingly, and knowing which
@@ -63,6 +63,31 @@ a different way.
 **Fast-IDE's sense is inverted** in the config (`ide_cfg & 0x20` *clear* means
 on). The row was copied from the Drives page rather than reasoned about, so if
 it reads backwards, that is the thing to check.
+
+---
+
+### 1a. Row hints
+
+The bottom line now says what the selected row does, instead of one message per
+page. Park on a row for about a second and a half and it appears.
+
+| Check | Pass |
+|---|---|
+| Arrow down the main page, pausing on each row | The bottom line changes with the row |
+| The pause | Long enough that scrolling through the page does not flash the line in and out, short enough that stopping on a row answers you. **This is the one that needs a person** — 1500 ms was chosen by argument, not by feel |
+| Every hint | Starts with the core name and build date, then ` - `, then the row's text. That prefix is how §4 stays checkable |
+| `Configs`, `Settings`, `Advanced` | Same behaviour on each; the last row of each page (`Back`) must have its own text |
+| `Advanced` with SNAC selected as the tenant, then without | The hints must follow the rows that shift, not stay where they were. `Ethernet`, `Fast-IDE` and `Back` are the ones that move |
+| A row whose hint names a key — `CD`, `Reset`, `exit`, `Save state` | The key named is the one that works |
+
+**A missing hint is silent.** A row with no entry falls back to the core name
+alone, which is exactly what the line said before this change — so a hint that
+was never written looks like a page that has none. If a row shows only the name
+and build date, that is the finding.
+
+The row count is guarded at compile time (one hint per selectable row, checked
+against each page's `menumask`), so the failure that reaches hardware is a hint
+that is *wrong*, not one that is missing.
 
 ---
 

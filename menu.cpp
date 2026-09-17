@@ -783,7 +783,10 @@ static char helptext_custom[1024];
 enum HelpText_Message
 {
 	HELPTEXT_NONE, HELPTEXT_CUSTOM, HELPTEXT_MAIN, HELPTEXT_HARDFILE, HELPTEXT_CHIPSET, HELPTEXT_MEMORY, HELPTEXT_EJECT, HELPTEXT_CLEAR,
-	HELPTEXT_SSHOTKEY
+	HELPTEXT_SSHOTKEY,
+	// Same buffer as HELPTEXT_CUSTOM, different entry purely so it can have a
+	// different timeout. See helptext_timeouts[].
+	HELPTEXT_ROWHINT
 };
 
 static const char *helptexts[] =
@@ -799,10 +802,23 @@ static const char *helptexts[] =
 	// The hotkeys have nowhere else to be announced: this page is exactly full
 	// at sixteen lines, and a hotkey nobody is told about is not a feature.
 	"                                Save states also work with this menu closed, which is the point of them: Ctrl+Alt+F1 saves to the selected slot, Ctrl+Alt+F2 restores it, Ctrl+Alt+F3 steps to the next slot. The Amiga never sees those keys. Clear NVRAM erases the CD32 saved games for the disc in the drive, which is not the same thing as a save state.",
+	// HELPTEXT_ROWHINT. The same buffer HELPTEXT_CUSTOM points at: what makes
+	// it a separate entry is the timeout below.
+	helptext_custom,
 };
 
 // One per helptexts[] entry, and they must stay the same length: helptext_idx
 // indexes both.
+//
+// Ten seconds is the upstream value and the right one for a page-level message:
+// it is there for someone who has stopped and is stuck. A per-ROW hint is a
+// different thing -- it answers "what is this one?" while the cursor is moving
+// -- and at ten seconds it would never be seen, because every keypress resets
+// this timer. Hence the separate entry with a short one.
+//
+// 1500 ms is a deliberate middle. Shorter and the bottom line animates in and
+// out while scrolling past rows; longer and it stops answering the question
+// anyone is actually asking.
 static const uint32_t helptext_timeouts[] =
 {
 	10000,
@@ -813,7 +829,8 @@ static const uint32_t helptext_timeouts[] =
 	10000,
 	10000,
 	10000,
-	10000
+	10000,
+	1500        // HELPTEXT_ROWHINT
 };
 
 // helptext_idx indexes both, and nothing else makes them agree -- adding a
@@ -877,6 +894,71 @@ static int recent_open(int idx)
 // which on the console variant redirects to MENU_AMIGACD_MAIN1 where row 12 is
 // exit. Landing on exit after backing out of a config list is not what
 // backing out means.
+
+// Rows a menumask selects. Every mask below is a contiguous run from bit 0,
+// so this is simply the row count; written as a popcount because that stays
+// correct if a page ever grows a gap.
+static constexpr unsigned rowhint_rows(uint32_t mask)
+{
+	unsigned rows = 0;
+	while (mask) { rows += (mask & 1u); mask >>= 1; }
+	return rows;
+}
+
+// Each of these is stated twice: once as the page's menumask, once as the
+// length its tips table has to have. Naming them lets a static_assert compare
+// the two. A tips table is indexed by menusub, so it has to have exactly one
+// entry per selectable row -- and menumask is where "how many rows" is
+// actually stated. Without the assert, adding a row and forgetting its hint
+// shows the row after it the wrong text, or nothing, and neither says
+// anything is wrong.
+#define AMIGACD_MAIN_MENUMASK     0x3FFFu
+#define AMIGACD_SETTINGS_MENUMASK 0x7FFu
+#define AMIGACD_CONFIGS_MENUMASK  0x07u
+#define AMIGACD_ADV_MENUMASK_SNAC 0x7Fu
+#define AMIGACD_ADV_MENUMASK      0x1Fu
+
+// The hint for the row the cursor is on, in the scrolling line at the bottom.
+//
+// The OSD has always had one helptext per PAGE, shown after ten seconds of no
+// input. That is the right shape for "I am stuck": it waits until you have
+// stopped. It is the wrong shape for "what does this row do?", which is asked
+// while the cursor is moving -- and every keypress resets that timer, so a
+// page-level message is never seen mid-navigation at all.
+//
+// So the text is composed per row here and shown on the short HELPTEXT_ROWHINT
+// timer instead. Park on a row for a moment and it tells you what the row does
+// and, where there is one, the key that does it without the menu.
+//
+// The core name and build date lead every hint rather than living on their own
+// line, which is how they survived the page's helptext becoming per-row: they
+// are the answer to "is this the build I just copied?", which is worth having
+// on screen whichever row you are on.
+//
+//   tips  one string per selectable row, in menusub order
+//   n     how many
+//   sub   the current menusub
+//
+// A row with no entry -- or an index past the end, which is what a page whose
+// rows are conditional can produce -- falls back to the name alone. Silent,
+// because a missing hint is a gap in the writing and not a fault the user can
+// do anything about.
+// Returns the helptext index to use, so the call site is one statement --
+// helptext_idx is a static local of HandleUI and cannot be set from here, and
+// composing the text without selecting it would be a thing to forget.
+static int amigacd_rowhint(const char *const *tips, unsigned n, uint32_t sub)
+{
+	snprintf(helptext_custom, sizeof(helptext_custom), "%s%s", HELPTEXT_SPACER, OsdCoreNameGet());
+
+	if (tips && sub < n && tips[sub] && tips[sub][0])
+	{
+		strncat(helptext_custom, "  -  ", sizeof(helptext_custom) - strlen(helptext_custom) - 1);
+		strncat(helptext_custom, tips[sub], sizeof(helptext_custom) - strlen(helptext_custom) - 1);
+	}
+
+	return HELPTEXT_ROWHINT;
+}
+
 // Write a .mgl that launches this core with the disc that is mounted now.
 //
 // docs/mgl.md has always described writing one by hand, and warned about the
@@ -7489,33 +7571,40 @@ void HandleUI(void)
 		// the core menu itself is reskinned, the MiSTer menu stays reachable.
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 
-		// Which build is running, in the scrolling line at the bottom.
+		// What the row under the cursor does, and the key that does it without
+		// the menu. See amigacd_rowhint().
 		//
-		// OsdCoreNameGet() is "AmigaCD <build date>" -- user_io.cpp appends the
-		// CONF_STR "V" entry, which the core fills from build_id.v, so it
-		// identifies the BITSTREAM rather than the filename it was copied
-		// under. Until now it appeared only on the About page, three steps
-		// away through the common menus, and "am I testing the core I just
-		// deployed?" comes up every cycle of a hardware session.
+		// This replaces one page-level line that named the eject binding and
+		// the save state hotkeys together. That line had to list every shortcut
+		// on the page at once, because it could not know which row you were on;
+		// these say the one that applies. The eject binding in particular is
+		// contextual again, which is how it read back when it had a row.
 		//
-		// Both the Archie main page and the full Minimig main page already do
-		// exactly this; this page passed helptext_idx = 0 and dropped it. The
-		// helptext costs no rows, which is the other reason it is the right
-		// place: this page is full.
-		sprintf(helptext_custom, HELPTEXT_SPACER);
-		strcat(helptext_custom, OsdCoreNameGet());
-		// The eject binding lives here alone now. It had a hint row on the
-		// page, contextual to the selected drive, and the Write .mgl row took
-		// that line. This is the weaker home for it -- a scrolling line is read
-		// by whoever waits -- and it is the cost that buys a launcher anyone
-		// can find.
-		strcat(helptext_custom, "    Backspace (or A+B on a pad) ejects the selected drive."
-		                        "    Ctrl+Alt+F1 saves a state, Ctrl+Alt+F2 restores it,"
-		                        " Ctrl+Alt+F3 steps the slot.");
-		helptext_idx = HELPTEXT_CUSTOM;
+		// The core name and build date still lead every hint -- see
+		// amigacd_rowhint() for why they are not on a line of their own.
+		static const char *const tips[] =
+		{
+			/* 0 CD        */ "Mount a CD image: ISO, CUE or CHD. Backspace, or A+B on a pad, ejects it. The ` key lists the discs you have used before.",
+			/* 1 Real CD   */ "Use a CD-ROM drive plugged into the MiSTer instead of an image. Select it again after changing the disc to re-read the TOC.",
+			/* 2 Floppy 0  */ "Mount an ADF, SCP or IPF in df0. Backspace or A+B ejects. Left and right assign a real drive on the MiSTer Floppy board instead.",
+			/* 3 Floppy 1  */ "Mount an ADF, SCP or IPF in df1. Backspace or A+B ejects. Left and right assign a real drive on the MiSTer Floppy board instead.",
+			/* 4 Hard Disk */ "Mount an HDF as the IDE0 slave. Turns the IDE controller on if it was off. Backspace or A+B ejects.",
+			/* 5 Hard Disk */ "Mount an HDF as the IDE1 master: the second volume software like AmigaVision keeps its settings on. Backspace or A+B ejects.",
+			/* 6 System    */ "The machine: CD32, CDTV, A500 or A1200. Each keeps its own settings, so switching away and back does not lose them.",
+			/* 7 Settings  */ "RAM, ROMs, save states, CD speed, per-game NVRAM, and the Amiga's own video and audio.",
+			/* 8 Advanced  */ "The user port - MT32-pi, MiSTer Floppy or a PSX SNAC adapter - plus Ethernet and Fast-IDE.",
+			/* 9 Save      */ "Write these settings, including what is mounted, as the startup config. Loaded again the next time the core starts.",
+			/*10 Configs   */ "Load a saved config, or save this one to any of ten slots.",
+			/*11 Write mgl */ "Write an .mgl beside the mounted disc, so the MiSTer menu can launch straight into this core with it. Names the core running now.",
+			/*12 Reset     */ "Restart the Amiga. Ctrl+LAlt+RAlt does the same without opening this menu.",
+			/*13 exit      */ "Close the menu. Esc or F12 does the same from anywhere.",
+		};
+		static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_MAIN_MENUMASK),
+			"AmigaCD main page: one hint per selectable row");
+		helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
 		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
 		// Load, Write .mgl, Reset, Exit -- fourteen rows.
-		menumask = 0x3FFF;
+		menumask = AMIGACD_MAIN_MENUMASK;
 
 		// The A1200 profile has no CD drive at all, so its two rows are dead.
 		// Greyed out rather than removed: the row positions are shared with
@@ -8139,11 +8228,32 @@ void HandleUI(void)
 	case MENU_AMIGACD_SETTINGS1:
 	{
 		OsdSetTitle("Settings", 0);
-		helptext_idx = HELPTEXT_SSHOTKEY;
+		{
+			// The save state hotkeys were announced on this page's own
+			// helptext, which had to name all three at once. Each now sits on
+			// the row it belongs to.
+			static const char *const tips[] =
+			{
+				/* 0 FastRAM  */ "Zorro II and Zorro III fast RAM. Z3 and 68000 both stop save states working, and grey those rows out when selected.",
+				/* 1 D-Cache  */ "The 68020's instruction cache. Faster, and only available when the CPU is an 020.",
+				/* 2 Main ROM */ "The Kickstart. Amiga Forever ROMs work as they are, encrypted, as long as ROM.KEY sits beside them.",
+				/* 3 Ext ROM  */ "The extended ROM, which a CD32 needs to boot a disc. Minus clears the pairing.",
+				/* 4 Save slot*/ "Which of four save state slots to use. Shows when each was written, or that it is empty. Ctrl+Alt+F3 steps it without the menu.",
+				/* 5 Save     */ "Capture the machine into the selected slot. Ctrl+Alt+F1 does it without opening the menu, which is the point of it.",
+				/* 6 Restore  */ "Put the selected slot back. Ctrl+Alt+F2 does it without the menu. Refused when there is no disc or HDF to name the save after.",
+				/* 7 CD speed */ "Fast is the rate this core has always used. CD32 (2x) is what the real machine does: four times the loading, four times the margin.",
+				/* 8 Clear NVR*/ "Erase the CD32 saved games for the disc in the drive. Not a save state. Asks first, and the machine needs a reset to see it.",
+				/* 9 Video/A  */ "The Amiga's own video and audio: PAL or NTSC, stereo mix, the LED filter, Paula output, and screen centring.",
+				/*10 back     */ "Back to the main page.",
+			};
+			static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_SETTINGS_MENUMASK),
+				"AmigaCD settings page: one hint per selectable row");
+			helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
+		}
 		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
 		// Save state(5), Restore state(6), CD speed(7), Clear NVRAM(8),
 		// Video & Audio(9), Back(10) -- eleven rows, so 0x7FF.
-		menumask = 0x7FF;
+		menumask = AMIGACD_SETTINGS_MENUMASK;
 		parentstate = menustate;
 
 		m = 0;
@@ -8465,8 +8575,18 @@ void HandleUI(void)
 	case MENU_AMIGACD_CONFIGS1:
 	{
 		OsdSetTitle("Configs", 0);
-		helptext_idx = 0;
-		menumask = 0x07;                 // Load(0), Save to slot(1), Back(2)
+		{
+			static const char *const tips[] =
+			{
+				/* 0 Load     */ "Load one of the saved configs. Restarts the Amiga: the load re-uploads the Kickstart and resets the CPU.",
+				/* 1 Save slot*/ "Save these settings to one of ten slots. The first is the startup config, which is what Save settings on the main page writes.",
+				/* 2 back     */ "Back to the main page.",
+			};
+			static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_CONFIGS_MENUMASK),
+				"AmigaCD configs page: one hint per selectable row");
+			helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
+		}
+		menumask = AMIGACD_CONFIGS_MENUMASK;  // Load(0), Save to slot(1), Back(2)
 		parentstate = menustate;
 
 		m = 0;
@@ -8587,11 +8707,42 @@ void HandleUI(void)
 	case MENU_AMIGACD_ADVANCED1:
 	{
 		OsdSetTitle("Advanced", 0);
-		helptext_idx = 0;
+
 		int snac = (minimig_config.userport == mmup_snacpsx);
+		{
+			// Two tables, because the two SNAC port rows only exist while SNAC
+			// is the tenant and everything below them shifts when it is. The
+			// same reason the Ethernet and Back row numbers are computed from
+			// that flag rather than written down once.
+			static const char *const tips_snac[] =
+			{
+				/* 0 User Port*/ "Who owns the user port: MT32-pi, a MiSTer Floppy board, or a PSX SNAC adapter. They share every pin, so only one at a time.",
+				/* 1 MT32-pi  */ "Synth, Munt ROM and soundfont for the MT32-pi on the user port. Only selectable while MT32-pi owns it.",
+				/* 2 Port 1   */ "What the pad in SNAC port 1 is: off, pad, mouse, both at once, or a light gun.",
+				/* 3 Port 2   */ "What the pad in SNAC port 2 is: off, pad, mouse, both at once, or a light gun.",
+				/* 4 Ethernet */ "The A2065 Zorro II Ethernet card. Off by default; the FPGA half is there either way.",
+				/* 5 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
+				/* 6 back     */ "Back to the main page.",
+			};
+			static const char *const tips_plain[] =
+			{
+				tips_snac[0],
+				tips_snac[1],
+				tips_snac[4],
+				tips_snac[5],
+				tips_snac[6],
+			};
+			static_assert(sizeof(tips_snac) / sizeof(tips_snac[0]) == rowhint_rows(AMIGACD_ADV_MENUMASK_SNAC),
+				"AmigaCD advanced page with SNAC: one hint per selectable row");
+			static_assert(sizeof(tips_plain) / sizeof(tips_plain[0]) == rowhint_rows(AMIGACD_ADV_MENUMASK),
+				"AmigaCD advanced page without SNAC: one hint per selectable row");
+			helptext_idx = snac
+				? amigacd_rowhint(tips_snac, sizeof(tips_snac) / sizeof(tips_snac[0]), menusub)
+				: amigacd_rowhint(tips_plain, sizeof(tips_plain) / sizeof(tips_plain[0]), menusub);
+		}
 		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet,
 		// Fast-IDE, Back
-		menumask = snac ? 0x7F : 0x1F;
+		menumask = snac ? AMIGACD_ADV_MENUMASK_SNAC : AMIGACD_ADV_MENUMASK;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 
