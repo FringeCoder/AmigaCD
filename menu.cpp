@@ -915,8 +915,8 @@ static constexpr unsigned rowhint_rows(uint32_t mask)
 #define AMIGACD_MAIN_MENUMASK     0x3FFFu
 #define AMIGACD_SETTINGS_MENUMASK 0x7FFu
 #define AMIGACD_CONFIGS_MENUMASK  0x07u
-#define AMIGACD_ADV_MENUMASK_SNAC 0x7Fu
-#define AMIGACD_ADV_MENUMASK      0x1Fu
+#define AMIGACD_ADV_MENUMASK_SNAC 0xFFu
+#define AMIGACD_ADV_MENUMASK      0x3Fu
 
 // The hint for the row the cursor is on, in the scrolling line at the bottom.
 //
@@ -8747,7 +8747,8 @@ void HandleUI(void)
 				/* 3 Port 2   */ "What the pad in SNAC port 2 is: off, pad, mouse, both at once, or a light gun.",
 				/* 4 Ethernet */ "The A2065 Zorro II Ethernet card. Off by default; the FPGA half is there either way.",
 				/* 5 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
-				/* 6 back     */ "Back to the main page.",
+				/* 6 FDD Turbo*/ "Load floppies faster than the real drive could. Off is authentic; a few disks that time themselves against the drive need it off.",
+				/* 7 back     */ "Back to the main page.",
 			};
 			static const char *const tips_plain[] =
 			{
@@ -8756,6 +8757,7 @@ void HandleUI(void)
 				tips_snac[4],
 				tips_snac[5],
 				tips_snac[6],
+				tips_snac[7],
 			};
 			static_assert(sizeof(tips_snac) / sizeof(tips_snac[0]) == rowhint_rows(AMIGACD_ADV_MENUMASK_SNAC),
 				"AmigaCD advanced page with SNAC: one hint per selectable row");
@@ -8766,7 +8768,7 @@ void HandleUI(void)
 				: amigacd_rowhint(tips_plain, sizeof(tips_plain) / sizeof(tips_plain[0]), menusub);
 		}
 		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet,
-		// Fast-IDE, Back
+		// Fast-IDE, FDD Turbo, Back
 		menumask = snac ? AMIGACD_ADV_MENUMASK_SNAC : AMIGACD_ADV_MENUMASK;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
@@ -8868,8 +8870,26 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == (uint32_t)(snac ? 5 : 3), !ok);
 		}
 
+		// Floppy turbo. minimig_config.floppy.speed has always existed, is
+		// saved with the config and is pushed to the core by
+		// amigacd_apply_system -- but the only rows that could change it are on
+		// MENU_MINIMIG_CHIPSET1 and MENU_MINIMIG_DISK1, and MENU_MINIMIG_MAIN1
+		// redirects to this variant before either can be opened. So the
+		// setting was live, persistent, and unreachable.
+		//
+		// It matters here because this OSD draws two floppy rows and three of
+		// its four machines boot from floppy: a four-disk A500 game at the real
+		// drive's rate is the slowest thing this core does.
+		//
+		// Here rather than on Settings for two reasons. Settings is exactly
+		// full -- fifteen lines and Back, once the NVRAM detail line is up --
+		// and this page is where the core's deviations from the authentic
+		// machine already live, which is what turbo loading is.
+		sprintf(s, " FDD Turbo: %s", minimig_config.floppy.speed ? "On" : "Off");
+		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 6 : 4), 0);
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 6 : 4), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 7 : 5), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -8892,7 +8912,8 @@ void HandleUI(void)
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
 			uint32_t eth_row  = snac ? 4 : 2;
 			uint32_t ide_row  = snac ? 5 : 3;
-			uint32_t back_row = snac ? 6 : 4;
+			uint32_t fdd_row  = snac ? 6 : 4;
+			uint32_t back_row = snac ? 7 : 5;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -8946,6 +8967,15 @@ void HandleUI(void)
 					minimig_config.ide_cfg ^= 0x20;
 					menustate = MENU_AMIGACD_ADVANCED1;
 				}
+			}
+			else if (menusub == fdd_row) // FDD Turbo
+			{
+				// minimig_ConfigFloppy carries drives and speed together, so
+				// the drive count has to be passed through unchanged -- the
+				// same call the two stranded pages make.
+				minimig_config.floppy.speed ^= 1;
+				minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
+				menustate = MENU_AMIGACD_ADVANCED1;
 			}
 			else if (menusub == back_row && select) // Back
 			{
