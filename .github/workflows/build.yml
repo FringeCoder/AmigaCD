@@ -31,6 +31,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Parses every C++ source with the HOST compiler, before the toolchain is
+      # even downloaded. Seconds against the cross-build's minutes, and it fails
+      # on the things most likely to be wrong in a change that was not built
+      # locally: a typo, and a static_assert that no longer holds -- the OSD
+      # pages tie their row counts to their menumask that way, and a row added
+      # without its hint is caught here rather than after a toolchain fetch.
+      #
+      # Not a substitute for the build below. It does not link, char and long
+      # differ from the target, and four files it cannot parse are listed with
+      # reasons in the script, which prints them on every run.
+      - name: Host syntax check
+        run: ./syntax_check.sh
+
       - name: Resolve toolchain package name
         id: tc
         run: |
