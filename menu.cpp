@@ -809,6 +809,32 @@ static int recent_open(int idx)
 	return recent_init(idx);
 }
 
+// Leaving the shared Audio & Video page.
+//
+// It has always returned to MENU_MINIMIG_MAIN1 row 9, which is the row the
+// full OSD links to it from. The console variant reaches it from its own
+// Settings page instead, and MENU_MINIMIG_MAIN1 redirects to
+// MENU_AMIGACD_MAIN1 whose row 9 is Save settings -- so the page would have
+// dropped the user on a different page, on an unrelated row, one keypress away
+// from overwriting their config. Each variant names its own way back.
+//
+// A function because the page has two exits, SELECT on Back and the back/left
+// keys, and an exit that agrees with the other only by copy is one edit away
+// from not agreeing.
+static void amigacd_video_back()
+{
+	if (is_amigacd())
+	{
+		menustate = MENU_AMIGACD_SETTINGS1;
+		menusub = 9;                       // the Video & Audio row
+	}
+	else
+	{
+		menustate = MENU_MINIMIG_MAIN1;
+		menusub = 9;                       // the full OSD's link to this page
+	}
+}
+
 // Put the current MGL item's file into selPath, the way MENU_MINIMIG_* has
 // always resolved it: an absolute path is used as given, "../" resolves from
 // the storage root, anything else from the core's home directory.
@@ -7788,8 +7814,8 @@ void HandleUI(void)
 		helptext_idx = HELPTEXT_SSHOTKEY;
 		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
 		// Save state(5), Restore state(6), CD speed(7), Clear NVRAM(8),
-		// Back(9) -- ten rows, so 0x3FF.
-		menumask = 0x3FF;
+		// Video & Audio(9), Back(10) -- eleven rows, so 0x7FF.
+		menumask = 0x7FF;
 		parentstate = menustate;
 
 		m = 0;
@@ -7904,8 +7930,25 @@ void HandleUI(void)
 			OsdWrite(m++, " Clear NVRAM", menusub == 8, !have_nvr);
 		}
 
+		// The Amiga's own video and audio: TV standard, stereo mix, the LED
+		// filter, Paula output, screen centring.
+		//
+		// That page has existed all along and this core could not reach it.
+		// MENU_MINIMIG_VIDEO1 is routed from one place -- MENU_MINIMIG_MAIN2's
+		// row 9 -- and the console variant jumps to MENU_AMIGACD_MAIN1 at the
+		// head of MENU_MINIMIG_MAIN1 and breaks first, so every one of those
+		// settings was stranded. TV Standard was reachable only by holding F1
+		// or F2 while the core came up (minimig_cfg_load), and the stereo mix
+		// -- the one an Amiga on headphones actually needs -- not at all.
+		//
+		// Same root cause as the .mgl gap, and as the CD32 pad mode, which was
+		// patched by deriving it from the system profile rather than by giving
+		// the OSD a way in (minimig_config.cpp, "never shows that row"). This
+		// is the way in.
+		OsdWrite(m++, " Video & Audio            \x16", menusub == 9, 0);
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 9, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 10, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -8067,7 +8110,12 @@ void HandleUI(void)
 					menustate = MENU_AMIGACD_NVRCLEAR1;
 				}
 			}
-			else if (menusub == 9 && select) // Back
+			else if (menusub == 9 && select) // Video & Audio
+			{
+				menustate = MENU_MINIMIG_VIDEO1;
+				menusub = 0;
+			}
+			else if (menusub == 10 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 7;   // Settings row -- 5 was Hard Disk 1, see above
@@ -8772,11 +8820,7 @@ void HandleUI(void)
 				break;
 
 			case 12:
-				if (select)
-				{
-					menustate = MENU_MINIMIG_MAIN1;
-					menusub = 9;
-				}
+				if (select) amigacd_video_back();
 				break;
 			}
 		}
@@ -8786,8 +8830,7 @@ void HandleUI(void)
 		}
 		else if (back || left)
 		{
-			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 9;
+			amigacd_video_back();
 		}
 		break;
 
