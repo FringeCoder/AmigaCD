@@ -874,6 +874,102 @@ static int recent_open(int idx)
 // which on the console variant redirects to MENU_AMIGACD_MAIN1 where row 12 is
 // exit. Landing on exit after backing out of a config list is not what
 // backing out means.
+// Write a .mgl that launches this core with the disc that is mounted now.
+//
+// docs/mgl.md has always described writing one by hand, and warned about the
+// part that bites: <rbf> names a dated core, so every file naming it stops
+// working at the next deploy. The OSD does not have to guess -- get_rbf_dir()
+// and get_rbf_name() are the core that is RUNNING -- so a file written here is
+// correct by construction, and correct again after the next deploy if it is
+// written again.
+//
+// Returns 1 and leaves the file's root-relative path in out[].
+static int amigacd_write_mgl(char *out, size_t outsz)
+{
+	const char *disc = minimig_config.hardfile[0].filename;
+	if (!disc[0] || !strcmp(disc, PHYSICAL_DISC_SENTINEL)) return 0;
+
+	const char *rbf = get_rbf_name();
+	if (!rbf[0]) return 0;
+
+	// <rbf> is a path under the storage root with no extension.
+	char stem[512];
+	snprintf(stem, sizeof(stem), "%s", rbf);
+	char *dot = strrchr(stem, '.');
+	if (dot) *dot = 0;
+
+	char rbfdir[512];
+	snprintf(rbfdir, sizeof(rbfdir), "%s", get_rbf_dir());
+
+	// The disc path, written in the form mgl_selpath() resolves back to this
+	// same file: relative to the core's home directory when it lives under it,
+	// and absolute when it does not. Not the root-relative form it is stored
+	// in -- that one would be read back as HomeDir()/<it> and miss.
+	char home[512];
+	snprintf(home, sizeof(home), "%s", HomeDir());
+	const size_t hlen = strlen(home);
+
+	char discpath[1024];
+	if (hlen && !strncmp(disc, home, hlen) && disc[hlen] == '/')
+		snprintf(discpath, sizeof(discpath), "%s", disc + hlen + 1);
+	else
+		snprintf(discpath, sizeof(discpath), "%s", getFullPath(disc));
+
+	// Beside the disc and named after it, which is the one place someone will
+	// think to look for it. Moving it into _Console/ afterwards puts it on the
+	// main menu's front page; nothing here depends on where it ends up.
+	snprintf(out, outsz, "%s", disc);
+	char *ext = strrchr(out, '.');
+	if (ext) *ext = 0;
+	strncat(out, ".mgl", outsz - strlen(out) - 1);
+
+	// getFullPath returns a pointer into a shared static, so it is copied
+	// before anything else can call it.
+	char full[1024];
+	snprintf(full, sizeof(full), "%s", getFullPath(out));
+
+	FILE *f = fopen(full, "w");
+	if (!f) return 0;
+
+	// delay="2" is the floor docs/mgl.md gives: the core has to be up before
+	// the mount lands. index 4 is the CD.
+	fprintf(f, "<mistergamedescription>\n");
+	fprintf(f, "\t<rbf>%s%s%s</rbf>\n", rbfdir, rbfdir[0] ? "/" : "", stem);
+	fprintf(f, "\t<file delay=\"2\" type=\"f\" index=\"4\" path=\"%s\"/>\n", discpath);
+	fprintf(f, "</mistergamedescription>\n");
+
+	int ok = !ferror(f);
+	if (fclose(f)) ok = 0;
+	return ok;
+}
+
+// Is an optical drive attached at all?
+//
+// physical_disc_open() answers this properly, but by opening the device --
+// worker thread, ring buffer, speed cap -- which is not something a menu draw
+// can do on every refresh. The device nodes are the cheap half of the same
+// question, and they are the half that separates "no drive" from "a drive with
+// an empty tray". Those two produced the same row text and the same toast, and
+// they are different problems: one is a cable, the other is a disc.
+//
+// /dev/sr0../dev/sr7 is the range physical_disc.cpp's find_drive() scans, so
+// the two agree on what counts as a drive. An already-open device is checked
+// first, since a preferred device set from elsewhere need not be in that range.
+static int amigacd_optical_drive_present()
+{
+	const char *open_dev = physical_disc_device();
+	if (open_dev && open_dev[0]) return 1;
+
+	for (int i = 0; i < 8; i++)
+	{
+		char dev[16];
+		struct stat st;
+		snprintf(dev, sizeof(dev), "/dev/sr%d", i);
+		if (!stat(dev, &st)) return 1;
+	}
+	return 0;
+}
+
 static void amigacd_loadcfg_back()
 {
 	if (is_amigacd())
@@ -7319,10 +7415,34 @@ void HandleUI(void)
 		// load other cores + Reboot-to-menu; Misc: volume/config/info) -- only
 		// the core menu itself is reskinned, the MiSTer menu stays reachable.
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
-		helptext_idx = 0;
+
+		// Which build is running, in the scrolling line at the bottom.
+		//
+		// OsdCoreNameGet() is "AmigaCD <build date>" -- user_io.cpp appends the
+		// CONF_STR "V" entry, which the core fills from build_id.v, so it
+		// identifies the BITSTREAM rather than the filename it was copied
+		// under. Until now it appeared only on the About page, three steps
+		// away through the common menus, and "am I testing the core I just
+		// deployed?" comes up every cycle of a hardware session.
+		//
+		// Both the Archie main page and the full Minimig main page already do
+		// exactly this; this page passed helptext_idx = 0 and dropped it. The
+		// helptext costs no rows, which is the other reason it is the right
+		// place: this page is full.
+		sprintf(helptext_custom, HELPTEXT_SPACER);
+		strcat(helptext_custom, OsdCoreNameGet());
+		// The eject binding lives here alone now. It had a hint row on the
+		// page, contextual to the selected drive, and the Write .mgl row took
+		// that line. This is the weaker home for it -- a scrolling line is read
+		// by whoever waits -- and it is the cost that buys a launcher anyone
+		// can find.
+		strcat(helptext_custom, "    Backspace (or A+B on a pad) ejects the selected drive."
+		                        "    Ctrl+Alt+F1 saves a state, Ctrl+Alt+F2 restores it,"
+		                        " Ctrl+Alt+F3 steps the slot.");
+		helptext_idx = HELPTEXT_CUSTOM;
 		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
-		// Load, Reset, Exit -- thirteen rows.
-		menumask = 0x1FFF;
+		// Load, Write .mgl, Reset, Exit -- fourteen rows.
+		menumask = 0x3FFF;
 
 		// The A1200 profile has no CD drive at all, so its two rows are dead.
 		// Greyed out rather than removed: the row positions are shared with
@@ -7397,10 +7517,20 @@ void HandleUI(void)
 		// sentinel in hardfile[0].filename, which is what ide_open matches on.
 		// Re-selecting while mounted re-reads the TOC, i.e. disc swap.
 		{
+			// Probed once and used twice, for the text and for the greying:
+			// the probe is eight stat() calls and this row redraws constantly.
+			const int have_drive = amigacd_has_cd && amigacd_optical_drive_present();
+
 			strcpy(s, " Real CD  : ");
 			if (!amigacd_has_cd) strcat(s, "-");
-			else strcat(s, ide_inst[0].drive[0].phys ? "re-read TOC" : "mount drive");
-			OsdWrite(m++, s, menusub == 1, !amigacd_has_cd);
+			else if (ide_inst[0].drive[0].phys) strcat(s, "re-read TOC");
+			// "mount drive" on a machine with no drive attached invites a press
+			// that cannot work. Say so instead, and grey it -- there is nothing
+			// to mount until a drive appears. SELECT still answers, because
+			// greying here is presentation and not a lock.
+			else if (!have_drive) strcat(s, "* no drive found *");
+			else strcat(s, "mount drive");
+			OsdWrite(m++, s, menusub == 1, !have_drive && !ide_inst[0].drive[0].phys);
 		}
 
 		// df0 and df1. The core has always presented two drives -- floppy.drives
@@ -7496,26 +7626,25 @@ void HandleUI(void)
 		// ApplyConfiguration, which halts the CPU, resets it and re-uploads the
 		// Kickstart.
 		OsdWrite(m++, " Load settings   (resets)", menusub == 10, 0);
-
-		// Eject is BACKSPACE, which on a controller is A and B pressed together
-		// -- input.cpp synthesises JOY_BTN3 from that pair and maps it to
-		// BACKSPACE. Neither is written down anywhere the user would look, and
-		// with no hint the only discoverable way to change a mounted disc or
-		// disk was to mount a different one. Shown only while the cursor is on
-		// a row that can actually be ejected, so it reads as a property of the
-		// row rather than as decoration.
-		if (menusub <= 5 && !(menusub <= 1 && !amigacd_has_cd))
+		// Writes a .mgl beside the mounted disc so the MiSTer menu can launch
+		// straight into this core with it. A row rather than the + / - binding
+		// it started as: a keypress announced only in the scrolling helptext is
+		// not a feature anyone finds, and a launcher nobody finds is not a
+		// launcher. The line it occupies is the one the Eject hint had -- the
+		// binding that hint carried is now in the helptext instead, which is
+		// the weaker home, and this is the trade that was chosen deliberately.
+		//
+		// Greyed with no disc IMAGE, which includes the physical drive being
+		// selected: a disc in a real tray has no path to put in a file.
 		{
-			int occupied = (menusub == 0) ? (minimig_config.hardfile[0].filename[0] != 0)
-			             : (menusub == 1) ? 0
-			             : (menusub <= 3) ? ((df[menusub - 2].status & DSK_INSERTED) != 0)
-			                              : (minimig_config.hardfile[menusub - 3].filename[0] != 0);
-			if (occupied && m < OsdGetSize() - 2) OsdWrite(m++, " Eject: Backspace / A+B", 0, 1);
+			const char *cdfile = minimig_config.hardfile[0].filename;
+			const int can_mgl = cdfile[0] && strcmp(cdfile, PHYSICAL_DISC_SENTINEL);
+			OsdWrite(m++, " Write .mgl for this disc", menusub == 11, !can_mgl);
 		}
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 11, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 12, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 12, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 13, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 
@@ -7696,7 +7825,14 @@ void HandleUI(void)
 						// would make selecting the drive with an empty tray
 						// impossible, and that is exactly the state you want to
 						// be able to sit in before putting a disc in.
-						Info("No readable disc", 2000);
+						// Two different failures reached this line. A drive
+						// with an empty tray is a disc problem; no drive at all
+						// is not, and telling someone to check the disc when
+						// there is nowhere to put one wastes their time.
+						if (!amigacd_optical_drive_present())
+							Info("No CD-ROM drive found", 2500);
+						else
+							Info("No readable disc", 2000);
 						menustate = MENU_AMIGACD_MAIN1;
 					}
 				}
@@ -7858,12 +7994,35 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_LOADCONFIG1;
 				menusub = 0;
 			}
-			else if (menusub == 11 && select) // Reset
+			else if (menusub == 11 && select) // Write .mgl for this disc
+			{
+				char mgl[1024];
+				if (amigacd_write_mgl(mgl, sizeof(mgl)))
+				{
+					// Name the file rather than saying "done": it is written
+					// beside the disc, not somewhere this row could imply, and
+					// the name is how it will be found again.
+					const char *base = strrchr(mgl, '/');
+					char msg[64];
+					snprintf(msg, sizeof(msg), "Wrote %s", base ? base + 1 : mgl);
+					Info(msg, 2500);
+				}
+				else
+				{
+					// The row is greyed without a disc image, but a greyed row
+					// still takes SELECT, and a write can fail on a full or
+					// read-only card with a disc present. One message covers
+					// the refusal; the log carries the rest.
+					Info("Could not write a .mgl", 2500);
+				}
+				menustate = MENU_AMIGACD_MAIN1;
+			}
+			else if (menusub == 12 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 12 && select) // Exit
+			else if (menusub == 13 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}

@@ -17,6 +17,7 @@
 #include "minimig_fdd.h"
 #include "minimig_profile.h"
 #include "minimig_config.h"
+#include "rom_crypt.h"
 #include "minimig_share.h"
 #include "akiko_cd32.h"
 #include "cdtv_cd.h"
@@ -153,6 +154,53 @@ static void derive_cd_slots_from_legacy(void)
 mm_configTYPE minimig_config = { };
 static unsigned char romkey[3072];
 
+// Why the configured Kickstart would not load, for the boot screen. Only the
+// FIRST attempt writes it: ApplyConfiguration retries with KICK.ROM and then a
+// bare KICK.ROM, and "no such file" for a fallback the user never asked for is
+// not the answer they need. Cleared before the first attempt.
+static char rom_fail_reason[160] = {};
+
+static void rom_fail(const char *why)
+{
+	BootPrint(why);
+	if (!rom_fail_reason[0]) snprintf(rom_fail_reason, sizeof(rom_fail_reason), "%s", why);
+}
+
+// Load ROM.KEY if there is one. Returns its length, 0 when there is no key or
+// it cannot be used.
+//
+// Extracted from UploadKickstart, where it was a local, because the ext-ROM
+// composite path runs FIRST and had no way to reach a key at all -- see
+// LoadRomSlot.
+//
+// Returns 0 rather than the file's size when the key does not fit romkey[].
+// It used to set keysize from the size regardless and leave romkey untouched,
+// so an oversized key said "too large" and then decrypted with three kilobytes
+// of zeroes, which is a working ROM turned into noise by a message the user
+// was told to ignore.
+static int LoadRomKey(void)
+{
+	fileTYPE file = {};
+	int keysize = 0;
+
+	BootPrint("Checking for Amiga Forever key file:");
+	if (FileOpen(&file, user_io_make_filepath(HomeDir(), "ROM.KEY")) || FileOpen(&file, "ROM.KEY"))
+	{
+		if (file.size > 0 && (uint64_t)file.size < sizeof(romkey))
+		{
+			keysize = (int)file.size;
+			FileReadAdv(&file, romkey, keysize);
+			BootPrint("Loaded Amiga Forever key file");
+		}
+		else
+		{
+			BootPrint("ROM.KEY is empty or too large - ignoring it");
+		}
+		FileClose(&file);
+	}
+	return keysize;
+}
+
 static void SendFileV2(fileTYPE* file, unsigned char* key, int keysize, int address, int size)
 {
 	static uint8_t buf[512];
@@ -242,24 +290,52 @@ static void SendBufferV2(const uint8_t *buf, int address, int size_bytes)
 
 // Load a ROM image into a 512K slot. Supports 256K (mirrored to 512K)
 // and 512K (direct). Returns true on success.
-static bool LoadRomSlot(const char *path, uint8_t *dst512k)
+static bool LoadRomSlot(const char *path, uint8_t *dst512k, int keysize)
 {
 	fileTYPE file = {};
 	if (!FileOpen(&file, path)) {
 		printf("Ext-ROM open failed: %s\n", path);
 		return false;
 	}
-	int sz = file.size;
-	if (sz == 0x80000) {
-		FileReadAdv(&file, dst512k, 0x80000);
-	} else if (sz == 0x40000) {
-		FileReadAdv(&file, dst512k, 0x40000);
-		memcpy(dst512k + 0x40000, dst512k, 0x40000);
-	} else {
+	int sz = (int)file.size;
+
+	// Amiga Forever ROMs, which this path used to refuse outright.
+	//
+	// That refusal was invisible AND consequential. Invisible because it went
+	// to printf, which is the log, not BootPrintEx, which is the boot screen.
+	// Consequential because of what happens next: ApplyConfiguration falls
+	// back to UploadKickstart, which has always handled the main ROM's
+	// encrypted form and knows nothing about the extended one. So a CD32 with
+	// encrypted ROMs came up with its main Kickstart and NO extended ROM,
+	// which does not boot a disc, and nothing on screen said why.
+	const int plain = rom_enc_plain_size(sz);
+	if (plain && !keysize)
+	{
+		rom_fail("Encrypted ROM but no ROM.KEY found");
+		FileClose(&file);
+		return false;
+	}
+
+	const int want = plain ? plain : sz;
+	if (want != 0x80000 && want != 0x40000)
+	{
 		printf("Unsupported ROM size %d for slot upload\n", sz);
 		FileClose(&file);
 		return false;
 	}
+
+	if (plain)
+	{
+		uint8_t hdr[ROM_ENC_HEADER_BYTES];
+		FileReadAdv(&file, hdr, ROM_ENC_HEADER_BYTES);
+	}
+	FileReadAdv(&file, dst512k, want);
+	if (plain) rom_decrypt(dst512k, want, romkey, keysize);
+
+	// The 256 KB mirror happens after decryption, or it would duplicate
+	// ciphertext into the upper half and decrypt only the lower one.
+	if (want == 0x40000) memcpy(dst512k + 0x40000, dst512k, 0x40000);
+
 	FileClose(&file);
 	return true;
 }
@@ -276,8 +352,12 @@ static char UploadKickstartWithExtRom(const char *kick_path, const char *extrom_
 	static uint8_t img[0x100000];
 	memset(img, 0, sizeof(img));
 
-	if (!LoadRomSlot(extrom_path, img)) return 0;
-	if (!LoadRomSlot(kick_path,   img + 0x80000)) return 0;
+	// The key has to be loaded here as well: this path runs before
+	// UploadKickstart, which is where it used to be found.
+	const int keysize = LoadRomKey();
+
+	if (!LoadRomSlot(extrom_path, img, keysize)) return 0;
+	if (!LoadRomSlot(kick_path,   img + 0x80000, keysize)) return 0;
 
 	// Discard residents (matches UploadKickstart pre-amble).
 	EnableIO();
@@ -294,22 +374,8 @@ static char UploadKickstartWithExtRom(const char *kick_path, const char *extrom_
 static char UploadKickstart(char *name)
 {
 	fileTYPE file = {};
-	int keysize = 0;
+	int keysize = LoadRomKey();
 
-	BootPrint("Checking for Amiga Forever key file:");
-	if (FileOpen(&file, user_io_make_filepath(HomeDir(), "ROM.KEY")) || FileOpen(&file, "ROM.KEY")) {
-		keysize = file.size;
-		if (file.size<sizeof(romkey))
-		{
-			FileReadAdv(&file, romkey, keysize);
-			BootPrint("Loaded Amiga Forever key file");
-		}
-		else
-		{
-			BootPrint("Amiga Forever keyfile is too large!");
-		}
-		FileClose(&file);
-	}
 	BootPrint("Loading file: ");
 	BootPrint(name);
 
@@ -382,6 +448,29 @@ static char UploadKickstart(char *name)
 			FileClose(&file);
 			return(1);
 		}
+		else if ((file.size == 0x10000b) && keysize) {
+			// 1 MB Amiga Forever. Until now this size fell straight through to
+			// "Unsupported ROM file size!", which docs/vamigats.md records as
+			// a gap worth knowing about before it wastes an evening.
+			//
+			// It cannot be done the way the other encrypted sizes are, with two
+			// SendFileV2 calls: that function reads the 11-byte header at the
+			// start of EVERY call and restarts the key at index 0, and this
+			// image is one continuous stream whose second half carries neither.
+			// So it is buffered, decrypted once end to end, and pushed in two
+			// halves -- the same split the plain 1 MB path makes, ext ROM low
+			// and Kickstart high.
+			BootPrint("Uploading 1MB Kickstart (Amiga Forever encrypted)...");
+			static uint8_t img[0x100000];
+			uint8_t hdr[ROM_ENC_HEADER_BYTES];
+			FileReadAdv(&file, hdr, ROM_ENC_HEADER_BYTES);
+			FileReadAdv(&file, img, sizeof(img));
+			rom_decrypt(img, sizeof(img), romkey, keysize);
+			SendBufferV2(img,           0xe00000, 0x80000);
+			SendBufferV2(img + 0x80000, 0xf80000, 0x80000);
+			FileClose(&file);
+			return(1);
+		}
 		else if ((file.size == 0x4000b) && keysize) {
 			// 256KB Kickstart ROM
 			BootPrint("Uploading 256 KB Kickstart (Probably Amiga Forever encrypted...");
@@ -393,12 +482,31 @@ static char UploadKickstart(char *name)
 			return(1);
 		}
 		else {
-			BootPrint("Unsupported ROM file size!");
+			// Three different failures used to arrive as one line about size,
+			// and the likeliest of them is not a size problem at all: an
+			// Amiga Forever ROM with no ROM.KEY beside it has exactly the
+			// right size and fails the `&& keysize` guard on every branch
+			// above. Telling that user their ROM is the wrong size sends them
+			// looking for a different ROM.
+			const int plain = rom_enc_plain_size((int)file.size);
+			if (plain && !keysize)
+			{
+				rom_fail("Encrypted ROM but no ROM.KEY found");
+			}
+			else
+			{
+				char msg[96];
+				snprintf(msg, sizeof(msg), "Unsupported ROM size: %lld bytes",
+				         (long long)file.size);
+				rom_fail(msg);
+			}
 		}
 		FileClose(&file);
 	}
 	else {
-		printf("No \"%s\" file!\n", name);
+		char msg[96];
+		snprintf(msg, sizeof(msg), "ROM file not found: %s", name);
+		rom_fail(msg);
 	}
 	return(0);
 }
@@ -745,6 +853,10 @@ static void ApplyConfiguration(char reloadkickstart)
 		{
 			uploaded = UploadKickstartWithExtRom(minimig_config.kickstart, extrom);
 		}
+		// Cleared here so the reason recorded below belongs to THIS boot and to
+		// the first attempt -- the ROM the user actually configured.
+		rom_fail_reason[0] = 0;
+
 		if (!uploaded && !UploadKickstart(minimig_config.kickstart))
 		{
 			snprintf(minimig_config.kickstart, sizeof(minimig_config.kickstart) - 1, "%s/%s", HomeDir(), "KICK.ROM");
@@ -754,6 +866,13 @@ static void ApplyConfiguration(char reloadkickstart)
 				if (!UploadKickstart(minimig_config.kickstart))
 				{
 					BootPrintEx("No Kickstart loaded. Press F12 for settings.");
+					// The cause, on the screen the user is looking at. Every
+					// message about why a ROM would not load went to BootPrint,
+					// which is printf -- the log, not the boot screen. So the
+					// machine halted with no reason given anywhere the user
+					// would see it, and the one they most often need is
+					// "your ROM is encrypted and ROM.KEY is not next to it".
+					if (rom_fail_reason[0]) BootPrintEx(rom_fail_reason);
 					BootPrintEx("** Halted! **");
 					return;
 				}
