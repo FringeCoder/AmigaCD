@@ -69,6 +69,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "support/physical_disc/physical_disc_autoboot.h"
 #include "support/minimig/minimig_ssdiag.h"
 #include "support/minimig/akiko_cd32.h"        // akiko_cd32_disc_info for the CD row
+#include "support/minimig/mgl_rbf.h"             // rewriting an .mgl's <rbf> in place
 #include "profiling.h"
 #include "str_util.h"
 #include "autofire.h"
@@ -885,7 +886,9 @@ static int recent_open(int idx)
 // correct by construction, and correct again after the next deploy if it is
 // written again.
 //
-// Returns 1 and leaves the file's root-relative path in out[].
+// Returns one of MGL_WROTE / MGL_UPDATED / MGL_CURRENT, or 0 on a refusal, and
+// leaves the file's root-relative path in out[].
+enum { MGL_FAILED = 0, MGL_WROTE, MGL_UPDATED, MGL_CURRENT };
 static int amigacd_write_mgl(char *out, size_t outsz)
 {
 	const char *disc = minimig_config.hardfile[0].filename;
@@ -925,24 +928,66 @@ static int amigacd_write_mgl(char *out, size_t outsz)
 	if (ext) *ext = 0;
 	strncat(out, ".mgl", outsz - strlen(out) - 1);
 
+	char rbfval[1024];
+	snprintf(rbfval, sizeof(rbfval), "%s%s%s", rbfdir, rbfdir[0] ? "/" : "", stem);
+
 	// getFullPath returns a pointer into a shared static, so it is copied
 	// before anything else can call it.
 	char full[1024];
 	snprintf(full, sizeof(full), "%s", getFullPath(out));
 
+	// An existing file is EDITED, not replaced.
+	//
+	// Replacing it is what this used to do, and it threw away whatever the user
+	// had added -- a <reset/>, a second <file> for a save volume, a comment --
+	// silently, on a keypress whose whole purpose is to fix a path after a
+	// deploy. Which is exactly when someone would press it on a file they had
+	// tuned by hand.
+	FILE *ex = fopen(full, "r");
+	if (ex)
+	{
+		static char xml[8192];
+		size_t n = fread(xml, 1, sizeof(xml) - 1, ex);
+		const int truncated = !feof(ex);
+		fclose(ex);
+		xml[n] = 0;
+
+		// A file too big for the buffer is left alone rather than written back
+		// short. 8 KB is orders of magnitude more than any .mgl needs, so this
+		// is a guard against something that is not one.
+		if (truncated) return MGL_FAILED;
+
+		const int changed = mgl_rewrite_rbf(xml, sizeof(xml), rbfval);
+		if (!changed)
+		{
+			// Either it already names this core, or there is no <rbf> element
+			// to edit. The first is the common case and is not a failure; the
+			// second means the file is not one of ours, and editing a file we
+			// do not understand is worse than declining.
+			return strstr(xml, "<rbf>") ? MGL_CURRENT : MGL_FAILED;
+		}
+
+		FILE *w = fopen(full, "w");
+		if (!w) return MGL_FAILED;
+		const size_t len = strlen(xml);
+		int ok = (fwrite(xml, 1, len, w) == len) && !ferror(w);
+		if (fclose(w)) ok = 0;
+		return ok ? MGL_UPDATED : MGL_FAILED;
+	}
+
 	FILE *f = fopen(full, "w");
-	if (!f) return 0;
+	if (!f) return MGL_FAILED;
 
 	// delay="2" is the floor docs/mgl.md gives: the core has to be up before
 	// the mount lands. index 4 is the CD.
 	fprintf(f, "<mistergamedescription>\n");
-	fprintf(f, "\t<rbf>%s%s%s</rbf>\n", rbfdir, rbfdir[0] ? "/" : "", stem);
+	fprintf(f, "\t<rbf>%s</rbf>\n", rbfval);
 	fprintf(f, "\t<file delay=\"2\" type=\"f\" index=\"4\" path=\"%s\"/>\n", discpath);
 	fprintf(f, "</mistergamedescription>\n");
 
 	int ok = !ferror(f);
 	if (fclose(f)) ok = 0;
-	return ok;
+	return ok ? MGL_WROTE : MGL_FAILED;
 }
 
 // Is an optical drive attached at all?
@@ -8028,14 +8073,20 @@ void HandleUI(void)
 			else if (menusub == 11 && select) // Write .mgl for this disc
 			{
 				char mgl[1024];
-				if (amigacd_write_mgl(mgl, sizeof(mgl)))
+				const int res = amigacd_write_mgl(mgl, sizeof(mgl));
+				if (res)
 				{
 					// Name the file rather than saying "done": it is written
 					// beside the disc, not somewhere this row could imply, and
-					// the name is how it will be found again.
+					// the name is how it will be found again. And say WHICH of
+					// the three happened -- "updated" and "wrote" are different
+					// promises about a file the user may have edited.
 					const char *base = strrchr(mgl, '/');
 					char msg[64];
-					snprintf(msg, sizeof(msg), "Wrote %s", base ? base + 1 : mgl);
+					snprintf(msg, sizeof(msg), "%s %s",
+					         (res == MGL_WROTE)   ? "Wrote" :
+					         (res == MGL_UPDATED) ? "Updated" : "Already current:",
+					         base ? base + 1 : mgl);
 					Info(msg, 2500);
 				}
 				else
@@ -8538,8 +8589,9 @@ void HandleUI(void)
 		OsdSetTitle("Advanced", 0);
 		helptext_idx = 0;
 		int snac = (minimig_config.userport == mmup_snacpsx);
-		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet, Back
-		menumask = snac ? 0x3F : 0xF;
+		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet,
+		// Fast-IDE, Back
+		menumask = snac ? 0x7F : 0x1F;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 
@@ -8614,8 +8666,34 @@ void HandleUI(void)
 		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
 		OsdWrite(m++, " is always present either way.", 0, 0);
 
+		// Fast-IDE, which lives on MENU_MINIMIG_DISK1 -- a page this variant
+		// cannot open, and one that would drag in four IDE slot rows the CD and
+		// Hard Disk rows already cover. So it gets a row here rather than a
+		// route there.
+		//
+		// The bit is INVERTED: ide_cfg & 0x20 clear means on. Read straight off
+		// the Drives page rather than reasoned about, because a setting whose
+		// sense is backwards is exactly the one to get wrong from memory.
+		//
+		// Greyed on the same three conditions that page uses: no IDE, a CDTV
+		// (whose bridge is not IDE at all), or a CPU that is not an 020 -- the
+		// transfer path this speeds up only exists on the 020.
+		OsdWrite(m++, "", 0, 0);
+		{
+			const int cdtv_on = (minimig_config.chipset & CONFIG_CDTV) != 0;
+			const int ide_on  = (minimig_config.ide_cfg & 1) != 0;
+			const int ok      = ide_on && !cdtv_on && (minimig_config.cpu & 2);
+
+			strcpy(s, " Fast-IDE : ");
+			if (cdtv_on)      strcat(s, "N/A (CDTV)");
+			else if (!ide_on) strcat(s, "N/A (no IDE)");
+			else if (!(minimig_config.cpu & 2)) strcat(s, "N/A (68000)");
+			else strcat(s, (minimig_config.ide_cfg & 0x20) ? "Off" : "On");
+			OsdWrite(m++, s, menusub == (uint32_t)(snac ? 5 : 3), !ok);
+		}
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 5 : 3), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 6 : 4), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -8637,7 +8715,8 @@ void HandleUI(void)
 			// Ethernet and Back slide down the menusub list when it is.
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
 			uint32_t eth_row  = snac ? 4 : 2;
-			uint32_t back_row = snac ? 5 : 3;
+			uint32_t ide_row  = snac ? 5 : 3;
+			uint32_t back_row = snac ? 6 : 4;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -8678,6 +8757,19 @@ void HandleUI(void)
 				}
 				a2065_set_iface(m2);
 				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == ide_row && select) // Fast-IDE
+			{
+				// The same three conditions the row greys on, re-checked:
+				// greying is presentation, and toggling a bit that has no
+				// effect on this machine would still persist into the config.
+				const int cdtv_on = (minimig_config.chipset & CONFIG_CDTV) != 0;
+				const int ide_on  = (minimig_config.ide_cfg & 1) != 0;
+				if (ide_on && !cdtv_on && (minimig_config.cpu & 2))
+				{
+					minimig_config.ide_cfg ^= 0x20;
+					menustate = MENU_AMIGACD_ADVANCED1;
+				}
 			}
 			else if (menusub == back_row && select) // Back
 			{

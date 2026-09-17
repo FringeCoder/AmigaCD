@@ -16,9 +16,11 @@ SRC = ../support/minimig/minimig_savestate.cpp \
       ../support/minimig/minimig_a2065_crc32.cpp \
       ../support/minimig/minimig_profile.cpp \
       ../support/minimig/akiko_pace.cpp \
-      ../support/minimig/rom_crypt.cpp
+      ../support/minimig/rom_crypt.cpp \
+      ../support/minimig/mgl_rbf.cpp
 
-TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_crypt
+TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_crypt \
+        test_mgl_rbf
 
 # Shell tests, run before the compiled ones because they need no compiler and
 # because of what they cover: prune_list() in scripts/deploy-core.sh is the only
@@ -26,7 +28,7 @@ TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_cryp
 # without asking. It lives here rather than in a CI step of its own so that
 # `make -C tests` covers it too -- a delete rule that is only checked on a push
 # is checked after the push that broke it.
-SHELL_TESTS = test_deploy_core_prune.sh
+SHELL_TESTS = test_deploy_core_prune.sh test_deploy_menu_check.sh
 
 .PHONY: all clean shell-tests
 all: shell-tests $(addprefix $(BUILDDIR)/,$(TESTS))
