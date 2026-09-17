@@ -512,6 +512,54 @@ static void amigacd_ss_preview(int on, int slot)
 	shown_slot = slot;
 }
 
+// What is actually in a save state slot, for the Save slot row.
+//
+// The row used to read "Save slot: 2" and nothing else. The thumbnail preview
+// beside it only appears when a .png exists, so an empty slot, a slot saved
+// before thumbnails existed and a slot belonging to media that is not mounted
+// all looked identical -- four numbers with nothing behind them, which is not
+// a choice anyone can make. The file is already named by
+// FileGenerateSavestatePath(); one stat says whether it is there and when it
+// was written.
+//
+// The longest thing it writes is a timestamp, "16 Sep 21:35", at 12
+// characters. " Save slot: N  " is 15, so the row tops out at 27 of the 32
+// columns a line has.
+static void amigacd_ss_slot_label(int slot, char *out, size_t outsz)
+{
+	if (!out || outsz < 2) return;
+	out[0] = 0;
+
+	// No disc and no HDF means there is nothing to name a save after, so the
+	// slots do not refer to anything yet. Saying so here is the same refusal
+	// minimig_ss_request_save() gives on the press, one step earlier.
+	const char *media = amigacd_ss_name();
+	if (!media || !media[0])
+	{
+		snprintf(out, outsz, "(no media)");
+		return;
+	}
+
+	// Side effect worth knowing about: this also mkdir()s the savestates
+	// directory. It is silent, it is the same call the thumbnail preview
+	// already makes, and mkdir on an existing directory is a cheap EEXIST.
+	char path[1024];
+	FileGenerateSavestatePath(media, path, (slot & 3) + 1);
+
+	struct stat64 *st = getPathStat(path);
+	if (!st || !st->st_size)
+	{
+		snprintf(out, outsz, "(empty)");
+		return;
+	}
+
+	// Day, month and time rather than a full date: the year is noise for a
+	// file you wrote this week, and the line has no room for it.
+	time_t t = (time_t)st->st_mtime;
+	struct tm tm = *localtime(&t);
+	strftime(out, outsz, "%d %b %H:%M", &tm);
+}
+
 static const char *amigacd_ss_name()
 {
 	static char name[256];
@@ -807,6 +855,51 @@ static int recent_open(int idx)
 {
 	fs_RecentIdx = idx;
 	return recent_init(idx);
+}
+
+// Leaving the shared Audio & Video page.
+//
+// It has always returned to MENU_MINIMIG_MAIN1 row 9, which is the row the
+// full OSD links to it from. The console variant reaches it from its own
+// Settings page instead, and MENU_MINIMIG_MAIN1 redirects to
+// MENU_AMIGACD_MAIN1 whose row 9 is Save settings -- so the page would have
+// dropped the user on a different page, on an unrelated row, one keypress away
+// from overwriting their config. Each variant names its own way back.
+//
+// A function because the page has two exits, SELECT on Back and the back/left
+// keys, and an exit that agrees with the other only by copy is one edit away
+// from not agreeing.
+// Leaving the shared Load config page. Same problem, same shape as
+// amigacd_video_back(): it has always returned to MENU_MINIMIG_MAIN1 row 12,
+// which on the console variant redirects to MENU_AMIGACD_MAIN1 where row 12 is
+// exit. Landing on exit after backing out of a config list is not what
+// backing out means.
+static void amigacd_loadcfg_back()
+{
+	if (is_amigacd())
+	{
+		menustate = MENU_AMIGACD_MAIN1;
+		menusub = 10;                      // the Load settings row
+	}
+	else
+	{
+		menustate = MENU_MINIMIG_MAIN1;
+		menusub = 12;                      // the full OSD's link to this page
+	}
+}
+
+static void amigacd_video_back()
+{
+	if (is_amigacd())
+	{
+		menustate = MENU_AMIGACD_SETTINGS1;
+		menusub = 9;                       // the Video & Audio row
+	}
+	else
+	{
+		menustate = MENU_MINIMIG_MAIN1;
+		menusub = 9;                       // the full OSD's link to this page
+	}
 }
 
 // Put the current MGL item's file into selPath, the way MENU_MINIMIG_* has
@@ -6723,14 +6816,12 @@ void HandleUI(void)
 			}
 			else
 			{
-				menustate = MENU_MINIMIG_MAIN1;
-				menusub = 12;
+				amigacd_loadcfg_back();
 			}
 		}
 		if (menu || left)
 		{
-			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 12;
+			amigacd_loadcfg_back();
 		}
 		break;
 
@@ -7230,8 +7321,8 @@ void HandleUI(void)
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 		helptext_idx = 0;
 		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
-		// Reset, Exit -- twelve rows.
-		menumask = 0xFFF;
+		// Load, Reset, Exit -- thirteen rows.
+		menumask = 0x1FFF;
 
 		// The A1200 profile has no CD drive at all, so its two rows are dead.
 		// Greyed out rather than removed: the row positions are shared with
@@ -7388,12 +7479,23 @@ void HandleUI(void)
 		strcat(s, amigacd_system_name(amigacd_system_shown()));
 		OsdWrite(m++, s, menusub == 6, 0);
 
-		OsdWrite(m++, "", 0, 0);
+		// The blank that used to sit here paid for the Load settings row below.
+		// Sixteen lines with Reset and exit pinned to the last two leaves one
+		// spare, and the Eject hint has it -- the hint being the only place the
+		// Backspace/A+B binding is written down, it does not lose a fight with
+		// a blank line.
 		OsdWrite(m++, " Settings                 \x16", menusub == 7, 0);
 		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
 		// page so the everyday options stay a short list.
 		OsdWrite(m++, " Advanced                 \x16", menusub == 8, 0);
 		OsdWrite(m++, " Save settings", menusub == 9, 0);
+		// The counterpart. Until now the page could write a config and never
+		// read one back, so there was no way to undo an experiment short of
+		// reloading the core -- and no way to keep a second set of settings at
+		// all. It says (resets) because it does: minimig_cfg_load runs
+		// ApplyConfiguration, which halts the CPU, resets it and re-uploads the
+		// Kickstart.
+		OsdWrite(m++, " Load settings   (resets)", menusub == 10, 0);
 
 		// Eject is BACKSPACE, which on a controller is A and B pressed together
 		// -- input.cpp synthesises JOY_BTN3 from that pair and maps it to
@@ -7412,8 +7514,8 @@ void HandleUI(void)
 		}
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 10, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 11, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 11, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 12, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 
@@ -7745,12 +7847,23 @@ void HandleUI(void)
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 10 && select) // Reset
+			else if (menusub == 10 && select) // Load settings
+			{
+				// Straight to the shared Load config page. It lists the
+				// startup config -- which is what Save settings above writes,
+				// minimig_cfg_save(0) -- and any others on the card. On a
+				// machine only ever used through this OSD the others will be
+				// absent, and the page simply shows the one: revert, which is
+				// the case this row exists for.
+				menustate = MENU_MINIMIG_LOADCONFIG1;
+				menusub = 0;
+			}
+			else if (menusub == 11 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 11 && select) // Exit
+			else if (menusub == 12 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
@@ -7788,8 +7901,8 @@ void HandleUI(void)
 		helptext_idx = HELPTEXT_SSHOTKEY;
 		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
 		// Save state(5), Restore state(6), CD speed(7), Clear NVRAM(8),
-		// Back(9) -- ten rows, so 0x3FF.
-		menumask = 0x3FF;
+		// Video & Audio(9), Back(10) -- eleven rows, so 0x7FF.
+		menumask = 0x7FF;
 		parentstate = menustate;
 
 		m = 0;
@@ -7844,8 +7957,12 @@ void HandleUI(void)
 		{
 			int ss_blocked = minimig_ss_blocked();
 
-			strcpy(s, " Save slot: ");
-			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
+			{
+				char slotinfo[24];
+				amigacd_ss_slot_label(minimig_config.ss_slot & 3, slotinfo, sizeof(slotinfo));
+				sprintf(s, " Save slot: %s  %s",
+				        config_ss_slot_msg[minimig_config.ss_slot & 3], slotinfo);
+			}
 			OsdWrite(m++, s, menusub == 4, ss_blocked);
 
 			amigacd_ss_preview(menusub == 4 && !ss_blocked, minimig_config.ss_slot & 3);
@@ -7904,8 +8021,25 @@ void HandleUI(void)
 			OsdWrite(m++, " Clear NVRAM", menusub == 8, !have_nvr);
 		}
 
+		// The Amiga's own video and audio: TV standard, stereo mix, the LED
+		// filter, Paula output, screen centring.
+		//
+		// That page has existed all along and this core could not reach it.
+		// MENU_MINIMIG_VIDEO1 is routed from one place -- MENU_MINIMIG_MAIN2's
+		// row 9 -- and the console variant jumps to MENU_AMIGACD_MAIN1 at the
+		// head of MENU_MINIMIG_MAIN1 and breaks first, so every one of those
+		// settings was stranded. TV Standard was reachable only by holding F1
+		// or F2 while the core came up (minimig_cfg_load), and the stereo mix
+		// -- the one an Amiga on headphones actually needs -- not at all.
+		//
+		// Same root cause as the .mgl gap, and as the CD32 pad mode, which was
+		// patched by deriving it from the system profile rather than by giving
+		// the OSD a way in (minimig_config.cpp, "never shows that row"). This
+		// is the way in.
+		OsdWrite(m++, " Video & Audio            \x16", menusub == 9, 0);
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 9, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 10, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -8067,7 +8201,12 @@ void HandleUI(void)
 					menustate = MENU_AMIGACD_NVRCLEAR1;
 				}
 			}
-			else if (menusub == 9 && select) // Back
+			else if (menusub == 9 && select) // Video & Audio
+			{
+				menustate = MENU_MINIMIG_VIDEO1;
+				menusub = 0;
+			}
+			else if (menusub == 10 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 7;   // Settings row -- 5 was Hard Disk 1, see above
@@ -8267,7 +8406,12 @@ void HandleUI(void)
 			else if (menusub == back_row && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
-				menusub = 6;   // Advanced row
+				// The Advanced row is 8. This said 6 -- the System row -- which
+				// is the same two-out error the back/left exit above had, from
+				// the same cause: both numbers were written before the two Hard
+				// Disk rows went in. That one was corrected; this one is the
+				// SELECT-on-Back path and was missed.
+				menusub = 8;
 			}
 		}
 		break;
@@ -8772,11 +8916,7 @@ void HandleUI(void)
 				break;
 
 			case 12:
-				if (select)
-				{
-					menustate = MENU_MINIMIG_MAIN1;
-					menusub = 9;
-				}
+				if (select) amigacd_video_back();
 				break;
 			}
 		}
@@ -8786,8 +8926,7 @@ void HandleUI(void)
 		}
 		else if (back || left)
 		{
-			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 9;
+			amigacd_video_back();
 		}
 		break;
 
