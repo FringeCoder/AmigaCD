@@ -11,6 +11,28 @@ console OSD and returned before reaching it, so an `.mgl` opened an invisible
 menu and mounted nothing. It now works, and understands the CD and the hard
 disks as well as the floppies.
 
+## Let the OSD write it
+
+With a disc image mounted, press **+ or -** on the **CD** row. That writes an
+`.mgl` beside the disc, named after it, and toasts the filename.
+
+It is worth preferring over writing one by hand for one reason: the OSD knows
+which core is *running*. `<rbf>` is filled from `get_rbf_dir()` and
+`get_rbf_name()`, so it names the exact build you are using — which is the part
+of a hand-written file that goes stale at the next deploy (see below). After a
+deploy, press + again and the file is correct once more.
+
+The disc path is written in whichever form reads back to the same file:
+relative to the core's home directory when the disc lives under it, absolute
+when it does not.
+
+Refused, with a toast, when there is no disc image mounted — including when the
+**physical drive** is selected, since a real disc in a tray has no path to put
+in a file.
+
+Move the result into `/media/fat/_Console/` to have it appear on the main
+menu's front page; nothing in the file depends on where it lives.
+
 ## The file
 
 Put it anywhere the menu browses — `/media/fat/_Console/`, or beside your

@@ -874,6 +874,75 @@ static int recent_open(int idx)
 // which on the console variant redirects to MENU_AMIGACD_MAIN1 where row 12 is
 // exit. Landing on exit after backing out of a config list is not what
 // backing out means.
+// Write a .mgl that launches this core with the disc that is mounted now.
+//
+// docs/mgl.md has always described writing one by hand, and warned about the
+// part that bites: <rbf> names a dated core, so every file naming it stops
+// working at the next deploy. The OSD does not have to guess -- get_rbf_dir()
+// and get_rbf_name() are the core that is RUNNING -- so a file written here is
+// correct by construction, and correct again after the next deploy if it is
+// written again.
+//
+// Returns 1 and leaves the file's root-relative path in out[].
+static int amigacd_write_mgl(char *out, size_t outsz)
+{
+	const char *disc = minimig_config.hardfile[0].filename;
+	if (!disc[0] || !strcmp(disc, PHYSICAL_DISC_SENTINEL)) return 0;
+
+	const char *rbf = get_rbf_name();
+	if (!rbf[0]) return 0;
+
+	// <rbf> is a path under the storage root with no extension.
+	char stem[512];
+	snprintf(stem, sizeof(stem), "%s", rbf);
+	char *dot = strrchr(stem, '.');
+	if (dot) *dot = 0;
+
+	char rbfdir[512];
+	snprintf(rbfdir, sizeof(rbfdir), "%s", get_rbf_dir());
+
+	// The disc path, written in the form mgl_selpath() resolves back to this
+	// same file: relative to the core's home directory when it lives under it,
+	// and absolute when it does not. Not the root-relative form it is stored
+	// in -- that one would be read back as HomeDir()/<it> and miss.
+	char home[512];
+	snprintf(home, sizeof(home), "%s", HomeDir());
+	const size_t hlen = strlen(home);
+
+	char discpath[1024];
+	if (hlen && !strncmp(disc, home, hlen) && disc[hlen] == '/')
+		snprintf(discpath, sizeof(discpath), "%s", disc + hlen + 1);
+	else
+		snprintf(discpath, sizeof(discpath), "%s", getFullPath(disc));
+
+	// Beside the disc and named after it, which is the one place someone will
+	// think to look for it. Moving it into _Console/ afterwards puts it on the
+	// main menu's front page; nothing here depends on where it ends up.
+	snprintf(out, outsz, "%s", disc);
+	char *ext = strrchr(out, '.');
+	if (ext) *ext = 0;
+	strncat(out, ".mgl", outsz - strlen(out) - 1);
+
+	// getFullPath returns a pointer into a shared static, so it is copied
+	// before anything else can call it.
+	char full[1024];
+	snprintf(full, sizeof(full), "%s", getFullPath(out));
+
+	FILE *f = fopen(full, "w");
+	if (!f) return 0;
+
+	// delay="2" is the floor docs/mgl.md gives: the core has to be up before
+	// the mount lands. index 4 is the CD.
+	fprintf(f, "<mistergamedescription>\n");
+	fprintf(f, "\t<rbf>%s%s%s</rbf>\n", rbfdir, rbfdir[0] ? "/" : "", stem);
+	fprintf(f, "\t<file delay=\"2\" type=\"f\" index=\"4\" path=\"%s\"/>\n", discpath);
+	fprintf(f, "</mistergamedescription>\n");
+
+	int ok = !ferror(f);
+	if (fclose(f)) ok = 0;
+	return ok;
+}
+
 // Is an optical drive attached at all?
 //
 // physical_disc_open() answers this properly, but by opening the device --
@@ -7363,6 +7432,8 @@ void HandleUI(void)
 		sprintf(helptext_custom, HELPTEXT_SPACER);
 		strcat(helptext_custom, OsdCoreNameGet());
 		strcat(helptext_custom, "    Backspace (or A+B on a pad) ejects the selected drive."
+		                        "    + or - on the CD row writes a .mgl beside the disc, so"
+		                        " the MiSTer menu can launch it straight into this core."
 		                        "    Ctrl+Alt+F1 saves a state, Ctrl+Alt+F2 restores it,"
 		                        " Ctrl+Alt+F3 steps the slot.");
 		helptext_idx = HELPTEXT_CUSTOM;
@@ -7662,7 +7733,31 @@ void HandleUI(void)
 		{
 			if (menusub == 0) // CD: always (re)select a disc image
 			{
-				if (select || recent)
+				if (minus || plus) // write a .mgl for the mounted disc
+				{
+					// Not a row of its own: this page is exactly full, and the
+					// line it would take is the Eject hint, which is the only
+					// place the Backspace / A+B binding is written down. The
+					// scrolling helptext announces this one instead.
+					char mgl[1024];
+					if (amigacd_write_mgl(mgl, sizeof(mgl)))
+					{
+						const char *base = strrchr(mgl, '/');
+						char msg[64];
+						snprintf(msg, sizeof(msg), "Wrote %s", base ? base + 1 : mgl);
+						Info(msg, 2500);
+					}
+					else
+					{
+						// Three ways to get here: no disc, a physical disc --
+						// which has no path to put in the file -- and a write
+						// that failed. The first two are the common ones and
+						// the row above already shows which.
+						Info("No disc image to make a .mgl from", 2500);
+					}
+					menustate = MENU_AMIGACD_MAIN1;
+				}
+				else if (select || recent)
 				{
 					fs_Options = SCANO_DIR | SCANO_UMOUNT;
 					fs_MenuSelect = MENU_AMIGACD_CDFILE_SELECTED;
