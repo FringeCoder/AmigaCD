@@ -7319,7 +7319,26 @@ void HandleUI(void)
 		// load other cores + Reboot-to-menu; Misc: volume/config/info) -- only
 		// the core menu itself is reskinned, the MiSTer menu stays reachable.
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
-		helptext_idx = 0;
+
+		// Which build is running, in the scrolling line at the bottom.
+		//
+		// OsdCoreNameGet() is "AmigaCD <build date>" -- user_io.cpp appends the
+		// CONF_STR "V" entry, which the core fills from build_id.v, so it
+		// identifies the BITSTREAM rather than the filename it was copied
+		// under. Until now it appeared only on the About page, three steps
+		// away through the common menus, and "am I testing the core I just
+		// deployed?" comes up every cycle of a hardware session.
+		//
+		// Both the Archie main page and the full Minimig main page already do
+		// exactly this; this page passed helptext_idx = 0 and dropped it. The
+		// helptext costs no rows, which is the other reason it is the right
+		// place: this page is full.
+		sprintf(helptext_custom, HELPTEXT_SPACER);
+		strcat(helptext_custom, OsdCoreNameGet());
+		strcat(helptext_custom, "    Backspace (or A+B on a pad) ejects the selected drive."
+		                        "    Ctrl+Alt+F1 saves a state, Ctrl+Alt+F2 restores it,"
+		                        " Ctrl+Alt+F3 steps the slot.");
+		helptext_idx = HELPTEXT_CUSTOM;
 		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
 		// Load, Reset, Exit -- thirteen rows.
 		menumask = 0x1FFF;
