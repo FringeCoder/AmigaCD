@@ -13,8 +13,9 @@ disks as well as the floppies.
 
 ## Let the OSD write it
 
-With a disc image mounted, press **+ or -** on the **CD** row. That writes an
-`.mgl` beside the disc, named after it, and toasts the filename.
+With a disc image mounted, select **Write .mgl for this disc** on the main
+page. That writes an `.mgl` beside the disc, named after it, and toasts the
+filename.
 
 It is worth preferring over writing one by hand for one reason: the OSD knows
 which core is *running*. `<rbf>` is filled from `get_rbf_dir()` and
@@ -26,7 +27,7 @@ The disc path is written in whichever form reads back to the same file:
 relative to the core's home directory when the disc lives under it, absolute
 when it does not.
 
-Refused, with a toast, when there is no disc image mounted — including when the
+The row greys out when there is no disc image mounted — including when the
 **physical drive** is selected, since a real disc in a tray has no path to put
 in a file.
 

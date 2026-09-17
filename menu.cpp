@@ -7431,15 +7431,18 @@ void HandleUI(void)
 		// place: this page is full.
 		sprintf(helptext_custom, HELPTEXT_SPACER);
 		strcat(helptext_custom, OsdCoreNameGet());
+		// The eject binding lives here alone now. It had a hint row on the
+		// page, contextual to the selected drive, and the Write .mgl row took
+		// that line. This is the weaker home for it -- a scrolling line is read
+		// by whoever waits -- and it is the cost that buys a launcher anyone
+		// can find.
 		strcat(helptext_custom, "    Backspace (or A+B on a pad) ejects the selected drive."
-		                        "    + or - on the CD row writes a .mgl beside the disc, so"
-		                        " the MiSTer menu can launch it straight into this core."
 		                        "    Ctrl+Alt+F1 saves a state, Ctrl+Alt+F2 restores it,"
 		                        " Ctrl+Alt+F3 steps the slot.");
 		helptext_idx = HELPTEXT_CUSTOM;
 		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
-		// Load, Reset, Exit -- thirteen rows.
-		menumask = 0x1FFF;
+		// Load, Write .mgl, Reset, Exit -- fourteen rows.
+		menumask = 0x3FFF;
 
 		// The A1200 profile has no CD drive at all, so its two rows are dead.
 		// Greyed out rather than removed: the row positions are shared with
@@ -7623,26 +7626,25 @@ void HandleUI(void)
 		// ApplyConfiguration, which halts the CPU, resets it and re-uploads the
 		// Kickstart.
 		OsdWrite(m++, " Load settings   (resets)", menusub == 10, 0);
-
-		// Eject is BACKSPACE, which on a controller is A and B pressed together
-		// -- input.cpp synthesises JOY_BTN3 from that pair and maps it to
-		// BACKSPACE. Neither is written down anywhere the user would look, and
-		// with no hint the only discoverable way to change a mounted disc or
-		// disk was to mount a different one. Shown only while the cursor is on
-		// a row that can actually be ejected, so it reads as a property of the
-		// row rather than as decoration.
-		if (menusub <= 5 && !(menusub <= 1 && !amigacd_has_cd))
+		// Writes a .mgl beside the mounted disc so the MiSTer menu can launch
+		// straight into this core with it. A row rather than the + / - binding
+		// it started as: a keypress announced only in the scrolling helptext is
+		// not a feature anyone finds, and a launcher nobody finds is not a
+		// launcher. The line it occupies is the one the Eject hint had -- the
+		// binding that hint carried is now in the helptext instead, which is
+		// the weaker home, and this is the trade that was chosen deliberately.
+		//
+		// Greyed with no disc IMAGE, which includes the physical drive being
+		// selected: a disc in a real tray has no path to put in a file.
 		{
-			int occupied = (menusub == 0) ? (minimig_config.hardfile[0].filename[0] != 0)
-			             : (menusub == 1) ? 0
-			             : (menusub <= 3) ? ((df[menusub - 2].status & DSK_INSERTED) != 0)
-			                              : (minimig_config.hardfile[menusub - 3].filename[0] != 0);
-			if (occupied && m < OsdGetSize() - 2) OsdWrite(m++, " Eject: Backspace / A+B", 0, 1);
+			const char *cdfile = minimig_config.hardfile[0].filename;
+			const int can_mgl = cdfile[0] && strcmp(cdfile, PHYSICAL_DISC_SENTINEL);
+			OsdWrite(m++, " Write .mgl for this disc", menusub == 11, !can_mgl);
 		}
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 11, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 12, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 12, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 13, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 
@@ -7733,31 +7735,7 @@ void HandleUI(void)
 		{
 			if (menusub == 0) // CD: always (re)select a disc image
 			{
-				if (minus || plus) // write a .mgl for the mounted disc
-				{
-					// Not a row of its own: this page is exactly full, and the
-					// line it would take is the Eject hint, which is the only
-					// place the Backspace / A+B binding is written down. The
-					// scrolling helptext announces this one instead.
-					char mgl[1024];
-					if (amigacd_write_mgl(mgl, sizeof(mgl)))
-					{
-						const char *base = strrchr(mgl, '/');
-						char msg[64];
-						snprintf(msg, sizeof(msg), "Wrote %s", base ? base + 1 : mgl);
-						Info(msg, 2500);
-					}
-					else
-					{
-						// Three ways to get here: no disc, a physical disc --
-						// which has no path to put in the file -- and a write
-						// that failed. The first two are the common ones and
-						// the row above already shows which.
-						Info("No disc image to make a .mgl from", 2500);
-					}
-					menustate = MENU_AMIGACD_MAIN1;
-				}
-				else if (select || recent)
+				if (select || recent)
 				{
 					fs_Options = SCANO_DIR | SCANO_UMOUNT;
 					fs_MenuSelect = MENU_AMIGACD_CDFILE_SELECTED;
@@ -8016,12 +7994,35 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_LOADCONFIG1;
 				menusub = 0;
 			}
-			else if (menusub == 11 && select) // Reset
+			else if (menusub == 11 && select) // Write .mgl for this disc
+			{
+				char mgl[1024];
+				if (amigacd_write_mgl(mgl, sizeof(mgl)))
+				{
+					// Name the file rather than saying "done": it is written
+					// beside the disc, not somewhere this row could imply, and
+					// the name is how it will be found again.
+					const char *base = strrchr(mgl, '/');
+					char msg[64];
+					snprintf(msg, sizeof(msg), "Wrote %s", base ? base + 1 : mgl);
+					Info(msg, 2500);
+				}
+				else
+				{
+					// The row is greyed without a disc image, but a greyed row
+					// still takes SELECT, and a write can fail on a full or
+					// read-only card with a disc present. One message covers
+					// the refusal; the log carries the rest.
+					Info("Could not write a .mgl", 2500);
+				}
+				menustate = MENU_AMIGACD_MAIN1;
+			}
+			else if (menusub == 12 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 12 && select) // Exit
+			else if (menusub == 13 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
