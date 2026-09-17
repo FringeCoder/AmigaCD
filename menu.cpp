@@ -869,6 +869,25 @@ static int recent_open(int idx)
 // A function because the page has two exits, SELECT on Back and the back/left
 // keys, and an exit that agrees with the other only by copy is one edit away
 // from not agreeing.
+// Leaving the shared Load config page. Same problem, same shape as
+// amigacd_video_back(): it has always returned to MENU_MINIMIG_MAIN1 row 12,
+// which on the console variant redirects to MENU_AMIGACD_MAIN1 where row 12 is
+// exit. Landing on exit after backing out of a config list is not what
+// backing out means.
+static void amigacd_loadcfg_back()
+{
+	if (is_amigacd())
+	{
+		menustate = MENU_AMIGACD_MAIN1;
+		menusub = 10;                      // the Load settings row
+	}
+	else
+	{
+		menustate = MENU_MINIMIG_MAIN1;
+		menusub = 12;                      // the full OSD's link to this page
+	}
+}
+
 static void amigacd_video_back()
 {
 	if (is_amigacd())
@@ -6797,14 +6816,12 @@ void HandleUI(void)
 			}
 			else
 			{
-				menustate = MENU_MINIMIG_MAIN1;
-				menusub = 12;
+				amigacd_loadcfg_back();
 			}
 		}
 		if (menu || left)
 		{
-			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 12;
+			amigacd_loadcfg_back();
 		}
 		break;
 
@@ -7304,8 +7321,8 @@ void HandleUI(void)
 		OsdSetTitle("AmigaCD", OSD_ARROW_LEFT | OSD_ARROW_RIGHT);
 		helptext_idx = 0;
 		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
-		// Reset, Exit -- twelve rows.
-		menumask = 0xFFF;
+		// Load, Reset, Exit -- thirteen rows.
+		menumask = 0x1FFF;
 
 		// The A1200 profile has no CD drive at all, so its two rows are dead.
 		// Greyed out rather than removed: the row positions are shared with
@@ -7462,12 +7479,23 @@ void HandleUI(void)
 		strcat(s, amigacd_system_name(amigacd_system_shown()));
 		OsdWrite(m++, s, menusub == 6, 0);
 
-		OsdWrite(m++, "", 0, 0);
+		// The blank that used to sit here paid for the Load settings row below.
+		// Sixteen lines with Reset and exit pinned to the last two leaves one
+		// spare, and the Eject hint has it -- the hint being the only place the
+		// Backspace/A+B binding is written down, it does not lose a fight with
+		// a blank line.
 		OsdWrite(m++, " Settings                 \x16", menusub == 7, 0);
 		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
 		// page so the everyday options stay a short list.
 		OsdWrite(m++, " Advanced                 \x16", menusub == 8, 0);
 		OsdWrite(m++, " Save settings", menusub == 9, 0);
+		// The counterpart. Until now the page could write a config and never
+		// read one back, so there was no way to undo an experiment short of
+		// reloading the core -- and no way to keep a second set of settings at
+		// all. It says (resets) because it does: minimig_cfg_load runs
+		// ApplyConfiguration, which halts the CPU, resets it and re-uploads the
+		// Kickstart.
+		OsdWrite(m++, " Load settings   (resets)", menusub == 10, 0);
 
 		// Eject is BACKSPACE, which on a controller is A and B pressed together
 		// -- input.cpp synthesises JOY_BTN3 from that pair and maps it to
@@ -7486,8 +7514,8 @@ void HandleUI(void)
 		}
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 10, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 11, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 11, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 12, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 
@@ -7819,12 +7847,23 @@ void HandleUI(void)
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 10 && select) // Reset
+			else if (menusub == 10 && select) // Load settings
+			{
+				// Straight to the shared Load config page. It lists the
+				// startup config -- which is what Save settings above writes,
+				// minimig_cfg_save(0) -- and any others on the card. On a
+				// machine only ever used through this OSD the others will be
+				// absent, and the page simply shows the one: revert, which is
+				// the case this row exists for.
+				menustate = MENU_MINIMIG_LOADCONFIG1;
+				menusub = 0;
+			}
+			else if (menusub == 11 && select) // Reset
 			{
 				menustate = MENU_NONE1;
 				minimig_reset();
 			}
-			else if (menusub == 11 && select) // Exit
+			else if (menusub == 12 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
@@ -8367,7 +8406,12 @@ void HandleUI(void)
 			else if (menusub == back_row && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
-				menusub = 6;   // Advanced row
+				// The Advanced row is 8. This said 6 -- the System row -- which
+				// is the same two-out error the back/left exit above had, from
+				// the same cause: both numbers were written before the two Hard
+				// Disk rows went in. That one was corrected; this one is the
+				// SELECT-on-Back path and was missed.
+				menusub = 8;
 			}
 		}
 		break;
