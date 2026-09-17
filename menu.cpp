@@ -9570,7 +9570,21 @@ void HandleUI(void)
 		strcat(s, (minimig_get_extcfg() & 0x40000) ? "PWM" : "Normal");
 		OsdWrite(m++, s, menusub == 10, 0);
 
-		OsdWrite(m++);
+		// The separator that was here is spent on this instead. The page is
+		// exactly full -- fifteen lines and Back -- so the line had to come from
+		// somewhere, and a blank is worth less than the one fact this row does
+		// not otherwise tell you: the stored position is PER VIDEO MODE.
+		//
+		// Without it, adjusting the picture on a CD32 boot screen and then
+		// finding a game off-centre reads as the adjustment not having saved.
+		// It did save -- for the mode the boot screen was in. See
+		// minimig_vadjust_info().
+		{
+			char vinfo[40];
+			minimig_vadjust_info(vinfo, sizeof(vinfo));
+			sprintf(s, "  %.29s", vinfo);
+			OsdWrite(m++, s, 0, 1);
+		}
 		OsdWrite(m++, minimig_get_adjust() ? " Finish screen adjustment" : " Adjust screen position", menusub == 11, 0);
 		for (; m < OsdGetSize() - 1; m++) OsdWrite(m);
 		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 12, 0);

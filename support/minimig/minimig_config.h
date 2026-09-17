@@ -180,6 +180,7 @@ const char* minimig_get_extrom();
 
 void minimig_set_adjust(char n);
 char minimig_get_adjust();
+int  minimig_vadjust_info(char *out, int outsz);
 void minimig_adjust_vsize(char force);
 
 void minimig_ConfigVideo(unsigned char scanlines);

@@ -1484,6 +1484,17 @@ typedef struct
 
 vmode_adjust_t vmodes_adj[64] = {};
 
+// What the last video mode was, and whether a stored screen position was found
+// for it. Recorded here rather than re-read by the caller: minimig_adjust_vsize()
+// below already asks the core for the mode, and it only asks when the mode
+// changes. A menu row that issued its own UIO_GET_VMODE would put an SPI
+// transaction in every OSD redraw for a value that changes maybe twice a
+// session.
+static uint16_t vadj_hsize = 0;
+static uint16_t vadj_vsize = 0;
+static char     vadj_known = 0;   // the core has reported a mode at all
+static char     vadj_found = 0;   // that mode has a stored position
+
 static const char* get_shared_vadjust_path()
 {
 	static char path[1024] = {};
@@ -1522,6 +1533,10 @@ void minimig_adjust_vsize(char force)
 
 		printf("\033[1;37mVMODE: resolution: %u x %u, mode: %u\033[0m\n", scr_hsize, scr_vsize, res & 255);
 
+		vadj_hsize = scr_hsize;
+		vadj_vsize = scr_vsize;
+		vadj_known = 1;
+
 		static int loaded = 0;
 		if (!loaded && FileExists(get_shared_vadjust_path(), 0))
 		{
@@ -1542,6 +1557,7 @@ void minimig_adjust_vsize(char force)
 			{
 				if (vmodes_adj[i].mode == mode)
 				{
+					vadj_found = 1;
 					spi_uio_cmd_cont(UIO_SET_VPOS);
 					spi_w(vmodes_adj[i].hpos >> 16);
 					spi_w(vmodes_adj[i].hpos);
@@ -1553,6 +1569,7 @@ void minimig_adjust_vsize(char force)
 				}
 			}
 			printf("\033[1;37mVMODE: preset not found.\033[0m\n");
+			vadj_found = 0;
 			spi_uio_cmd_cont(UIO_SET_VPOS); spi_w(0); spi_w(0); spi_w(0); spi_w(0);
 			DisableIO();
 		}
@@ -1606,6 +1623,12 @@ static void store_vsize()
 
 		if (applied)
 		{
+			// The preset exists from now on. Set here as well as in
+			// minimig_adjust_vsize(), which does not re-run on a store: without
+			// this the row that reports it would keep saying "not adjusted"
+			// until the next mode change, right after the user adjusted it.
+			vadj_found = 1;
+
 			static char name[256];
 			snprintf(name, sizeof(name), "%s_vadjust.dat", user_io_get_core_name());
 			FileSaveConfig(name, vmodes_adj, sizeof(vmodes_adj));
@@ -1626,6 +1649,31 @@ void minimig_set_adjust(char n)
 char minimig_get_adjust()
 {
 	return minimig_adjust;
+}
+
+// The current video mode and whether it has a stored screen position, for the
+// row that offers to adjust it.
+//
+// Worth saying on screen because the storage is PER MODE -- the key is
+// hsize | vsize<<12 | mode<<24 -- and nothing said so. Adjust the picture on a
+// CD32 boot screen and a game that runs at another resolution gets "preset not
+// found" and a zeroed position, which reads as the adjustment not having been
+// saved rather than as it having been saved for a different mode.
+//
+// Returns 1 when a position is stored for the mode now showing.
+int minimig_vadjust_info(char *out, int outsz)
+{
+	if (!out || outsz <= 0) return 0;
+
+	if (!vadj_known)
+	{
+		snprintf(out, outsz, "(no video mode reported yet)");
+		return 0;
+	}
+
+	snprintf(out, outsz, "%ux%u: %s", vadj_hsize, vadj_vsize,
+	         vadj_found ? "position saved" : "not adjusted yet");
+	return vadj_found;
 }
 
 void minimig_ConfigVideo(unsigned char scanlines)
