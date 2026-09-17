@@ -47,9 +47,49 @@ sections match `CONF_STR` (see below), and `bootcore` already understands
 `bootcore.cpp` exists for this convention.
 
 The one cost is that dated names accumulate. A new build does not replace the
-old one, and every `AmigaCD*.rbf` in the directory is its own menu entry, so
-delete the previous one when you copy a new one. `stage-output.sh` keeps the
-staging directory to a single core and says this on every run.
+old one, and every `AmigaCD*.rbf` in the directory is its own menu entry, so the
+previous ones have to go at some point. `stage-output.sh` keeps the **staging**
+directory to a single core; `deploy-core.sh`, below, does the same for the card.
+
+### Copying a core: `scripts/deploy-core.sh`
+
+```bash
+./scripts/deploy-core.sh                    # newest staged core, keep 2 on the card
+./scripts/deploy-core.sh --dry-run          # say what it would do, touch nothing
+./scripts/deploy-core.sh --keep 3
+./scripts/deploy-core.sh --include-undated  # also remove an undated AmigaCD.rbf
+./scripts/deploy-core.sh output/AmigaCD_20260901.rbf
+```
+
+It does the two things a plain `scp` gets wrong.
+
+**It copies under a name the menu cannot see.** An `.rbf` is a few megabytes
+over the network, and while it is in flight a partially written file sits in a
+directory the core browser scans; selecting it loads a truncated bitstream. So
+the copy lands as `.AmigaCD_<date>.rbf.part` and is renamed into place once
+complete — the same shape `wsl-build.sh deploy` already uses for the binary, and
+for the same reason. That name is invisible twice over: `ScanDirectory` skips
+dotfiles outright (`file_io.cpp:1754`) before it ever tests the extension, and
+the extension it would test is taken after the **last** dot, so the file is a
+`.part` and not an `.rbf` either way.
+
+**It prunes the cores the new one supersedes** — but not down to one. The
+previous core is the way back when a build misbehaves (see below), and the
+deploy most likely to need it is the one that just replaced it, so the default
+is `--keep 2`: the new core and the one before it. `--keep 1` works and says
+what it is costing you.
+
+It will only ever remove files named exactly `AmigaCD_<8 digits>.rbf`, the form
+this project's own staging produces. A hand-named core, a core from somewhere
+else, a `.bak`, a leftover `.part`: reported, never removed. An undated
+`AmigaCD.rbf` is the one exception you can ask for, with `--include-undated`,
+because it is the likeliest cause of a duplicate menu entry showing `--.--.--`.
+
+That rule is the only thing in this repository that deletes files, so it is
+tested rather than trusted: `tests/test_deploy_core_prune.sh` feeds the decision
+function synthetic listings and checks exactly which lines come back. It runs
+under `make -C tests`, and its header records the mutations it was falsified
+against.
 
 ### Which core file is actually running
 
@@ -74,7 +114,8 @@ The running process shows both the binary and the `.rbf` path it was given:
 `_Test/` accumulates `amigacd.rbf.<label>` backups from before the dated naming
 — keep the previous core around one way or the other, since it is the only way
 back if the new one misbehaves. With dated names that happens by itself, which
-is the other half of why they are worth the clutter.
+is the other half of why they are worth the clutter, and why `deploy-core.sh`
+defaults to keeping two rather than one.
 
 ### The binary cannot be overwritten while it is running
 

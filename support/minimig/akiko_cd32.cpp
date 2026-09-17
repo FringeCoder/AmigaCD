@@ -627,6 +627,112 @@ static drive_t *cd_find_drive(void)
 	return NULL;
 }
 
+// ---------------------------------------------------------------------------
+// Disc identity for the OSD. Declared in akiko_cd32.h.
+//
+// The label is CACHED, and that is not an optimisation. Reading it costs a seek
+// to LBA 16, the OSD redraws its rows on every refresh, and on a physical drive
+// a seek during CD audio is something you can hear. So it is read at most once
+// per mounted disc, on the first ask after the TOC exists, and the result --
+// including "there is no label" -- is kept until the disc changes.
+//
+// Everything else (the track counts) is already in memory and is recomputed on
+// every call, so a TOC that arrives late is not stuck behind a cache.
+static char cd_label[64] = {};
+static bool cd_label_known = false;
+
+static void cd_label_forget(void)
+{
+	cd_label[0] = 0;
+	cd_label_known = false;
+}
+
+// Where an ISO9660 volume descriptor's user data starts inside a RAW frame.
+//
+// We read raw because it is the one call that works for a CHD, a cue+bin and a
+// physical drive alike. A raw frame carries 16 bytes of header before MODE1
+// user data and 24 before MODE2 form 1. Rather than decide from the mode byte,
+// look for the descriptor itself at each offset: that tests the thing we
+// actually need, and a disc whose LBA 16 is not a volume descriptor at all
+// then reports no label instead of 32 bytes of whatever was lying there.
+static int pvd_user_offset(const uint8_t *raw)
+{
+	static const int cand[2] = { 16, 24 };
+	for (int i = 0; i < 2; i++) {
+		const uint8_t *u = raw + cand[i];
+		// Type 1 (primary), the standard identifier, version 1.
+		if (u[0] == 1 && !memcmp(u + 1, "CD001", 5) && u[6] == 1) return cand[i];
+	}
+	return -1;
+}
+
+// Copy an ISO9660 volume identifier out of a descriptor: 32 bytes at offset 40,
+// space padded. Non-printable bytes become spaces rather than being dropped, so
+// a mangled label still lines up with what other tools show for the same disc.
+static void cd_label_from_pvd(const uint8_t *pvd)
+{
+	char lbl[33];
+	memcpy(lbl, pvd + 40, 32);
+	lbl[32] = 0;
+
+	int end = 32;
+	while (end > 0 && (lbl[end - 1] == ' ' || lbl[end - 1] == 0)) end--;
+	lbl[end] = 0;
+
+	for (int i = 0; i < end; i++) {
+		if ((uint8_t)lbl[i] < 0x20 || (uint8_t)lbl[i] > 0x7E) lbl[i] = ' ';
+	}
+
+	snprintf(cd_label, sizeof(cd_label), "%s", lbl);
+}
+
+int akiko_cd32_disc_info(char *label, int labelsz, int *tracks, int *audio)
+{
+	if (label && labelsz > 0) label[0] = 0;
+	if (tracks) *tracks = 0;
+	if (audio)  *audio  = 0;
+
+	drive_t *drv = cd_find_drive();
+	if (!drv) return 0;
+
+	// track_cnt includes the lead-out entry ide_cdrom.cpp appends after the
+	// real tracks (cdrom_parse), which is not a track anything was written to.
+	int real = drv->track_cnt > 0 ? drv->track_cnt - 1 : 0;
+	const int max_tracks = (int)(sizeof(drv->track) / sizeof(drv->track[0]));
+	if (real > max_tracks) real = max_tracks;
+
+	if (tracks) *tracks = real;
+	if (audio) {
+		int n = 0;
+		// attr & 0x40 is a data track; everything else is CDDA. Same test the
+		// CDDA fetch uses, so the count cannot disagree with what will play.
+		for (int i = 0; i < real; i++) if (!(drv->track[i].attr & 0x40)) n++;
+		*audio = n;
+	}
+
+	if (!cd_label_known && real > 0) {
+		cd_label_known = true;          // one attempt per disc, pass or fail
+		if (drv->phys) {
+			// The physical layer already knows how to find the descriptor on a
+			// mixed-mode disc (its first DATA track, not LBA 16 of the disc),
+			// so use it rather than a second, worse copy of that logic.
+			char lbl[64];
+			if (physical_disc_disc_label(lbl, sizeof(lbl)) > 0)
+				snprintf(cd_label, sizeof(cd_label), "%s", lbl);
+		}
+		else {
+			uint8_t raw[2352];
+			if (!cdrom_read_raw_sector(drv, 16, raw)) {
+				int off = pvd_user_offset(raw);
+				if (off >= 0) cd_label_from_pvd(raw + off);
+			}
+		}
+	}
+
+	if (label && labelsz > 0) snprintf(label, labelsz, "%s", cd_label);
+	return 1;
+}
+
 // Read the level the poll last announced to the guest, not the mount state.
 // Between a swap's removal edge and its arrival there IS a drive with media,
 // and telling the guest so at that moment collapses the swap back into no
@@ -1688,6 +1794,75 @@ static bool akiko_nvram_save_to_disk(void)
 	return akiko_nvram_save_to_path(target);
 }
 
+// ---------------------------------------------------------------------------
+// Per-game NVRAM, for the OSD. Declared in akiko_cd32.h.
+//
+// None of this state was visible anywhere. A CD32 save lives in a file named
+// after a hash of the disc, in a directory nobody browses, and when a load
+// fails its verify pass the writes stop happening silently -- correctly, to
+// avoid overwriting a real save with a half-loaded one, but with no way for
+// the player to learn that their saves are no longer being kept.
+
+int akiko_cd32_nvram_info(char *path, int pathsz, int *exists, int *failed)
+{
+	if (path && pathsz > 0) path[0] = 0;
+	if (exists) *exists = 0;
+	if (failed) *failed = 0;
+
+	if (!cd_save_path_active[0]) return 0;
+
+	if (path && pathsz > 0) snprintf(path, pathsz, "%s", cd_save_path_active);
+	if (exists) {
+		struct stat st;
+		// Right size as well as present: a truncated file is one
+		// akiko_nvram_load_from_path will refuse, so calling it "there" would
+		// be describing a save that will not load.
+		*exists = (!stat(cd_save_path_active, &st) && st.st_size == AKIKO_NVRAM_BYTES);
+	}
+	if (failed) *failed = cd_save_load_failed ? 1 : 0;
+	return 1;
+}
+
+int akiko_cd32_nvram_clear(void)
+{
+	if (!cd_save_path_active[0]) return 0;
+
+	// Delete FIRST. The poll's dirty-detect can fire between these two steps,
+	// and with the file already gone the worst it can do is write the old
+	// contents back out -- which the zeroing below then supersedes. The other
+	// order leaves a window where the machine's copy is written to a file we
+	// are about to remove, and the delete then looks like it did nothing.
+	if (unlink(cd_save_path_active) && errno != ENOENT) {
+		akiko_diag("[akiko] NVR clear FAILED: unlink(%s) errno=%d",
+		           cd_save_path_active, errno);
+		return 0;
+	}
+
+	// Zero the mirror in BRAM. Without this the running machine still holds
+	// the save and the next dirty write puts it straight back, so the file
+	// reappears and the clear looks like it was ignored.
+	//
+	// All-zero is what an unwritten NVRAM looks like to the CD32: the BIOS
+	// does not recognise it and rebuilds the empty FlashFile bootstrap in
+	// bytes 0..24, which is the state a machine that has never been saved on
+	// is in. That is also why the bootstrap-overwrite guard in
+	// akiko_nvram_save_to_path exists, and why it will not fight this: it only
+	// refuses when the DISK file still has entry data, and it no longer does.
+	uint8_t zero[AKIKO_NVRAM_BYTES] = {};
+	akiko_ext_block_write(AKIKO_NVRAM_ADDR, zero, AKIKO_NVRAM_BYTES);
+
+	// The save is gone, so nothing has been dirtied since it was loaded and no
+	// load has failed. Leaving cd_save_dirty_observed set would make the next
+	// disc swap flush this machine's now-empty NVRAM to a file that should not
+	// exist; leaving cd_save_load_failed set would keep refusing writes to a
+	// slot whose problem has just been deleted.
+	cd_save_dirty_observed = false;
+	cd_save_load_failed    = false;
+
+	akiko_diag("[akiko] NVR cleared: %s removed, BRAM zeroed", cd_save_path_active);
+	return 1;
+}
+
 // Push one sector to the akiko sector_buffer as 1176 16-bit words over the
 // ext bus. The old hps_io disk-slot path (UIO_SECTOR_RD on a dedicated VDNUM
 // slot, ~0.95 ms/sector) is gone: akiko.v takes words now, and the word-wide
@@ -1705,7 +1880,13 @@ static void akiko_push_sector(const uint8_t *buf)
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	int64_t now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
 
-	const int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, AKIKO_SECTOR_PERIOD_US);
+	// Read per push rather than latched at mount: changing the setting then has
+	// an effect on the disc already in the drive, which is how you would want
+	// to compare the two without reloading a game to do it.
+	const int64_t period_us = (minimig_config.cd_speed == mmcd_2x)
+	                        ? AKIKO_SECTOR_PERIOD_2X_US : AKIKO_SECTOR_PERIOD_US;
+
+	const int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, period_us);
 	if (wait_us > 0) {
 		usleep((useconds_t)wait_us);
 		clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -2312,6 +2493,11 @@ static bool akiko_handle_sec_req(void)
 void akiko_cd32_set_cd_path(const char *path)
 {
 	cd_media_event = true;
+	// Before the same-slot early return below. That return asks whether the
+	// SAVE FILE changed; this cache is about the disc in the drive. A remount
+	// of the same image hashes to the same save and returns early, and the
+	// label should still be re-read -- it costs one seek, once.
+	cd_label_forget();
 
 	char new_path[256] = {0};
 	if (path && *path) {

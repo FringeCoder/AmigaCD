@@ -7,6 +7,25 @@ void SelectFile(const char* path, const char* pFileExt, int Options, unsigned ch
 
 void HandleUI(void);
 void menu_key_set(unsigned int c);
+
+// Save states without opening the OSD, called from user_io_kbd().
+//
+// That is where it has to be: while the OSD is CLOSED, menu_key_set() is not
+// called, so HandleUI's key switch never sees the press. The screenshot hotkey
+// is in the same chain for the same reason.
+//
+// Returns 1 when this core took the key, which is also the caller's signal to
+// consume it rather than pass it to the guest. Refusals -- no disc to name a
+// save after, a machine that cannot save states at all -- return 1 too and
+// toast why: passing the combo on to the Amiga instead would leave the player
+// with no press and no explanation.
+enum
+{
+	SS_HOTKEY_SAVE = 0,
+	SS_HOTKEY_RESTORE,
+	SS_HOTKEY_SLOT,
+};
+int amigacd_ss_hotkey(int action);
 void menu_process_save();
 void PrintDirectory(int expand = 0);
 void ScrollLongName(void);

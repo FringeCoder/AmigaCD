@@ -96,6 +96,30 @@ int main(void)
 	if (P >= 1600 && P <= 6667) printf("PASS floor is inside the evidenced band\n");
 	else { printf("FAIL floor %lld us is outside the evidenced band 1600..6667\n", (long long)P); failures++; }
 
+	// The other rate the OSD offers. A CD32 is a 2x unit -- 150 sectors/s --
+	// so a sector is 1e6/150 = 6666.7 us. Checked to the microsecond because
+	// it is a fact about the machine and not a tuning knob: a number that has
+	// drifted is a setting still labelled "CD32 (2x)" that is not 2x.
+	const int64_t P2 = AKIKO_SECTOR_PERIOD_2X_US;
+	if (P2 == 6667) printf("PASS 2x rate is one sector at 150/s\n");
+	else { printf("FAIL 2x rate is %lld us, want 6667 (1e6/150)\n", (long long)P2); failures++; }
+
+	// And it must not be FASTER than the floor. The floor is what keeps the
+	// Z2 fast RAM + CD boot alive below ~0.4 ms; a "more authentic" setting
+	// that undercut it would reintroduce that failure wearing a name that
+	// sounds like the safer choice.
+	if (P2 >= P) printf("PASS 2x rate is not faster than the floor\n");
+	else { printf("FAIL 2x rate %lld us is faster than the floor %lld us\n", (long long)P2, (long long)P); failures++; }
+
+	// The arithmetic itself has no opinion about which period it is given, and
+	// this is the check that says so: the same three cases at the 2x period.
+	check("2x: zero elapsed waits the full period",
+	      akiko_pace_delay_us(1000000, 1000000, P2), P2);
+	check("2x: one microsecond short waits one microsecond",
+	      akiko_pace_delay_us(1000000, 1000000 + P2 - 1, P2), 1);
+	check("2x: exactly the period waits not at all",
+	      akiko_pace_delay_us(1000000, 1000000 + P2, P2), 0);
+
 	if (failures) { printf("%d FAILURES\n", failures); return 1; }
 	printf("ALL TESTS PASSED\n");
 	return 0;

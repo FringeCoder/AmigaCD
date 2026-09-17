@@ -4773,6 +4773,36 @@ void user_io_kbd(uint16_t key, int press)
 		if (press) setBrightness(BRIGHTNESS_UP, 0);
 	}
 	else
+	// AmigaCD save states without opening the OSD.
+	//
+	// It has to be here rather than in HandleUI's key switch: with the OSD
+	// closed, menu_key_set() is never called, so that switch does not run. The
+	// screenshot hotkey above is in this chain for exactly the same reason, and
+	// like it, matching here consumes the key -- press AND release -- so the
+	// Amiga never sees a half of it.
+	//
+	// Ctrl+Alt+F1/F2/F3 rather than a bare function key, because F1..F10 are
+	// real Amiga keys that software uses; F11 is not free either, since the
+	// keymap sends it as HELP. Ctrl+Alt is the modifier pair this machine
+	// already reserves for machine-level control (Ctrl+LAlt+RAlt is the reset
+	// combo), and Ctrl+Alt with a function key is not a shortcut Amiga software
+	// asks for. The reset combo itself is unaffected: user_io_check_reset
+	// compares the modifier word exactly, and Ctrl+Alt without the second Alt
+	// does not match it.
+	//
+	// Gated on the AmigaCD core so a stock Minimig, which has none of this,
+	// keeps handing all three to the guest.
+	if ((key == KEY_F1 || key == KEY_F2 || key == KEY_F3)
+	    && (get_key_mod() & (LCTRL | RCTRL)) && (get_key_mod() & (LALT | RALT))
+	    && !osd_is_visible && !is_menu() && is_amigacd())
+	{
+		// press == 1 only: 2 is autorepeat, and a held combo writing a save
+		// state every few hundred milliseconds is not what anyone meant.
+		if (press == 1) amigacd_ss_hotkey((key == KEY_F1) ? SS_HOTKEY_SAVE
+		                                : (key == KEY_F2) ? SS_HOTKEY_RESTORE
+		                                                  : SS_HOTKEY_SLOT);
+	}
+	else
 	if (key == KEY_F2 && osd_is_visible)
 	{
 		if (press == 1) cfg.rbf_hide_datecode = !cfg.rbf_hide_datecode;

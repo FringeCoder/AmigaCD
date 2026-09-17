@@ -69,3 +69,9 @@ diag/
 # `git add -A` sweeps them in.
 build/
 *.vcd
+
+# Native unit test binaries and their depfiles. `build/` above already covers
+# this directory, but these three were committed before that rule existed, and a
+# tracked file ignores .gitignore -- so every `make -C tests` dirtied the tree
+# and one of them rode along in an unrelated commit.
+tests/build/

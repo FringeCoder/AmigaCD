@@ -68,6 +68,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "support/physical_disc/physical_disc.h"
 #include "support/physical_disc/physical_disc_autoboot.h"
 #include "support/minimig/minimig_ssdiag.h"
+#include "support/minimig/akiko_cd32.h"        // akiko_cd32_disc_info for the CD row
 #include "profiling.h"
 #include "str_util.h"
 #include "autofire.h"
@@ -206,6 +207,8 @@ enum MENU
 	MENU_AMIGACD_SETTINGS2,
 	MENU_AMIGACD_ADVANCED1,
 	MENU_AMIGACD_ADVANCED2,
+	MENU_AMIGACD_NVRCLEAR1,
+	MENU_AMIGACD_NVRCLEAR2,
 	MENU_AMIGACD_CDFILE_SELECTED,
 	MENU_AMIGACD_HDFFILE_SELECTED,
 	MENU_AMIGACD_ADFFILE_SELECTED,
@@ -282,6 +285,30 @@ static int amigacd_fdd_unit = 0;
 // reason amigacd_fdd_unit above exists.
 static int amigacd_hdf_slot = 1;
 
+// Which recent-files list each AmigaCD row owns.
+//
+// One per row, because the list a row offers is also the list the file
+// browser's ` key opens and the list "Clear the List" empties. Two rows
+// sharing one list is not a cosmetic problem: picking an entry in a recent
+// list jumps straight to that row's fs_MenuSelect (menu.cpp, MENU_RECENT2),
+// so an HDF offered in the CD row's list was mounted as a CD image -- cfg=2,
+// ide_open(0, ...) -- and an ISO offered in a Hard Disk row became a fixed
+// disk. Both rows wrote 500 and both read 500, so that was every session.
+//
+// 0 and 1 are df0 and df1, which is what the floppy rows already read
+// (recent_init(fu)); only the write was wrong, pinned at 0, so df1's list
+// could never fill and df0's collected both drives' disks.
+//
+// 501 is CD images, which is what the full Minimig tree already calls its
+// CD32 list (MENU_MINIMIG_MAIN2). The two trees share a namespace whenever
+// /media/fat/amigacd_force puts a Minimig-named core into this OSD -- the
+// file is <core name>_recent_<idx>.cfg -- so agreeing on the meaning is
+// better than picking a free number. 502 is that tree's CDTV list and is
+// left to it; 503 and 504 are new.
+#define AMIGACD_RECENT_DF(u)    (u)              // df0 -> 0, df1 -> 1
+#define AMIGACD_RECENT_CD       501
+#define AMIGACD_RECENT_HDF(s)   (502 + (s))      // hardfile 1 -> 503, 2 -> 504
+
 const char *config_joystick_mode[] = { "Digital", "Analog", "CD32", "Analog" };
 const char *config_button_turbo_msg[] = { "OFF", "FAST", "MEDIUM", "SLOW" };
 const char *config_button_turbo_choice_msg[] = { "A only", "B only", "A & B" };
@@ -299,6 +326,13 @@ const char *config_scale[] = { "Normal", "V-Integer", "HV-Integer-", "HV-Integer
 // matching the four .ss1-.ss4 files FileGenerateSavestatePath() names. Labelled
 // 1-4 for the user; the wire value in status[53:52] is 0-3.
 static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
+
+// CD sector delivery rate, mm_cdSpeed. The multipliers are what they measure
+// against a 1x drive's 75 sectors/s: the shipped floor of one sector every
+// 1700 us is 588/s, near enough 8x and not a rate any real machine produces;
+// a CD32 is a 2x unit at 150/s. Labelled by what they are rather than "Fast"
+// and "Slow", because the slow one is the accurate one.
+const char *config_cd_speed_msg[] = { "Fast (~8x)", "CD32 (2x)" };
 
 // Save states are refused in two configurations. The OSD greys the rows out so
 // the user is told, rather than pressing SELECT and having nothing happen:
@@ -556,6 +590,128 @@ static int minimig_ss_request_save()
 	return 1;
 }
 
+// Ask the core for a restore, from either the menu row or the hotkey.
+//
+// Lifted out of the Settings row so the two cannot drift: a hotkey that armed
+// process_ss() differently from the row would be a second, subtly different
+// restore path, and the whole reason this refuses rather than firing blind is
+// that the difference is invisible until it succeeds at the wrong thing.
+//
+// The caller closes the OSD if it has one open. This does not touch menustate:
+// the hotkey path has no menu to close, and Info() below needs menustate at or
+// below MENU_INFO to draw at all.
+//
+// Returns 0 without asking the core for anything when there is no name to
+// restore from.
+static int minimig_ss_request_restore()
+{
+	const char *ss_name = amigacd_ss_name();
+	if (!ss_name || !ss_name[0])
+	{
+		// Refuse rather than fire the edge at an unloaded window.
+		//
+		// The save path already did this; the load path did not, and the
+		// asymmetry was the bug. The name comes from the mounted media --
+		// amigacd_ss_name() is the CD, or the HDF when there is no CD -- so
+		// with nothing mounted it is empty, process_ss() was skipped, and
+		// status[54] was set anyway.
+		//
+		// process_ss() is what maps the four DDR3 windows, ZEROES them and
+		// reads the .ss files in. Skipping it does not leave the window empty,
+		// it leaves it untouched -- so the core validated whatever DDR3
+		// happened to hold. Usually that fails SS_MAGIC and the machine is left
+		// alone, which is why this was not noticed. But mount a game, save or
+		// restore, unmount it, then press restore: the previous payload is
+		// still resident, passes magic, CRC and the Kickstart check, and the
+		// core restores a machine belonging to media that is not in the drive.
+		// It does not fail -- it succeeds at the wrong thing, which is the
+		// worse of the two.
+		//
+		// The Z3 and 68000 refusals grey the row out so the user is told rather
+		// than left pressing SELECT at nothing; this one cannot be known until
+		// the press, so it toasts instead.
+		Info("No disc or HDF - nothing to restore", 2500);
+		return 0;
+	}
+
+	// This is not housekeeping, it is the load. process_ss() maps the four DDR3
+	// windows AND reads the four .ss files off disk into them. Nothing else on
+	// this core ever calls it but the save path, so without this the window the
+	// core is about to validate holds whatever was there, and a restore after a
+	// power cycle -- the whole point of the feature -- could never work.
+	//
+	// It re-reads all four slots every press, ~16 MB. That is the cost of
+	// always validating the freshest file on disk rather than a stale window,
+	// on a keypress the user made deliberately. It also resets the poller's
+	// counters, so it cannot itself trigger a spurious write back to disk.
+	process_ss(ss_name, 1);
+
+	// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge) exactly as
+	// status[51] is. A level here would restore over and over -- ss_ctrl
+	// re-arms out of idle on any cycle load_req is high -- and the bit being
+	// cleared by userspace must not be what stands between the user and a
+	// machine that never runs again. The set/clear pair below is housekeeping
+	// on the persisted status word, not the safety property.
+	//
+	// Everything after this is the core's: it validates the window with the
+	// Amiga still running, refuses without freezing if any gate fails, and
+	// reports the outcome as an OSD toast either way (AmigaCD.sv ss_info_*).
+	user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+	// The drive travels beside the payload rather than in it: where the head is
+	// and what was playing are userspace state the core cannot see. Applied
+	// here so the restored machine's first sector request is served from the
+	// position it was saved at.
+	ss_apply_host_state(minimig_config.ss_slot & 3);
+	user_io_status_set("[54]", 1);
+	user_io_status_set("[54]", 0);
+	return 1;
+}
+
+// Save states without opening the OSD. Called from user_io_kbd(), which is the
+// only place a keypress is visible while the OSD is CLOSED -- HandleUI's key
+// switch never runs then, because menu_key_set() is only called when the OSD is
+// up. The screenshot hotkey lives in the same chain for the same reason.
+//
+// Returns 1 when it acted, which is also what tells the caller the key was
+// consumed. It always returns 1 for this core, refusals included: a hotkey that
+// silently passed Ctrl+Alt+F1 to the Amiga on a machine that cannot save states
+// would be worse than one that says why.
+int amigacd_ss_hotkey(int action)
+{
+	if (!is_amigacd()) return 0;
+
+	if (minimig_ss_blocked())
+	{
+		// The same two conditions that grey the Settings rows out. There they
+		// are visible before the press; here there is nothing to grey.
+		Info("Save states need 020 and no Z3 RAM", 2500);
+		return 1;
+	}
+
+	switch (action)
+	{
+	case SS_HOTKEY_SLOT:
+	{
+		int slot = (minimig_config.ss_slot + 1) & 3;
+		minimig_config.ss_slot = (unsigned char)slot;
+		char msg[32];
+		sprintf(msg, "Save slot %d", slot + 1);
+		Info(msg, 1500);
+		return 1;
+	}
+
+	case SS_HOTKEY_SAVE:
+		minimig_ss_request_save();
+		return 1;
+
+	case SS_HOTKEY_RESTORE:
+		minimig_ss_request_restore();
+		return 1;
+	}
+
+	return 1;
+}
+
 #define DPAD_NAMES 4
 #define DPAD_BUTTON_NAMES 12  //DPAD_NAMES + 6 buttons + start/select
 
@@ -575,7 +731,8 @@ static char helptext_custom[1024];
 
 enum HelpText_Message
 {
-	HELPTEXT_NONE, HELPTEXT_CUSTOM, HELPTEXT_MAIN, HELPTEXT_HARDFILE, HELPTEXT_CHIPSET, HELPTEXT_MEMORY, HELPTEXT_EJECT, HELPTEXT_CLEAR
+	HELPTEXT_NONE, HELPTEXT_CUSTOM, HELPTEXT_MAIN, HELPTEXT_HARDFILE, HELPTEXT_CHIPSET, HELPTEXT_MEMORY, HELPTEXT_EJECT, HELPTEXT_CLEAR,
+	HELPTEXT_SSHOTKEY
 };
 
 static const char *helptexts[] =
@@ -588,8 +745,13 @@ static const char *helptexts[] =
 	"                                Minimig can make use of up to 2 megabytes of Chip RAM, up to 1.5 megabytes of Slow RAM (A500 Trapdoor RAM), and up to 384 megabytes of Fast RAM (8MB max for 68000 mode). To use the HRTmon feature you will need a file on the SD card named hrtmon.rom.",
 	"                                Backspace key (or B-hold + A on gamepad) to unmount",
 	"                                Backspace key (or B-hold + A on gamepad) to clear stored option. You have to reload the core to be able to use default value.",
+	// The hotkeys have nowhere else to be announced: this page is exactly full
+	// at sixteen lines, and a hotkey nobody is told about is not a feature.
+	"                                Save states also work with this menu closed, which is the point of them: Ctrl+Alt+F1 saves to the selected slot, Ctrl+Alt+F2 restores it, Ctrl+Alt+F3 steps to the next slot. The Amiga never sees those keys. Clear NVRAM erases the CD32 saved games for the disc in the drive, which is not the same thing as a save state.",
 };
 
+// One per helptexts[] entry, and they must stay the same length: helptext_idx
+// indexes both.
 static const uint32_t helptext_timeouts[] =
 {
 	10000,
@@ -599,8 +761,16 @@ static const uint32_t helptext_timeouts[] =
 	10000,
 	10000,
 	10000,
+	10000,
 	10000
 };
+
+// helptext_idx indexes both, and nothing else makes them agree -- adding a
+// message and forgetting its timeout reads a uint32_t past the end of this
+// array, which is a bad way to find out.
+static_assert(sizeof(helptexts) / sizeof(helptexts[0])
+              == sizeof(helptext_timeouts) / sizeof(helptext_timeouts[0]),
+              "helptexts[] and helptext_timeouts[] must have one entry each per HelpText_Message");
 
 static const char *info_top = "\x80\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x82";
 static const char *info_bottom = "\x85\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x84";
@@ -612,6 +782,58 @@ static uint32_t fs_Options;
 static uint32_t fs_MenuSelect;
 static uint32_t fs_MenuCancel;
 static int fs_RecentIdx = -1;
+
+// Which recent list the browser is currently working with.
+//
+// fs_RecentIdx is what the caller of SelectFile asked for; the rest is the
+// guess for callers that asked for nothing, which is where a core with more
+// than one kind of mountable file ends up reading somebody else's list.
+//
+// It takes ioctl_index as an argument because that is a static local of
+// HandleUI, not a file-scope one.
+static int recent_idx_active(int ioctl_index)
+{
+	if (fs_RecentIdx >= 0) return fs_RecentIdx;
+	return (fs_Options & SCANO_CORES)  ? -1
+	     : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500
+	                                   : ioctl_index;
+}
+
+// Open a recent list straight from a menu row, without going through the file
+// browser. SelectFile is what normally sets fs_RecentIdx, so a row that skips
+// it left the previous browse's index in place -- and "Clear the List" then
+// emptied whatever that was.
+static int recent_open(int idx)
+{
+	fs_RecentIdx = idx;
+	return recent_init(idx);
+}
+
+// Put the current MGL item's file into selPath, the way MENU_MINIMIG_* has
+// always resolved it: an absolute path is used as given, "../" resolves from
+// the storage root, anything else from the core's home directory.
+//
+// A helper rather than a fourth copy, because the AmigaCD tree has three mount
+// handlers that need it and a resolution rule that differs between them by a
+// line is a .mgl that works for a floppy and not for a disc.
+static void mgl_selpath(char *selPath, size_t selPathSize)
+{
+	const char *p = mgl_get()->item[mgl_get()->current].path;
+
+	if (p[0] == '/') snprintf(selPath, selPathSize, "%s", p);
+	else if (p[0] == '.' && p[1] == '.') snprintf(selPath, selPathSize, "%s/%s", getRootDir(), p);
+	else snprintf(selPath, selPathSize, "%s/%s", HomeDir(), p);
+
+	// Same /tmp/ breadcrumbs the other MGL paths leave, so a script watching
+	// them sees an AmigaCD launch the way it sees every other core's.
+	if (cfg.log_file_entry)
+	{
+		const char *fname = strrchr(selPath, '/');
+		MakeFile("/tmp/FULLPATH", selPath);
+		MakeFile("/tmp/CURRENTPATH", fname ? fname + 1 : selPath);
+		MakeFile("/tmp/FILESELECT", "selected");
+	}
+}
 
 static advancedButtonMap abm_edit_map = {};
 static advancedButtonMap *abm_edit_ptr = NULL;
@@ -5747,7 +5969,7 @@ void HandleUI(void)
 			helptext_idx = 0;
 		}
 
-		if (recent && recent_init((fs_RecentIdx >= 0) ? fs_RecentIdx : (fs_Options & SCANO_CORES) ? -1 : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500 : ioctl_index))
+		if (recent && recent_init(recent_idx_active(ioctl_index)))
 		{
 			menustate = MENU_RECENT1;
 		}
@@ -6062,7 +6284,11 @@ void HandleUI(void)
 			OsdWrite(OsdGetSize() / 2, "    Clearing the recents", 0, 0);
 			OsdUpdate();
 			sleep(1);
-			recent_clear((fs_Options & SCANO_CORES) ? -1 : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500 : ioctl_index);
+			// Was the same expression as the ` key above but without the
+			// fs_RecentIdx arm, so a caller that named its list explicitly --
+			// every AmigaCD row, presets, the ST drives -- cleared a different
+			// list from the one it was showing.
+			recent_clear(recent_idx_active(ioctl_index));
 			menustate = fs_MenuCancel;
 			menusub = menusub_last;
 			if (is_menu()) menustate = MENU_FILE_SELECT1;
@@ -7019,6 +7245,23 @@ void HandleUI(void)
 		// mister_floppy_status rides in the core's OSD mask: bit 6 board
 		// detected, bit 7 IBM/PC vs Shugart, bit 8 cable straight vs crossed.
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
+
+		// What is actually on the mounted disc, for the detail line under the
+		// CD row. Two rips of the same CD32 title -- data only, and the full
+		// disc with its music -- mount identically and look identical here,
+		// and the difference only turns up as silence once you are playing.
+		// The track counts settle it before that.
+		//
+		// Drawn whenever there is a disc rather than only when the cursor is
+		// on the row: a line that appears and disappears as the cursor moves
+		// makes the rows below it jump, and the answer is worth seeing without
+		// having to go and look for it.
+		char cd_label[64] = {};
+		int  cd_tracks = 0, cd_audio = 0;
+		const int cd_detail = amigacd_has_cd
+		                   && akiko_cd32_disc_info(cd_label, sizeof(cd_label), &cd_tracks, &cd_audio)
+		                   && cd_tracks > 0;
+
 		m = 0;
 		OsdWrite(m++, "", 0, 0);
 
@@ -7041,6 +7284,23 @@ void HandleUI(void)
 		}
 		else strcat(s, "* no disc *");
 		OsdWrite(m++, s, menusub == 0, !amigacd_has_cd);
+
+		if (cd_detail)
+		{
+			// The OSD line is 32 characters (OSDLINELEN is 256 pixels at 8 per
+			// character), so the counts get their space first and the label
+			// takes what is left. The label is the part that can be any
+			// length, and it is the part you can do without: the counts are
+			// why this line exists.
+			char counts[24];
+			if (cd_audio) snprintf(counts, sizeof(counts), "%d trk  %d CDDA", cd_tracks, cd_audio);
+			else          snprintf(counts, sizeof(counts), "%d trk  no CDDA", cd_tracks);
+
+			int budget = 32 - 3 - 2 - (int)strlen(counts);
+			if (cd_label[0] && budget > 0) sprintf(s, "   %.*s  %s", budget, cd_label, counts);
+			else                           sprintf(s, "   %s", counts);
+			OsdWrite(m++, s, 0, 1);
+		}
 
 		// Physical CD-ROM drive attached to the MiSTer. Mounting parks the
 		// sentinel in hardfile[0].filename, which is what ide_open matches on.
@@ -7117,7 +7377,12 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == (uint32_t)(4 + hu), 0);
 		}
 
-		OsdWrite(m++, "", 0, 0);
+		// The detail line above is paid for here rather than out of the page's
+		// height. Sixteen lines with Reset and exit pinned to the last two
+		// leaves exactly one spare, which the Eject hint at the bottom uses;
+		// without this the hint would silently stop fitting whenever a disc
+		// was mounted, which is precisely when it is wanted.
+		if (!cd_detail) OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " System   : ");
 		strcat(s, amigacd_system_name(amigacd_system_shown()));
@@ -7151,6 +7416,59 @@ void HandleUI(void)
 		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 11, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
+
+		// A .mgl launched this core. MENU_MINIMIG_MAIN1 has had this since
+		// floppies, but it jumps straight here for the console variant and
+		// breaks before reaching it, so an .mgl mounted nothing at all on
+		// AmigaCD -- the OSD opened invisibly and sat there until the item's
+		// delay ran out. That is the standard way every other MiSTer CD core
+		// is launched: a game list, a favourites folder, bootcore.
+		//
+		// index picks the drive, and 0..3 keep meaning floppies so an .mgl
+		// written for Minimig still works:
+		//
+		//   0, 1   df0, df1        (2, 3 are drives this machine does not have)
+		//   4      the CD
+		//   5, 6   Hard Disk 0, Hard Disk 1
+		//
+		// type is not checked, matching MENU_MINIMIG_MAIN1: every .mgl in the
+		// wild writes type="f" and refusing the others would only break files
+		// that work today.
+		//
+		// Nothing here resets the machine. The .mgl format has <reset/> for
+		// that, so it stays the author's decision -- and a CD does not need it
+		// anyway: the akiko bridge sees cd_is_mounted() go false -> true and
+		// handles the TOC rebuild and its own deferred reset itself.
+		if (!mgl->done)
+		{
+			const int idx = mgl->item[mgl->current].index;
+			if (idx == 0 || idx == 1)
+			{
+				amigacd_fdd_unit = idx;
+				menustate = MENU_AMIGACD_ADFFILE_SELECTED;
+			}
+			else if (idx == 4 && amigacd_has_cd)
+			{
+				menustate = MENU_AMIGACD_CDFILE_SELECTED;
+			}
+			else if (idx == 5 || idx == 6)
+			{
+				amigacd_hdf_slot = idx - 4;     // 5 -> hardfile[1], 6 -> hardfile[2]
+				menustate = MENU_AMIGACD_HDFFILE_SELECTED;
+			}
+			else
+			{
+				// An index this machine has no drive for -- either an index
+				// with no drive behind it at all, or the CD on the A1200
+				// profile, which has no drive. Skip the item rather than
+				// stall: state 3 advances to the next one, so the rest of the
+				// .mgl still runs and a typo costs one mount, not the launch.
+				printf("MGL: AmigaCD (%s) has no drive at index %d, skipping\n",
+				       amigacd_system_name(amigacd_system()), idx);
+				mgl->state = 3;
+				menustate = MENU_NONE1;
+			}
+		}
 		break;
 	}
 
@@ -7200,9 +7518,10 @@ void HandleUI(void)
 						if (!Selected_S[0][0]
 						    && strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
 							memcpy(Selected_S[0], minimig_config.hardfile[0].filename, sizeof(Selected_S[0]));
-						SelectFile(Selected_S[0], fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel);
+						SelectFile(Selected_S[0], fs_pFileExt, fs_Options, fs_MenuSelect,
+						           fs_MenuCancel, AMIGACD_RECENT_CD);
 					}
-					else if (recent_init(500)) menustate = MENU_RECENT1;
+					else if (recent_open(AMIGACD_RECENT_CD)) menustate = MENU_RECENT1;
 				}
 			}
 			else if (menusub == 1) // Real CD: mount the physical drive
@@ -7351,8 +7670,9 @@ void HandleUI(void)
 					// that cannot open.
 					const char *fext = caps_init() ? "ADFSCPIPF" : "ADFSCP";
 					strcpy(fs_pFileExt, fext);
-					if (select) SelectFile(Selected_F[fu], fext, fs_Options, fs_MenuSelect, fs_MenuCancel);
-					else if (recent_init(fu)) menustate = MENU_RECENT1;
+					if (select) SelectFile(Selected_F[fu], fext, fs_Options, fs_MenuSelect,
+					                       fs_MenuCancel, AMIGACD_RECENT_DF(fu));
+					else if (recent_open(AMIGACD_RECENT_DF(fu))) menustate = MENU_RECENT1;
 				}
 			}
 			else if (menusub == 4 || menusub == 5) // Hard Disk 0 / 1: select an HDF
@@ -7374,9 +7694,10 @@ void HandleUI(void)
 							       minimig_config.hardfile[amigacd_hdf_slot].filename,
 							       sizeof(Selected_S[amigacd_hdf_slot]));
 						SelectFile(Selected_S[amigacd_hdf_slot], fs_pFileExt, fs_Options,
-						           fs_MenuSelect, fs_MenuCancel);
+						           fs_MenuSelect, fs_MenuCancel,
+						           AMIGACD_RECENT_HDF(amigacd_hdf_slot));
 					}
-					else if (recent_init(500)) menustate = MENU_RECENT1;
+					else if (recent_open(AMIGACD_RECENT_HDF(amigacd_hdf_slot))) menustate = MENU_RECENT1;
 				}
 			}
 			else if (menusub == 6) // System: cycle CD32 -> CDTV -> A500 -> A1200
@@ -7464,10 +7785,11 @@ void HandleUI(void)
 	case MENU_AMIGACD_SETTINGS1:
 	{
 		OsdSetTitle("Settings", 0);
-		helptext_idx = 0;
+		helptext_idx = HELPTEXT_SSHOTKEY;
 		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
-		// Save state(5), Restore state(6), Back(7) -- eight rows, so 0xFF.
-		menumask = 0xFF;
+		// Save state(5), Restore state(6), CD speed(7), Clear NVRAM(8),
+		// Back(9) -- ten rows, so 0x3FF.
+		menumask = 0x3FF;
 		parentstate = menustate;
 
 		m = 0;
@@ -7532,8 +7854,58 @@ void HandleUI(void)
 			OsdWrite(m++, " Restore state", menusub == 6, ss_blocked);
 		}
 
+		// How fast sectors reach the machine. Grouped with the NVRAM rows
+		// below rather than with the CPU rows above because it is about the
+		// drive, and greyed out on the A1200 profile, which has no drive at
+		// all -- same reasoning as the CD rows on the main page.
+		OsdWrite(m++, "", 0, 0);
+		{
+			const int has_cd = (amigacd_system() != AMIGACD_SYS_A1200);
+			// Range-checked rather than trusted: this byte arrives from a file,
+			// and the row has to render something rather than read past the
+			// end of the table if the file is old, hand-edited or truncated.
+			const int spd = (minimig_config.cd_speed < mmcd_count)
+			              ? (int)minimig_config.cd_speed : (int)mmcd_fast;
+			strcpy(s, " CD speed : ");
+			strcat(s, config_cd_speed_msg[spd]);
+			OsdWrite(m++, s, menusub == 7, !has_cd);
+		}
+
+		// Per-game NVRAM. A CD32 save lives in a file named after a hash of
+		// the disc, in a directory nobody browses, and nothing anywhere said
+		// which one was live -- so "my save vanished" had no answer short of
+		// ssh. Worse, when a load fails its verify pass the writes stop
+		// happening on purpose (see cd_save_load_failed in akiko_cd32.cpp) and
+		// the player is never told; that is what the "not saving!" marker is.
+		{
+			char nvr_path[256];
+			int  nvr_exists = 0, nvr_failed = 0;
+			const int have_nvr = akiko_cd32_nvram_info(nvr_path, sizeof(nvr_path),
+			                                           &nvr_exists, &nvr_failed);
+
+			strcpy(s, " NVRAM    : ");
+			if (!have_nvr) strcat(s, "* no disc *");
+			else if (nvr_failed) strcat(s, "NOT SAVING - load failed");
+			else
+			{
+				// The basename is the identifying part and the directory is
+				// always the same one, so the path is worth nothing here and
+				// the 32-column line has no room for it either.
+				const char *base = strrchr(nvr_path, '/');
+				base = base ? base + 1 : nvr_path;
+				strncat(s, base, 20);
+				if (!nvr_exists) strcat(s, " (new)");
+			}
+			OsdWrite(m++, s, 0, 1);
+
+			// Greyed rather than hidden when there is nothing to clear: the row
+			// keeps its position, and a row that is there and dim says "not
+			// now" where a row that vanishes says "you imagined it".
+			OsdWrite(m++, " Clear NVRAM", menusub == 8, !have_nvr);
+		}
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 7, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 9, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -7547,7 +7919,11 @@ void HandleUI(void)
 		else if (back || left)
 		{
 			menustate = MENU_AMIGACD_MAIN1;
-			menusub = 4;
+			// The Settings row, which is 7 -- CD, Real CD, two floppies, two
+			// hard disks, System, Settings. This said 4, which was right
+			// before the two Hard Disk rows went in and has been landing the
+			// cursor on Hard Disk 0 ever since.
+			menusub = 7;
 		}
 		else if (select || minus || plus)
 		{
@@ -7660,78 +8036,109 @@ void HandleUI(void)
 				// back to watching a frozen menu for several seconds.
 				menustate = MENU_NONE1;
 
-				// Refuse rather than fire the edge at an unloaded window.
-				//
-				// The save row above already does this (minimig_ss_request_save
-				// returns early with a toast when there is no name); the load path
-				// never got the same treatment, and the asymmetry was the bug. The
-				// name comes from the mounted media -- amigacd_ss_name() is the CD,
-				// or the HDF when there is no CD -- so with nothing mounted it is
-				// empty, process_ss() was skipped, and status[54] was set anyway.
-				//
-				// process_ss() is what maps the four DDR3 windows, ZEROES them and
-				// reads the .ss files in. Skipping it does not leave the window
-				// empty, it leaves it untouched -- so the core validated whatever
-				// DDR3 happened to hold. Usually that fails SS_MAGIC and the machine
-				// is left alone, which is why this was not noticed. But mount a game,
-				// save or restore, unmount it, then press restore: the previous
-				// payload is still resident, passes magic, CRC and the Kickstart
-				// check, and the core restores a machine belonging to media that is
-				// not in the drive. It does not fail -- it succeeds at the wrong
-				// thing, which is the worse of the two.
-				const char *ss_name = amigacd_ss_name();
-				if (!ss_name || !ss_name[0])
+				// The load itself, and its refusal when there is nothing
+				// mounted to name a save after, both live in
+				// minimig_ss_request_restore() -- shared with the Ctrl+Alt+F2
+				// hotkey so the two paths cannot drift. Closing the OSD above
+				// is also what lets its Info() and process_ss()'s progress bar
+				// draw at all.
+				minimig_ss_request_restore();
+			}
+			else if (menusub == 7) // CD speed
+			{
+				// -/+ and SELECT all cycle it: two values, so there is nothing
+				// for a direction to mean, and SELECT is what a controller can
+				// reach without the keyboard.
+				if (amigacd_system() != AMIGACD_SYS_A1200)
 				{
-					// Say why. The Z3 and 68000 refusals grey the row out so the
-					// user is told rather than left pressing SELECT at nothing; this
-					// one cannot be known until the press, so it toasts instead.
-					Info("No disc or HDF - nothing to restore", 2500);
+					minimig_config.cd_speed = (minimig_config.cd_speed == mmcd_2x)
+					                        ? mmcd_fast : mmcd_2x;
 				}
-				else
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 8 && select) // Clear NVRAM
+			{
+				// Confirmed, because this deletes somebody's saves. The row is
+				// greyed when there is nothing to clear, but a greyed row still
+				// takes SELECT, so re-check rather than trusting the drawing.
+				if (akiko_cd32_nvram_info(0, 0, 0, 0))
 				{
-					process_ss(ss_name, 1);
-
-					// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge)
-					// exactly as status[51] is. A level here would restore over and
-					// over -- ss_ctrl re-arms out of idle on any cycle load_req is
-					// high -- and the bit being cleared by userspace must not be
-					// what stands between the user and a machine that never runs
-					// again. The set/clear pair below is housekeeping on the
-					// persisted status word, not the safety property.
-					//
-					// Everything after this is the core's: it validates the window
-					// with the Amiga still running, refuses without freezing if any
-					// gate fails, and reports the outcome as an OSD toast either
-					// way (AmigaCD.sv's ss_info_* block).
-					user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
-					// The drive travels beside the payload rather than in it: where
-					// the head is and what was playing are userspace state that the
-					// core cannot see. Applied here so the restored machine's first
-					// sector request is served from the position it was saved at.
-					ss_apply_host_state(minimig_config.ss_slot & 3);
-					user_io_status_set("[54]", 1);
-					user_io_status_set("[54]", 0);
-					// Close the OSD rather than returning to the Settings page.
-					//
-					// The outcome arrives as a toast ~250 ms later, and Info()
-					// draws only while menustate <= MENU_INFO (== 2). Staying on
-					// this page leaves menustate at MENU_AMIGACD_SETTINGS/MAIN,
-					// far above it, so every toast this feature produces was
-					// silently discarded -- measured on hardware: "Save state:
-					// saved" and "Save state: FAILED" both logged as DROPPED at
-					// menustate=98, and the video-mode toasts with them.
-					//
-					// Closing also matches what the press means. The user asked
-					// the machine to do something and wants to watch it happen,
-					// not sit in a menu while it does.
-					menustate = MENU_NONE1;
+					menusub = 0;   // default the confirm page to "No"
+					menustate = MENU_AMIGACD_NVRCLEAR1;
 				}
 			}
-			else if (menusub == 7 && select) // Back
+			else if (menusub == 9 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
-				menusub = 5;   // Settings row
+				menusub = 7;   // Settings row -- 5 was Hard Disk 1, see above
 			}
+		}
+		break;
+
+	// Confirming a Clear NVRAM. Its own page rather than a press-twice, because
+	// the thing on the other side of it is a player's saved games and there is
+	// no undo. Shaped like MENU_RECENT3/4, which confirms the other destructive
+	// action in this OSD.
+	case MENU_AMIGACD_NVRCLEAR1:
+	{
+		menumask = 0x03;
+		parentstate = menustate;
+
+		char nvr_path[256];
+		int  nvr_exists = 0;
+		const int have_nvr = akiko_cd32_nvram_info(nvr_path, sizeof(nvr_path), &nvr_exists, 0);
+		const char *base = "";
+		if (have_nvr)
+		{
+			const char *p = strrchr(nvr_path, '/');
+			base = p ? p + 1 : nvr_path;
+		}
+
+		m = 0;
+		while (m < 4) OsdWrite(m++);
+		OsdWrite(m++, "      Erase saved games?");
+		OsdWrite(m++);
+		// Name the file. "Erase saved games?" with no object is a question
+		// about the machine; with the filename it is a question about a disc,
+		// which is what it actually is.
+		sprintf(s, "  %.28s", base);
+		OsdWrite(m++, s, 0, 1);
+		if (!nvr_exists) OsdWrite(m++, "  (nothing saved yet)", 0, 1);
+		OsdWrite(m++);
+		OsdWrite(m++, "             No", menusub == 0);
+		OsdWrite(m++, "             Yes", menusub == 1);
+		while (m < OsdGetSize()) OsdWrite(m++);
+
+		menustate = MENU_AMIGACD_NVRCLEAR2;
+		break;
+	}
+
+	case MENU_AMIGACD_NVRCLEAR2:
+		if (select && menusub == 1)
+		{
+			if (akiko_cd32_nvram_clear())
+			{
+				// No toast on success. The row this returns to now reads
+				// "(new)", and that is not a near-enough description of the
+				// result -- it is the result: the disc has no save, which is
+				// the state a disc that was never saved on is in.
+				menustate = MENU_AMIGACD_SETTINGS1;
+				menusub = 8;
+			}
+			else
+			{
+				// A failure leaves the row exactly as it was, so it has to be
+				// said. Closing the OSD first is what makes it render: Info()
+				// is dropped unless menustate <= MENU_INFO (== 2), which is
+				// the gate that used to swallow every save state toast.
+				menustate = MENU_NONE1;
+				Info("NVRAM clear FAILED - see log", 3000);
+			}
+		}
+		else if (select || menu || back || left)
+		{
+			menustate = MENU_AMIGACD_SETTINGS1;
+			menusub = 8;
 		}
 		break;
 
@@ -7819,7 +8226,7 @@ void HandleUI(void)
 		else if (back || left)
 		{
 			menustate = MENU_AMIGACD_MAIN1;
-			menusub = 6;   // Advanced row
+			menusub = 8;   // Advanced row -- 6 was the System row, see SETTINGS2
 		}
 		else if (select || minus || plus)
 		{
@@ -7866,8 +8273,16 @@ void HandleUI(void)
 		break;
 
 	case MENU_AMIGACD_CDFILE_SELECTED:
+		// Reached either from the file browser, with selPath already set, or
+		// from a .mgl, which supplies it. Everything below is then identical,
+		// which is the point: a disc mounted by an .mgl is mounted by the same
+		// four lines as one picked by hand.
+		if (!mgl->done) mgl_selpath(selPath, sizeof(selPath));
 		memcpy(Selected_S[0], selPath, sizeof(Selected_S[0]));
-		recent_update(SelectedDir, selPath, SelectedLabel, 500);
+		// Not recorded as "recent" when an .mgl put it there, matching what
+		// every other MGL path in this file does: the list is of things you
+		// chose in this OSD.
+		if (mgl->done) recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_CD);
 		{
 			uint len = strlen(selPath);
 			if (len > sizeof(minimig_config.hardfile[0].filename) - 1) len = sizeof(minimig_config.hardfile[0].filename) - 1;
@@ -7878,13 +8293,19 @@ void HandleUI(void)
 		ide_open(0, minimig_config.hardfile[0].filename);
 		menusub = 0;
 		menustate = MENU_AMIGACD_MAIN1;
+		if (!mgl->done)
+		{
+			mgl->state = 3;             // on to the next .mgl item
+			menustate = MENU_NONE1;     // and do not draw a menu nobody opened
+		}
 		break;
 
 	case MENU_AMIGACD_HDFFILE_SELECTED:
 		// amigacd_hdf_slot was set by the row that opened the browser: 1 for
 		// Hard Disk 0 (IDE0 slave) and 2 for Hard Disk 1 (IDE1 master).
+		if (!mgl->done) mgl_selpath(selPath, sizeof(selPath));
 		memcpy(Selected_S[amigacd_hdf_slot], selPath, sizeof(Selected_S[0]));
-		recent_update(SelectedDir, selPath, SelectedLabel, 500);
+		if (mgl->done) recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_HDF(amigacd_hdf_slot));
 		{
 			uint len = strlen(selPath);
 			if (len > sizeof(minimig_config.hardfile[amigacd_hdf_slot].filename) - 1)
@@ -7900,14 +8321,25 @@ void HandleUI(void)
 		ide_open(amigacd_hdf_slot, minimig_config.hardfile[amigacd_hdf_slot].filename);
 		menusub = 4 + (amigacd_hdf_slot - 1);
 		menustate = MENU_AMIGACD_MAIN1;
+		if (!mgl->done)
+		{
+			mgl->state = 3;
+			menustate = MENU_NONE1;
+		}
 		break;
 
 	case MENU_AMIGACD_ADFFILE_SELECTED:
+		if (!mgl->done) mgl_selpath(selPath, sizeof(selPath));
 		memcpy(Selected_F[amigacd_fdd_unit], selPath, sizeof(Selected_F[0]));
-		recent_update(SelectedDir, selPath, SelectedLabel, 0);
+		if (mgl->done) recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_DF(amigacd_fdd_unit));
 		InsertFloppy(&df[amigacd_fdd_unit], selPath);
 		menusub = 2 + amigacd_fdd_unit;  // back to the row that opened the browser
 		menustate = MENU_AMIGACD_MAIN1;
+		if (!mgl->done)
+		{
+			mgl->state = 3;
+			menustate = MENU_NONE1;
+		}
 		break;
 
 	case MENU_AMIGACD_ROMFILE_SELECTED:

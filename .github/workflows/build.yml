@@ -247,5 +247,11 @@ jobs:
       - name: snac_state word order matches the contract
         run: ./snac_state_check.sh
 
+      # Also runs tests/test_deploy_core_prune.sh, which is not a compiled test
+      # but belongs to the same target for a reason worth stating: it covers the
+      # only code here that deletes files -- scripts/deploy-core.sh's prune rule,
+      # which removes superseded cores from the SD card over ssh. An off-by-one
+      # there deletes the working core you keep as the way back, and the first
+      # sign of it is a machine that will not boot the thing you were testing.
       - name: Run native unit tests
         run: make -C tests
