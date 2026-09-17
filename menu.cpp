@@ -209,6 +209,8 @@ enum MENU
 	MENU_AMIGACD_ADVANCED2,
 	MENU_AMIGACD_NVRCLEAR1,
 	MENU_AMIGACD_NVRCLEAR2,
+	MENU_AMIGACD_CONFIGS1,
+	MENU_AMIGACD_CONFIGS2,
 	MENU_AMIGACD_CDFILE_SELECTED,
 	MENU_AMIGACD_HDFFILE_SELECTED,
 	MENU_AMIGACD_ADFFILE_SELECTED,
@@ -974,13 +976,31 @@ static void amigacd_loadcfg_back()
 {
 	if (is_amigacd())
 	{
-		menustate = MENU_AMIGACD_MAIN1;
-		menusub = 10;                      // the Load settings row
+		menustate = MENU_AMIGACD_CONFIGS1;
+		menusub = 0;                       // the Load a config row
 	}
 	else
 	{
 		menustate = MENU_MINIMIG_MAIN1;
 		menusub = 12;                      // the full OSD's link to this page
+	}
+}
+
+// And leaving the shared Save config page, which had no route from this OSD at
+// all until now. Same shape as the two above: its own row on the Configs page
+// rather than MENU_MINIMIG_MAIN1 row 13, which on this variant redirects to
+// MENU_AMIGACD_MAIN1 where row 13 is exit.
+static void amigacd_savecfg_back()
+{
+	if (is_amigacd())
+	{
+		menustate = MENU_AMIGACD_CONFIGS1;
+		menusub = 1;                       // the Save to a config slot row
+	}
+	else
+	{
+		menustate = MENU_MINIMIG_MAIN1;
+		menusub = 13;                      // the full OSD's link to this page
 	}
 }
 
@@ -6016,7 +6036,17 @@ void HandleUI(void)
 	case MENU_MT32PI_MAIN2:
 		if (menu || back || left || (select && menusub == 6))
 		{
-			if (is_minimig())
+			// is_minimig() is true for the console variant too, so without this
+			// the page returned to MENU_MINIMIG_MAIN1 row 10 -- which redirects
+			// to MENU_AMIGACD_MAIN1, where row 10 is Configs. A different page
+			// and an unrelated row, the same mistake the Audio & Video and
+			// config pages made before they were given a variant-aware return.
+			if (is_amigacd())
+			{
+				menustate = MENU_AMIGACD_ADVANCED1;
+				menusub = 1;                  // the MT32-pi settings row
+			}
+			else if (is_minimig())
 			{
 				menustate = MENU_MINIMIG_MAIN1;
 				menusub = 10;
@@ -6998,14 +7028,12 @@ void HandleUI(void)
 				minimig_cfg_save(menusub);
 				minimig_mgl_save();
 			}
-			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 13;
+			amigacd_savecfg_back();
 		}
 		else
 		if (menu || left) // exit menu
 		{
-			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 13;
+			amigacd_savecfg_back();
 		}
 		break;
 
@@ -7625,7 +7653,16 @@ void HandleUI(void)
 		// all. It says (resets) because it does: minimig_cfg_load runs
 		// ApplyConfiguration, which halts the CPU, resets it and re-uploads the
 		// Kickstart.
-		OsdWrite(m++, " Load settings   (resets)", menusub == 10, 0);
+		// Was "Load settings", which opened the config list directly. It is a
+		// submenu now so that SAVING to a slot has somewhere to live: the list
+		// offers ten configs and Save settings above only ever writes slot 0,
+		// so a slot could be loaded that nothing in this OSD could write. The
+		// asymmetry arrived with the Load row and is closed here.
+		//
+		// Save settings keeps its own row and its single press. It is the one
+		// of the two that gets used, and putting it behind a submenu to tidy
+		// the page would be paying for the tidying with the common case.
+		OsdWrite(m++, " Configs                  \x16", menusub == 10, 0);
 		// Writes a .mgl beside the mounted disc so the MiSTer menu can launch
 		// straight into this core with it. A row rather than the + / - binding
 		// it started as: a keypress announced only in the scrolling helptext is
@@ -7983,15 +8020,9 @@ void HandleUI(void)
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 10 && select) // Load settings
+			else if (menusub == 10 && select) // Configs
 			{
-				// Straight to the shared Load config page. It lists the
-				// startup config -- which is what Save settings above writes,
-				// minimig_cfg_save(0) -- and any others on the card. On a
-				// machine only ever used through this OSD the others will be
-				// absent, and the page simply shows the one: revert, which is
-				// the case this row exists for.
-				menustate = MENU_MINIMIG_LOADCONFIG1;
+				menustate = MENU_AMIGACD_CONFIGS1;
 				menusub = 0;
 			}
 			else if (menusub == 11 && select) // Write .mgl for this disc
@@ -8373,6 +8404,65 @@ void HandleUI(void)
 		}
 		break;
 
+	// Loading and saving whole configurations.
+	//
+	// Its own page rather than two more rows on a main page that is exactly
+	// full, and rather than the single Load row it replaces. That row opened
+	// the shared list straight away, which was fine until you noticed the list
+	// offers ten slots and Save settings only ever writes the first -- so a
+	// slot could be loaded that nothing here could put anything in.
+	case MENU_AMIGACD_CONFIGS1:
+	{
+		OsdSetTitle("Configs", 0);
+		helptext_idx = 0;
+		menumask = 0x07;                 // Load(0), Save to slot(1), Back(2)
+		parentstate = menustate;
+
+		m = 0;
+		OsdWrite(m++, "", 0, 0);
+		// (resets) because it does: minimig_cfg_load runs ApplyConfiguration,
+		// which halts the CPU, resets it and re-uploads the Kickstart.
+		OsdWrite(m++, " Load a config   (resets)", menusub == 0, 0);
+		OsdWrite(m++, " Save to a config slot", menusub == 1, 0);
+
+		OsdWrite(m++, "", 0, 0);
+		OsdWrite(m++, " Save settings on the main", 0, 1);
+		OsdWrite(m++, " page writes the startup", 0, 1);
+		OsdWrite(m++, " config, which is the first", 0, 1);
+		OsdWrite(m++, " slot in both lists.", 0, 1);
+
+		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 2, 0);
+
+		menustate = MENU_AMIGACD_CONFIGS2;
+		break;
+	}
+
+	case MENU_AMIGACD_CONFIGS2:
+		if (menu)
+		{
+			menustate = MENU_NONE1;
+		}
+		else if (back || left || (select && menusub == 2))
+		{
+			menustate = MENU_AMIGACD_MAIN1;
+			menusub = 10;                // the Configs row
+		}
+		else if (select)
+		{
+			if (menusub == 0)
+			{
+				menustate = MENU_MINIMIG_LOADCONFIG1;
+				menusub = 0;
+			}
+			else if (menusub == 1)
+			{
+				menustate = MENU_MINIMIG_SAVECONFIG1;
+				menusub = 0;
+			}
+		}
+		break;
+
 	// Confirming a Clear NVRAM. Its own page rather than a press-twice, because
 	// the thing on the other side of it is a player's saved games and there is
 	// no undo. Shaped like MENU_RECENT3/4, which confirms the other destructive
@@ -8448,7 +8538,8 @@ void HandleUI(void)
 		OsdSetTitle("Advanced", 0);
 		helptext_idx = 0;
 		int snac = (minimig_config.userport == mmup_snacpsx);
-		menumask = snac ? 0x1F : 0x7;   // User Port[, Port 1, Port 2], Ethernet, Back
+		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet, Back
+		menumask = snac ? 0x3F : 0xF;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
 
@@ -8481,6 +8572,20 @@ void HandleUI(void)
 		// Per-port SNAC mode. Pad and mouse are independent signals in
 		// userio.v, so both at once is deliberate: mouse in port 1, joystick
 		// in port 2, the classic Amiga arrangement.
+		// The MT32-pi page, which this OSD could not reach.
+		//
+		// The row above SELECTS MT32-Pi as the user port's tenant. Its settings
+		// -- synth, Munt ROM, soundfont, what it shows on screen -- live on
+		// MENU_MT32PI_MAIN1, and that page is routed from MENU_MINIMIG_MAIN2
+		// and from the Atari ST tree, neither of which this variant reaches.
+		// So the OSD could turn a device on and then offer no way to set it up.
+		//
+		// Greyed rather than hidden when another tenant is selected: the row
+		// explains what the User Port row above it leads to, which is worth
+		// seeing before the switch rather than only after.
+		OsdWrite(m++, " MT32-pi settings         \x16", menusub == 1,
+		         minimig_config.userport != mmup_mp32pi);
+
 		if (snac)
 		{
 			// Sized to the full 3-bit field the RTL reads, not just the enum's
@@ -8492,7 +8597,7 @@ void HandleUI(void)
 			for (int p = 0; p < 2; p++)
 			{
 				sprintf(s, "   Port %d  : %s", p + 1, modes[minimig_config.snac[p] & 0x07]);
-				OsdWrite(m++, s, menusub == (uint32_t)(1 + p), 0);
+				OsdWrite(m++, s, menusub == (uint32_t)(2 + p), 0);
 			}
 		}
 
@@ -8503,14 +8608,14 @@ void HandleUI(void)
 		// drift apart in behaviour.
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 3 : 1), 0);
+		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 4 : 2), 0);
 
 		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
 		OsdWrite(m++, " is always present either way.", 0, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 4 : 2), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 5 : 3), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -8531,8 +8636,8 @@ void HandleUI(void)
 			// Two SNAC port rows only exist while SNAC is the tenant, so
 			// Ethernet and Back slide down the menusub list when it is.
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
-			uint32_t eth_row  = snac ? 3 : 1;
-			uint32_t back_row = snac ? 4 : 2;
+			uint32_t eth_row  = snac ? 4 : 2;
+			uint32_t back_row = snac ? 5 : 3;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -8540,9 +8645,21 @@ void HandleUI(void)
 				minimig_ConfigSnac();
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (snac && (menusub == 1 || menusub == 2)) // SNAC port 1/2 mode
+			else if (menusub == 1 && select) // MT32-pi settings
 			{
-				uint32_t p = menusub - 1;
+				// Re-checked rather than trusting the greying, which is
+				// presentation and not a lock. Opening the page for a device
+				// that is not the current tenant would show settings that
+				// cannot take effect.
+				if (minimig_config.userport == mmup_mp32pi)
+				{
+					menustate = MENU_MT32PI_MAIN1;
+					menusub = 0;
+				}
+			}
+			else if (snac && (menusub == 2 || menusub == 3)) // SNAC port 1/2 mode
+			{
+				uint32_t p = menusub - 2;
 				minimig_config.snac[p] = (minimig_config.snac[p] + 1) % 5;
 				minimig_ConfigSnac();
 				menustate = MENU_AMIGACD_ADVANCED1;
