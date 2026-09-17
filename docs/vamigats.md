@@ -72,10 +72,24 @@ mechanism, not a sanity check, and an unrecognised size fails with nothing but
 
 The encrypted forms are the plain size plus 11 bytes.
 
-**One gap worth knowing before it wastes an evening:** there are branches for
-encrypted 256 KB and 512 KB ROMs but **not** for an encrypted 1 MB one. A 1 MB
-Amiga Forever ROM (1,048,587 bytes) falls straight through to `Unsupported ROM
-file size!`. Use a decrypted 1 MB image, or a 512 KB ROM, in that case.
+**The 1 MB encrypted gap is closed** (2026-09-17). A 1 MB Amiga Forever ROM
+(1,048,587 bytes) used to fall straight through to `Unsupported ROM file size!`;
+it now has a branch of its own. It could not be done the way the other
+encrypted sizes are — `SendFileV2` reads the 11-byte header at the start of
+every call and restarts the key at index 0, and a 1 MB image is one continuous
+stream whose second half carries neither — so it is buffered, decrypted end to
+end, and pushed in the same two halves the plain 1 MB path uses.
+
+**And the ext ROM now decrypts too**, which mattered more. The composite path
+that pairs a main and extended ROM refused every encrypted file, to the log
+only, and then `ApplyConfiguration` fell back to uploading the main ROM alone.
+So a CD32 with encrypted Amiga Forever ROMs came up with **no extended ROM**,
+which does not boot a disc, and nothing on screen said why.
+
+**If a ROM still will not load, the boot screen now says why** rather than only
+`No Kickstart loaded`. The message you are most likely to see is `Encrypted ROM
+but no ROM.KEY found` — the encrypted sizes all carry a `&& keysize` guard, so
+without the key they fail as though the size were wrong.
 
 ## Running a test
 
