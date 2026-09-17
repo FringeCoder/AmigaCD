@@ -212,6 +212,10 @@ enum MENU
 	MENU_AMIGACD_NVRCLEAR2,
 	MENU_AMIGACD_CONFIGS1,
 	MENU_AMIGACD_CONFIGS2,
+	MENU_AMIGACD_DEFAULTS1,
+	MENU_AMIGACD_DEFAULTS2,
+	MENU_AMIGACD_RESET1,
+	MENU_AMIGACD_RESET2,
 	MENU_AMIGACD_CDFILE_SELECTED,
 	MENU_AMIGACD_HDFFILE_SELECTED,
 	MENU_AMIGACD_ADFFILE_SELECTED,
@@ -914,9 +918,9 @@ static constexpr unsigned rowhint_rows(uint32_t mask)
 // anything is wrong.
 #define AMIGACD_MAIN_MENUMASK     0x3FFFu
 #define AMIGACD_SETTINGS_MENUMASK 0x7FFu
-#define AMIGACD_CONFIGS_MENUMASK  0x07u
-#define AMIGACD_ADV_MENUMASK_SNAC 0x7Fu
-#define AMIGACD_ADV_MENUMASK      0x1Fu
+#define AMIGACD_CONFIGS_MENUMASK  0x0Fu
+#define AMIGACD_ADV_MENUMASK_SNAC 0xFFu
+#define AMIGACD_ADV_MENUMASK      0x3Fu
 
 // The hint for the row the cursor is on, in the scrolling line at the bottom.
 //
@@ -7236,10 +7240,17 @@ void HandleUI(void)
 
 	case MENU_MINIMIG_CHIPSET1:
 		helptext_idx = HELPTEXT_CHIPSET;
-		// 15 selectable rows: 0..10 from this fork, 11..12 save states,
-		// 13 = upstream's A2065 Ethernet row (menusub 9 upstream, renumbered
-		// twice on merge), 14 = Back.
-		menumask = 0x7FFF;
+		// 16 selectable rows: 0..11 from this fork (FDD Turbo is 11), 12..13
+		// save states, 14 = upstream's A2065 Ethernet row (menusub 9 upstream,
+		// renumbered twice on merge), 15 = Back.
+		//
+		// This said fifteen rows with the save states at 11..12, which missed
+		// that FDD Turbo below is an eleventh fork row and already held 11. Two
+		// rows drew as selected whenever menusub was 11, and CHIPSET2 read 11
+		// as the save-slot stepper, so FDD Turbo could be highlighted and never
+		// toggled. The row count on this page is stated here and nowhere else,
+		// which is why a miscount here was invisible.
+		menumask = 0xFFFF;
 		OsdSetTitle("System");
 		parentstate = menustate;
 
@@ -7309,7 +7320,7 @@ void HandleUI(void)
 		strcat(s, (minimig_config.memory & 0x40) ? "enabled " : "disabled");
 		OsdWrite(m++, s, menusub == 10, 0);
 		sprintf(s, " FDD Turbo: %s", minimig_config.floppy.speed ? "On" : "Off");
-		MenuWrite(m++, s, menusub == 11, 0);
+		OsdWrite(m++, s, menusub == 11, 0);
 
 		// Save states. The core is the active party in the protocol: these rows
 		// only pick a slot and raise a request bit, the capture itself is
@@ -7324,21 +7335,21 @@ void HandleUI(void)
 
 			strcpy(s, " Save slot : ");
 			strcat(s, config_ss_slot_msg[minimig_config.ss_slot & 3]);
-			OsdWrite(m++, s, menusub == 11, ss_blocked);
+			OsdWrite(m++, s, menusub == 12, ss_blocked);
 
-			amigacd_ss_preview(menusub == 11 && !ss_blocked, minimig_config.ss_slot & 3);
+			amigacd_ss_preview(menusub == 12 && !ss_blocked, minimig_config.ss_slot & 3);
 
-			OsdWrite(m++, " Save state", menusub == 12, ss_blocked);
+			OsdWrite(m++, " Save state", menusub == 13, ss_blocked);
 		}
 
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
-		// Upstream renders this at menusub 9; this fork has four extra rows
-		// ahead of it, so it lands at 13 and Back moves to 14.
-		OsdWrite(m++, s, menusub == 13, 0);
+		// Upstream renders this at menusub 9; this fork has five extra rows
+		// ahead of it, so it lands at 14 and Back moves to 15.
+		OsdWrite(m++, s, menusub == 14, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 14, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 15, 0);
 
 		menustate = MENU_MINIMIG_CHIPSET2;
 		break;
@@ -7488,7 +7499,15 @@ void HandleUI(void)
 				minimig_config.memory ^= 0x40;
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
-			else if (menusub == 11 && !minimig_ss_blocked())
+			else if (menusub == 11)
+			{
+				// FDD Turbo. It had no handler at all: this index was the save
+				// slot's, so the row rendered and did nothing.
+				minimig_config.floppy.speed ^= 1;
+				minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
+				menustate = MENU_MINIMIG_CHIPSET1;
+			}
+			else if (menusub == 12 && !minimig_ss_blocked())
 			{
 				// Save slot 1..4, stored 0..3. Kept in minimig_config so it
 				// survives "Save settings"; it is NOT pushed to status[53:52]
@@ -7501,7 +7520,7 @@ void HandleUI(void)
 				minimig_config.ss_slot = (unsigned char)slot;
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
-			else if (menusub == 12 && select && !minimig_ss_blocked())
+			else if (menusub == 13 && select && !minimig_ss_blocked())
 			{
 				// Everything this needs -- arming the writer included -- is in
 				// the shared helper. This row used to do the raise on its own
@@ -7510,7 +7529,7 @@ void HandleUI(void)
 				minimig_ss_request_save();
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
-			else if (menusub == 13)
+			else if (menusub == 14)
 			{
 				// A2065 ethernet: OFF -> eth0 -> eth1 -> macvlan -> tap0,
 				// skipping anything this box cannot support (no second NIC,
@@ -7527,8 +7546,8 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
 			// Back. Upstream puts the A2065 row at menusub 9 and Back at 10;
-			// this fork has four extra rows ahead of them, so both shift up.
-			else if (menusub == 14)
+			// this fork has five extra rows ahead of them, so both shift up.
+			else if (menusub == 15)
 			{
 				menustate = MENU_MINIMIG_MAIN1;
 				menusub = 8;
@@ -7596,7 +7615,7 @@ void HandleUI(void)
 			/* 9 Save      */ "Write these settings, including what is mounted, as the startup config. Loaded again the next time the core starts.",
 			/*10 Configs   */ "Load a saved config, or save this one to any of ten slots.",
 			/*11 Write mgl */ "Write an .mgl beside the mounted disc, so the MiSTer menu can launch straight into this core with it. Names the core running now.",
-			/*12 Reset     */ "Restart the Amiga. Ctrl+LAlt+RAlt does the same without opening this menu.",
+			/*12 Reset     */ "Restart the Amiga; asks first. Ctrl+LAlt+RAlt does it straight away, without the menu and without asking.",
 			/*13 exit      */ "Close the menu. Esc or F12 does the same from anywhere.",
 		};
 		static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_MAIN_MENUMASK),
@@ -7762,7 +7781,7 @@ void HandleUI(void)
 
 		// The detail line above is paid for here rather than out of the page's
 		// height. Sixteen lines with Reset and exit pinned to the last two
-		// leaves exactly one spare, which the Eject hint at the bottom uses;
+		// leaves exactly one spare, which the hint line at the bottom uses;
 		// without this the hint would silently stop fitting whenever a disc
 		// was mounted, which is precisely when it is wanted.
 		if (!cd_detail) OsdWrite(m++, "", 0, 0);
@@ -7773,8 +7792,8 @@ void HandleUI(void)
 
 		// The blank that used to sit here paid for the Load settings row below.
 		// Sixteen lines with Reset and exit pinned to the last two leaves one
-		// spare, and the Eject hint has it -- the hint being the only place the
-		// Backspace/A+B binding is written down, it does not lose a fight with
+		// spare, and the hint line has it -- the hints being the only place the
+		// Backspace/A+B binding is written down, they do not lose a fight with
 		// a blank line.
 		OsdWrite(m++, " Settings                 \x16", menusub == 7, 0);
 		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
@@ -7801,9 +7820,10 @@ void HandleUI(void)
 		// straight into this core with it. A row rather than the + / - binding
 		// it started as: a keypress announced only in the scrolling helptext is
 		// not a feature anyone finds, and a launcher nobody finds is not a
-		// launcher. The line it occupies is the one the Eject hint had -- the
-		// binding that hint carried is now in the helptext instead, which is
-		// the weaker home, and this is the trade that was chosen deliberately.
+		// launcher. The line it occupies is the one a contextual Eject hint row
+		// used to have. That binding moved to the bottom line, and since the
+		// hints became per-row it is back on the drive rows themselves, which
+		// is where it was legible in the first place.
 		//
 		// Greyed with no disc IMAGE, which includes the physical drive being
 		// selected: a disc in a real tray has no path to put in a file.
@@ -8056,12 +8076,18 @@ void HandleUI(void)
 					                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
 					menustate = MENU_AMIGACD_MAIN1;
 				}
-				else if (df[fu].status & DSK_INSERTED) // eject
-				{
-					df[fu].status = 0;
-					FileClose(&df[fu].file);
-					menustate = MENU_AMIGACD_MAIN1;
-				}
+				// SELECT and the recent key both open a chooser, whether or not
+				// a disk is already in. Upstream ejects instead when one is
+				// (menu.cpp:6860), and this page inherited that: with a disk in
+				// df0 the recent key ejected it rather than listing the disks
+				// you had used -- which is the one moment that list is worth
+				// having, since swapping to disk 2 of a four-disk game is what
+				// it is for. Two presses to swap, and the second one could not
+				// reach the list at all.
+				//
+				// Ejecting is not lost: Backspace and A+B still do it, on this
+				// row and on every other mountable row, which is what the row's
+				// hint says and what the CD row above has always done.
 				else if (select || recent)
 				{
 					// A chosen image overrides any external-drive assignment.
@@ -8070,7 +8096,10 @@ void HandleUI(void)
 					                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
 					ioctl_index = 0;
 					amigacd_fdd_unit = fu;
-					df[fu].status = 0;
+					// The disk in the drive stays in it until another is
+					// chosen. Clearing status here would eject on a browser
+					// CANCEL, which now matters: this branch is reachable with
+					// a disk mounted. InsertFloppy sets status itself.
 					fs_Options = SCANO_DIR;
 					fs_MenuSelect = MENU_AMIGACD_ADFFILE_SELECTED;
 					fs_MenuCancel = MENU_AMIGACD_MAIN1;
@@ -8190,8 +8219,17 @@ void HandleUI(void)
 			}
 			else if (menusub == 12 && select) // Reset
 			{
-				menustate = MENU_NONE1;
-				minimig_reset();
+				// Asks first. The row is pinned second from the bottom, one
+				// row above exit, and what it throws away is everything since
+				// the last save state -- on a machine whose save states are
+				// refused outright on two of its four profiles.
+				//
+				// The keyboard reset is deliberately NOT routed through here.
+				// Ctrl+LAlt+RAlt is a three-key chord nobody presses by
+				// accident, and it is the binding you reach for when the Amiga
+				// is wedged and this menu is the thing that will not open.
+				menustate = MENU_AMIGACD_RESET1;
+				menusub = 0;                 // land on No
 			}
 			else if (menusub == 13 && select) // Exit
 			{
@@ -8580,13 +8618,14 @@ void HandleUI(void)
 			{
 				/* 0 Load     */ "Load one of the saved configs. Restarts the Amiga: the load re-uploads the Kickstart and resets the CPU.",
 				/* 1 Save slot*/ "Save these settings to one of ten slots. The first is the startup config, which is what Save settings on the main page writes.",
-				/* 2 back     */ "Back to the main page.",
+				/* 2 Defaults */ "Put this machine back to the settings it starts with. Asks first. Leaves the discs and hard disks mounted, and does not save.",
+				/* 3 back     */ "Back to the main page.",
 			};
 			static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_CONFIGS_MENUMASK),
 				"AmigaCD configs page: one hint per selectable row");
 			helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
 		}
-		menumask = AMIGACD_CONFIGS_MENUMASK;  // Load(0), Save to slot(1), Back(2)
+		menumask = AMIGACD_CONFIGS_MENUMASK;  // Load(0), Save(1), Defaults(2), Back(3)
 		parentstate = menustate;
 
 		m = 0;
@@ -8596,6 +8635,16 @@ void HandleUI(void)
 		OsdWrite(m++, " Load a config   (resets)", menusub == 0, 0);
 		OsdWrite(m++, " Save to a config slot", menusub == 1, 0);
 
+		// The way back out of a config that boots to a black screen.
+		// amigacd_apply_system() writes a machine's defaults, but it only ever
+		// ran on a SWITCH -- and switching away and back loads that machine's
+		// saved config, not its defaults. So a saved config with a bad ROM
+		// pairing or RAM the game will not take could only be undone by
+		// deleting the file over SSH, from a machine that may well be the one
+		// that will not boot.
+		sprintf(s, " Reset %s to defaults", amigacd_system_name(amigacd_system_shown()));
+		OsdWrite(m++, s, menusub == 2, 0);
+
 		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Save settings on the main", 0, 1);
 		OsdWrite(m++, " page writes the startup", 0, 1);
@@ -8603,7 +8652,7 @@ void HandleUI(void)
 		OsdWrite(m++, " slot in both lists.", 0, 1);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 2, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 3, 0);
 
 		menustate = MENU_AMIGACD_CONFIGS2;
 		break;
@@ -8614,7 +8663,7 @@ void HandleUI(void)
 		{
 			menustate = MENU_NONE1;
 		}
-		else if (back || left || (select && menusub == 2))
+		else if (back || left || (select && menusub == 3))
 		{
 			menustate = MENU_AMIGACD_MAIN1;
 			menusub = 10;                // the Configs row
@@ -8631,6 +8680,133 @@ void HandleUI(void)
 				menustate = MENU_MINIMIG_SAVECONFIG1;
 				menusub = 0;
 			}
+			else if (menusub == 2)
+			{
+				// Land on No. This one resets the machine.
+				menustate = MENU_AMIGACD_DEFAULTS1;
+				menusub = 0;
+			}
+		}
+		break;
+
+	// Confirming the Reset row. Same shape as the two pages below it, and the
+	// same argument: no undo on the other side.
+	case MENU_AMIGACD_RESET1:
+	{
+		menumask = 0x03;
+		parentstate = menustate;
+
+		m = 0;
+		while (m < 4) OsdWrite(m++);
+		sprintf(s, "      Restart the %s?", amigacd_system_name(amigacd_system()));
+		OsdWrite(m++, s);
+		OsdWrite(m++);
+		// Name the save state slot only when one could actually be taken.
+		// Telling an A500 player to save first, when AmigaCD.sv refuses save
+		// states on a 68000, is advice that cannot be followed.
+		if (!minimig_ss_blocked())
+		{
+			OsdWrite(m++, "  Anything since the last", 0, 1);
+			OsdWrite(m++, "  save state is lost.", 0, 1);
+		}
+		else
+		{
+			OsdWrite(m++, "  Anything unsaved is lost,", 0, 1);
+			OsdWrite(m++, "  and this machine cannot", 0, 1);
+			OsdWrite(m++, "  take a save state.", 0, 1);
+		}
+		OsdWrite(m++);
+		OsdWrite(m++, "             No", menusub == 0);
+		OsdWrite(m++, "             Yes", menusub == 1);
+		while (m < OsdGetSize()) OsdWrite(m++);
+
+		menustate = MENU_AMIGACD_RESET2;
+		break;
+	}
+
+	case MENU_AMIGACD_RESET2:
+		if (select && menusub == 1)
+		{
+			menustate = MENU_NONE1;
+			minimig_reset();
+		}
+		else if (select || menu || back || left)
+		{
+			menustate = MENU_AMIGACD_MAIN1;
+			menusub = 12;                // the Reset row
+		}
+		break;
+
+	// Confirming a "Reset <machine> to defaults". Shaped like the Clear NVRAM
+	// page below, and confirmed for the same reason: what is on the other side
+	// of it cannot be undone. Settings are not saved games, but a config you
+	// spent an evening arriving at is no less gone.
+	case MENU_AMIGACD_DEFAULTS1:
+	{
+		menumask = 0x03;
+		parentstate = menustate;
+
+		m = 0;
+		while (m < 3) OsdWrite(m++);
+		sprintf(s, "   Reset %s settings?", amigacd_system_name(amigacd_system()));
+		OsdWrite(m++, s);
+		OsdWrite(m++);
+		// Say what survives, not just what goes. "Reset to defaults" reads as
+		// "lose everything" unless the exceptions are on the page, and the two
+		// that matter are the mounted media -- which this does not touch -- and
+		// the saved config, which is only rewritten if Save settings is pressed
+		// afterwards.
+		OsdWrite(m++, "  RAM, ROMs, CPU and IDE go", 0, 1);
+		OsdWrite(m++, "  back to this machine's own", 0, 1);
+		OsdWrite(m++, "  defaults, and it restarts.", 0, 1);
+		OsdWrite(m++);
+		OsdWrite(m++, "  Discs and hard disks stay", 0, 1);
+		OsdWrite(m++, "  mounted. Nothing is saved", 0, 1);
+		OsdWrite(m++, "  until you Save settings.", 0, 1);
+		OsdWrite(m++);
+		OsdWrite(m++, "             No", menusub == 0);
+		OsdWrite(m++, "             Yes", menusub == 1);
+		while (m < OsdGetSize()) OsdWrite(m++);
+
+		menustate = MENU_AMIGACD_DEFAULTS2;
+		break;
+	}
+
+	case MENU_AMIGACD_DEFAULTS2:
+		if (select && menusub == 1)
+		{
+			// The machine actually running, not amigacd_system_shown(): a
+			// pending switch is committed before this page can be reached (the
+			// main page flushes on every exit), and defaulting to the machine
+			// on the row rather than the one in the core is how you reset the
+			// wrong one.
+			const int sys = amigacd_system();
+
+			// Same call the first-time-on-this-machine path makes, and the same
+			// report when a default ROM is missing -- the machine still comes
+			// up, as whatever Amiga the old ROM makes it, and nothing else on
+			// screen would say so.
+			if (!amigacd_apply_system(sys))
+			{
+				const char *mname = 0;
+				amigacd_default_rom_names(sys, &mname, 0);
+				char msg[128];
+				snprintf(msg, sizeof(msg), "%s ROM %s not found",
+				         amigacd_system_name(sys), mname);
+				Info(msg, 2500);
+			}
+
+			// apply_system pushes CPU, chipset and floppy itself, but memory
+			// and the ROMs only take effect through ApplyConfiguration, which
+			// is what minimig_reset() runs. Without this the page would claim
+			// defaults the running machine does not have.
+			menustate = MENU_NONE1;
+			minimig_reset();
+		}
+		else if (select || menu || back || left)
+		{
+			menustate = MENU_AMIGACD_CONFIGS1;
+			menusub = 2;
 		}
 		break;
 
@@ -8722,7 +8898,8 @@ void HandleUI(void)
 				/* 3 Port 2   */ "What the pad in SNAC port 2 is: off, pad, mouse, both at once, or a light gun.",
 				/* 4 Ethernet */ "The A2065 Zorro II Ethernet card. Off by default; the FPGA half is there either way.",
 				/* 5 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
-				/* 6 back     */ "Back to the main page.",
+				/* 6 FDD Turbo*/ "Load floppies faster than the real drive could. Off is authentic; a few disks that time themselves against the drive need it off.",
+				/* 7 back     */ "Back to the main page.",
 			};
 			static const char *const tips_plain[] =
 			{
@@ -8731,6 +8908,7 @@ void HandleUI(void)
 				tips_snac[4],
 				tips_snac[5],
 				tips_snac[6],
+				tips_snac[7],
 			};
 			static_assert(sizeof(tips_snac) / sizeof(tips_snac[0]) == rowhint_rows(AMIGACD_ADV_MENUMASK_SNAC),
 				"AmigaCD advanced page with SNAC: one hint per selectable row");
@@ -8741,7 +8919,7 @@ void HandleUI(void)
 				: amigacd_rowhint(tips_plain, sizeof(tips_plain) / sizeof(tips_plain[0]), menusub);
 		}
 		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet,
-		// Fast-IDE, Back
+		// Fast-IDE, FDD Turbo, Back
 		menumask = snac ? AMIGACD_ADV_MENUMASK_SNAC : AMIGACD_ADV_MENUMASK;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
@@ -8843,8 +9021,26 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == (uint32_t)(snac ? 5 : 3), !ok);
 		}
 
+		// Floppy turbo. minimig_config.floppy.speed has always existed, is
+		// saved with the config and is pushed to the core by
+		// amigacd_apply_system -- but the only rows that could change it are on
+		// MENU_MINIMIG_CHIPSET1 and MENU_MINIMIG_DISK1, and MENU_MINIMIG_MAIN1
+		// redirects to this variant before either can be opened. So the
+		// setting was live, persistent, and unreachable.
+		//
+		// It matters here because this OSD draws two floppy rows and three of
+		// its four machines boot from floppy: a four-disk A500 game at the real
+		// drive's rate is the slowest thing this core does.
+		//
+		// Here rather than on Settings for two reasons. Settings is exactly
+		// full -- fifteen lines and Back, once the NVRAM detail line is up --
+		// and this page is where the core's deviations from the authentic
+		// machine already live, which is what turbo loading is.
+		sprintf(s, " FDD Turbo: %s", minimig_config.floppy.speed ? "On" : "Off");
+		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 6 : 4), 0);
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 6 : 4), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 7 : 5), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -8867,7 +9063,8 @@ void HandleUI(void)
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
 			uint32_t eth_row  = snac ? 4 : 2;
 			uint32_t ide_row  = snac ? 5 : 3;
-			uint32_t back_row = snac ? 6 : 4;
+			uint32_t fdd_row  = snac ? 6 : 4;
+			uint32_t back_row = snac ? 7 : 5;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -8921,6 +9118,15 @@ void HandleUI(void)
 					minimig_config.ide_cfg ^= 0x20;
 					menustate = MENU_AMIGACD_ADVANCED1;
 				}
+			}
+			else if (menusub == fdd_row) // FDD Turbo
+			{
+				// minimig_ConfigFloppy carries drives and speed together, so
+				// the drive count has to be passed through unchanged -- the
+				// same call the two stranded pages make.
+				minimig_config.floppy.speed ^= 1;
+				minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
+				menustate = MENU_AMIGACD_ADVANCED1;
 			}
 			else if (menusub == back_row && select) // Back
 			{
@@ -8995,6 +9201,13 @@ void HandleUI(void)
 		if (!mgl->done) mgl_selpath(selPath, sizeof(selPath));
 		memcpy(Selected_F[amigacd_fdd_unit], selPath, sizeof(Selected_F[0]));
 		if (mgl->done) recent_update(SelectedDir, selPath, SelectedLabel, AMIGACD_RECENT_DF(amigacd_fdd_unit));
+		// Swapping a disk lands here with the old one still open. InsertFloppy
+		// calls FileOpenEx straight onto drive->file without closing what was
+		// there, so the outgoing descriptor has to be closed here -- it used to
+		// be closed by the eject-on-select branch that a swap was forced
+		// through. FileClose on a closed file is a no-op, so the first insert
+		// into an empty drive is unaffected.
+		if (df[amigacd_fdd_unit].status & DSK_INSERTED) FileClose(&df[amigacd_fdd_unit].file);
 		InsertFloppy(&df[amigacd_fdd_unit], selPath);
 		menusub = 2 + amigacd_fdd_unit;  // back to the row that opened the browser
 		menustate = MENU_AMIGACD_MAIN1;
