@@ -874,6 +874,33 @@ static int recent_open(int idx)
 // which on the console variant redirects to MENU_AMIGACD_MAIN1 where row 12 is
 // exit. Landing on exit after backing out of a config list is not what
 // backing out means.
+// Is an optical drive attached at all?
+//
+// physical_disc_open() answers this properly, but by opening the device --
+// worker thread, ring buffer, speed cap -- which is not something a menu draw
+// can do on every refresh. The device nodes are the cheap half of the same
+// question, and they are the half that separates "no drive" from "a drive with
+// an empty tray". Those two produced the same row text and the same toast, and
+// they are different problems: one is a cable, the other is a disc.
+//
+// /dev/sr0../dev/sr7 is the range physical_disc.cpp's find_drive() scans, so
+// the two agree on what counts as a drive. An already-open device is checked
+// first, since a preferred device set from elsewhere need not be in that range.
+static int amigacd_optical_drive_present()
+{
+	const char *open_dev = physical_disc_device();
+	if (open_dev && open_dev[0]) return 1;
+
+	for (int i = 0; i < 8; i++)
+	{
+		char dev[16];
+		struct stat st;
+		snprintf(dev, sizeof(dev), "/dev/sr%d", i);
+		if (!stat(dev, &st)) return 1;
+	}
+	return 0;
+}
+
 static void amigacd_loadcfg_back()
 {
 	if (is_amigacd())
@@ -7416,10 +7443,20 @@ void HandleUI(void)
 		// sentinel in hardfile[0].filename, which is what ide_open matches on.
 		// Re-selecting while mounted re-reads the TOC, i.e. disc swap.
 		{
+			// Probed once and used twice, for the text and for the greying:
+			// the probe is eight stat() calls and this row redraws constantly.
+			const int have_drive = amigacd_has_cd && amigacd_optical_drive_present();
+
 			strcpy(s, " Real CD  : ");
 			if (!amigacd_has_cd) strcat(s, "-");
-			else strcat(s, ide_inst[0].drive[0].phys ? "re-read TOC" : "mount drive");
-			OsdWrite(m++, s, menusub == 1, !amigacd_has_cd);
+			else if (ide_inst[0].drive[0].phys) strcat(s, "re-read TOC");
+			// "mount drive" on a machine with no drive attached invites a press
+			// that cannot work. Say so instead, and grey it -- there is nothing
+			// to mount until a drive appears. SELECT still answers, because
+			// greying here is presentation and not a lock.
+			else if (!have_drive) strcat(s, "* no drive found *");
+			else strcat(s, "mount drive");
+			OsdWrite(m++, s, menusub == 1, !have_drive && !ide_inst[0].drive[0].phys);
 		}
 
 		// df0 and df1. The core has always presented two drives -- floppy.drives
@@ -7715,7 +7752,14 @@ void HandleUI(void)
 						// would make selecting the drive with an empty tray
 						// impossible, and that is exactly the state you want to
 						// be able to sit in before putting a disc in.
-						Info("No readable disc", 2000);
+						// Two different failures reached this line. A drive
+						// with an empty tray is a disc problem; no drive at all
+						// is not, and telling someone to check the disc when
+						// there is nowhere to put one wastes their time.
+						if (!amigacd_optical_drive_present())
+							Info("No CD-ROM drive found", 2500);
+						else
+							Info("No readable disc", 2000);
 						menustate = MENU_AMIGACD_MAIN1;
 					}
 				}
