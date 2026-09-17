@@ -47,8 +47,19 @@ question T25 settled in the core repo.
 
 Taking it as a merge would either duplicate the modules or silently replace a
 version the fork has been testing against, and the symptom is a floppy that does
-not read on hardware nobody has in front of them. Left for a sync that can be
-given that comparison properly.
+not read on hardware nobody has in front of them.
+
+**Compared 2026-09-17, and it is a downgrade.** The comparison is written up as
+T26 in the core repo's `docs/core-accuracy-todo.md`. In short: we lack nothing
+`c1134ac` adds, we are ahead in six ways -- including `MiSTerFloppyIBM.v`, a
+three-tenant user port, two retimings in `paula_floppy.v`, a bench for the
+`_READY` rule, and the entire userspace half, which upstream `Main_MiSTer` does
+not have at all -- and upstream's `misterfloppy.qip` lists a Verilog file that
+commit does not ship.
+
+So the Minimig-AGA pin stays at `da7632e` deliberately, not for want of effort.
+Revisit when upstream adds the missing file, or when the MiSTerFloppy project
+moves past the snapshot both trees share.
 
 **Check what your local clone is actually on.** As of 2026-08-07 the
 `upstream/main-cd32-cdtv` working tree was checked out on `master` — the branch
