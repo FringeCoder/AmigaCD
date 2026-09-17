@@ -27,6 +27,12 @@ The disc path is written in whichever form reads back to the same file:
 relative to the core's home directory when the disc lives under it, absolute
 when it does not.
 
+**An existing file is edited, not replaced.** Only the text between the `<rbf>`
+tags changes; a `<reset/>`, a second `<file>`, a comment — anything you added by
+hand stays. The toast says which of three things happened: `Wrote` for a new
+file, `Updated` for an edited one, `Already current` when it already names this
+core.
+
 The row greys out when there is no disc image mounted — including when the
 **physical drive** is selected, since a real disc in a tray has no path to put
 in a file.
