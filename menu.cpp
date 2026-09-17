@@ -209,6 +209,8 @@ enum MENU
 	MENU_AMIGACD_ADVANCED2,
 	MENU_AMIGACD_NVRCLEAR1,
 	MENU_AMIGACD_NVRCLEAR2,
+	MENU_AMIGACD_CONFIGS1,
+	MENU_AMIGACD_CONFIGS2,
 	MENU_AMIGACD_CDFILE_SELECTED,
 	MENU_AMIGACD_HDFFILE_SELECTED,
 	MENU_AMIGACD_ADFFILE_SELECTED,
@@ -974,13 +976,31 @@ static void amigacd_loadcfg_back()
 {
 	if (is_amigacd())
 	{
-		menustate = MENU_AMIGACD_MAIN1;
-		menusub = 10;                      // the Load settings row
+		menustate = MENU_AMIGACD_CONFIGS1;
+		menusub = 0;                       // the Load a config row
 	}
 	else
 	{
 		menustate = MENU_MINIMIG_MAIN1;
 		menusub = 12;                      // the full OSD's link to this page
+	}
+}
+
+// And leaving the shared Save config page, which had no route from this OSD at
+// all until now. Same shape as the two above: its own row on the Configs page
+// rather than MENU_MINIMIG_MAIN1 row 13, which on this variant redirects to
+// MENU_AMIGACD_MAIN1 where row 13 is exit.
+static void amigacd_savecfg_back()
+{
+	if (is_amigacd())
+	{
+		menustate = MENU_AMIGACD_CONFIGS1;
+		menusub = 1;                       // the Save to a config slot row
+	}
+	else
+	{
+		menustate = MENU_MINIMIG_MAIN1;
+		menusub = 13;                      // the full OSD's link to this page
 	}
 }
 
@@ -6998,14 +7018,12 @@ void HandleUI(void)
 				minimig_cfg_save(menusub);
 				minimig_mgl_save();
 			}
-			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 13;
+			amigacd_savecfg_back();
 		}
 		else
 		if (menu || left) // exit menu
 		{
-			menustate = MENU_MINIMIG_MAIN1;
-			menusub = 13;
+			amigacd_savecfg_back();
 		}
 		break;
 
@@ -7625,7 +7643,16 @@ void HandleUI(void)
 		// all. It says (resets) because it does: minimig_cfg_load runs
 		// ApplyConfiguration, which halts the CPU, resets it and re-uploads the
 		// Kickstart.
-		OsdWrite(m++, " Load settings   (resets)", menusub == 10, 0);
+		// Was "Load settings", which opened the config list directly. It is a
+		// submenu now so that SAVING to a slot has somewhere to live: the list
+		// offers ten configs and Save settings above only ever writes slot 0,
+		// so a slot could be loaded that nothing in this OSD could write. The
+		// asymmetry arrived with the Load row and is closed here.
+		//
+		// Save settings keeps its own row and its single press. It is the one
+		// of the two that gets used, and putting it behind a submenu to tidy
+		// the page would be paying for the tidying with the common case.
+		OsdWrite(m++, " Configs                  \x16", menusub == 10, 0);
 		// Writes a .mgl beside the mounted disc so the MiSTer menu can launch
 		// straight into this core with it. A row rather than the + / - binding
 		// it started as: a keypress announced only in the scrolling helptext is
@@ -7983,15 +8010,9 @@ void HandleUI(void)
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 10 && select) // Load settings
+			else if (menusub == 10 && select) // Configs
 			{
-				// Straight to the shared Load config page. It lists the
-				// startup config -- which is what Save settings above writes,
-				// minimig_cfg_save(0) -- and any others on the card. On a
-				// machine only ever used through this OSD the others will be
-				// absent, and the page simply shows the one: revert, which is
-				// the case this row exists for.
-				menustate = MENU_MINIMIG_LOADCONFIG1;
+				menustate = MENU_AMIGACD_CONFIGS1;
 				menusub = 0;
 			}
 			else if (menusub == 11 && select) // Write .mgl for this disc
@@ -8369,6 +8390,65 @@ void HandleUI(void)
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 7;   // Settings row -- 5 was Hard Disk 1, see above
+			}
+		}
+		break;
+
+	// Loading and saving whole configurations.
+	//
+	// Its own page rather than two more rows on a main page that is exactly
+	// full, and rather than the single Load row it replaces. That row opened
+	// the shared list straight away, which was fine until you noticed the list
+	// offers ten slots and Save settings only ever writes the first -- so a
+	// slot could be loaded that nothing here could put anything in.
+	case MENU_AMIGACD_CONFIGS1:
+	{
+		OsdSetTitle("Configs", 0);
+		helptext_idx = 0;
+		menumask = 0x07;                 // Load(0), Save to slot(1), Back(2)
+		parentstate = menustate;
+
+		m = 0;
+		OsdWrite(m++, "", 0, 0);
+		// (resets) because it does: minimig_cfg_load runs ApplyConfiguration,
+		// which halts the CPU, resets it and re-uploads the Kickstart.
+		OsdWrite(m++, " Load a config   (resets)", menusub == 0, 0);
+		OsdWrite(m++, " Save to a config slot", menusub == 1, 0);
+
+		OsdWrite(m++, "", 0, 0);
+		OsdWrite(m++, " Save settings on the main", 0, 1);
+		OsdWrite(m++, " page writes the startup", 0, 1);
+		OsdWrite(m++, " config, which is the first", 0, 1);
+		OsdWrite(m++, " slot in both lists.", 0, 1);
+
+		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 2, 0);
+
+		menustate = MENU_AMIGACD_CONFIGS2;
+		break;
+	}
+
+	case MENU_AMIGACD_CONFIGS2:
+		if (menu)
+		{
+			menustate = MENU_NONE1;
+		}
+		else if (back || left || (select && menusub == 2))
+		{
+			menustate = MENU_AMIGACD_MAIN1;
+			menusub = 10;                // the Configs row
+		}
+		else if (select)
+		{
+			if (menusub == 0)
+			{
+				menustate = MENU_MINIMIG_LOADCONFIG1;
+				menusub = 0;
+			}
+			else if (menusub == 1)
+			{
+				menustate = MENU_MINIMIG_SAVECONFIG1;
+				menusub = 0;
 			}
 		}
 		break;
