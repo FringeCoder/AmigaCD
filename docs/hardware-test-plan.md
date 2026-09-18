@@ -1,7 +1,7 @@
 # Hardware test plan
 
 Everything in PRs #52–#57, plus the menu fixes added since, was written without
-a machine. Twenty-nine changes, none verified. This is the list, ordered so
+a machine. Thirty-two changes, none verified. This is the list, ordered so
 that the things other things depend on come first.
 
 The value here is not the steps — those are mostly obvious — it is the **failure
@@ -112,8 +112,15 @@ too. Both now open a chooser with a disk already in.
 
 | Check | Pass |
 |---|---|
-| `Advanced -> FDD Turbo` | Reads `On`/`Off` and toggles. It has never been reachable from this OSD, so **there is no prior behaviour to compare against** |
+| `Advanced -> Drives` | Opens the new page. FDD Turbo moved here from Advanced |
+| `Drives -> FDD Turbo` | Reads `On`/`Off` and toggles. It has never been reachable from this OSD before #59, so **there is no prior behaviour to compare against** |
 | With it On, load a multi-disk ADF game | Faster than with it Off. No difference means the setting is not reaching the core |
+| `Drives -> df0 drive` / `df1 drive` | Cycles off -> the drives the board actually carries. **This is the same walk as LEFT/RIGHT on the main page's Floppy rows, through one shared helper** -- if the two disagree, the extraction is wrong |
+| A drive already taken by the other unit | Skipped. An IBM/PC cable carries two, so 3 and 4 are skipped on one |
+| With the User Port set to anything but MiSTer Floppy | Both drive rows greyed, and two lines say to change the User Port. SELECT on a greyed row does nothing |
+| The `df0`/`df1` status lines below | Show the mounted image, a padlock when not writable, and the flux mark on SCP/IPF. Informational only -- **mounting stays on the main page** |
+| LEFT/RIGHT on the main page's Floppy rows | **Still works.** The shortcut was kept deliberately; removing it to reward the new page would be a regression |
+| Back from Drives | Returns to **Advanced**, on the Drives row -- which is row 6 with SNAC as the user port tenant and row 4 without |
 | `Configs -> Reset <machine> to defaults` | Names the machine you are on. Asks. `No` returns to Configs |
 | `Yes` | RAM, ROMs, CPU and IDE go back to the profile, and the machine restarts |
 | Discs and hard disks after it | **Still mounted.** The page promises this |
@@ -147,6 +154,20 @@ reason: the check is that it stays quiet, and if it ever speaks, believe it --
 the Minimig System page hid its Ethernet row this way for several commits.
 
 ---
+
+### 1e2. The save state preview draw path
+
+Rewritten to build in a cached shadow and copy once, and to decache the image.
+Both came from reviewing theshaneobrien's overlay PoC; neither cost is measurable
+from here.
+
+| Check | Pass |
+|---|---|
+| Arrow between save slots on `Settings` | The preview changes **without a visible stall**. It used to clear the bank with a per-pixel loop and blend into uncached DDR -- two full passes, ~197 ms each at 1080p on Shane's measurement. If it still hitches, the shadow is not helping and the cost is elsewhere |
+| At 1080p versus 720p | Both feel the same. A cost that scales hard with resolution means the DDR pass still dominates |
+| **Save a slot, view it, re-save the same slot, view it again** | The **second** view shows the **new** capture. This is the repeat-image bug: imlib keys its cache on the path and a thumbnail is overwritten in place, so a stale decode shows the previous capture |
+| Move off the slot and back repeatedly | No leak and no slowdown over a few dozen passes -- the shadow is malloc'd per draw now |
+| A slot with no thumbnail, then one with | Falls back to the core's own video, then draws; no black frame held |
 
 ### 1f. Screen position, and that it is per video mode
 

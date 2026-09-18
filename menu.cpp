@@ -207,6 +207,8 @@ enum MENU
 	MENU_AMIGACD_SETTINGS1,
 	MENU_AMIGACD_SETTINGS2,
 	MENU_AMIGACD_ADVANCED1,
+	MENU_AMIGACD_DRIVES1,
+	MENU_AMIGACD_DRIVES2,
 	MENU_AMIGACD_ADVANCED2,
 	MENU_AMIGACD_NVRCLEAR1,
 	MENU_AMIGACD_NVRCLEAR2,
@@ -908,6 +910,73 @@ static int recent_open(int idx)
 // exit. Landing on exit after backing out of a config list is not what
 // backing out means.
 
+// Step df<fu>'s external-drive assignment. 0 means "use an image", 1..4 name a
+// drive on the MiSTer Floppy board.
+//
+// A helper because there are two ways in now: LEFT/RIGHT on the main page's
+// floppy rows, which is the shortcut, and the explicit rows on the Drives page,
+// which is where it is findable. Two copies of a walk with this many skip
+// conditions is two copies that drift.
+static void amigacd_cycle_extdrive(int fu, int forward)
+{
+	// driveMask is which external drives physically exist. An IBM/PC cable only
+	// carries two, so skip 3 and 4 rather than offer drives that cannot answer.
+	uint16_t mask16 = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
+	uint8_t  driveMask = 0x0F;
+	if ((mask16 & 64) && (mask16 & 128)) driveMask &= 0x03;
+
+	if (df[fu].status & DSK_INSERTED)   // an image was mounted; eject it
+	{
+		FileClose(&df[fu].file);
+		if (df[fu].fluxFile) df[fu].fluxFile->closeFile();
+	}
+
+	// Skip anything absent or already claimed by the other unit; fall back to
+	// image after a full lap.
+	bool inUse = false;
+	int  loops = 0;
+	do {
+		int e = minimig_config.floppy.extDrives[fu];
+		if (forward) e = (e + 1) % 5;
+		else         e = e ? (e - 1) : 4;
+		minimig_config.floppy.extDrives[fu] = (unsigned char)e;
+
+		inUse = false;
+		if (e)
+		{
+			if (!(driveMask & (1 << (e - 1)))) inUse = true;
+			else for (int d = 0; d < 4; d++)
+				if (d != fu && minimig_config.floppy.extDrives[d] == e) inUse = true;
+		}
+		loops++;
+	} while (inUse && loops <= 5);
+	if (inUse) minimig_config.floppy.extDrives[fu] = 0;
+
+	df[fu].status = 0;
+	minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
+	                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
+}
+
+// How an external-drive assignment reads. Shared by the main page's floppy rows
+// and the Drives page so the two cannot describe the same setting differently.
+//
+// Letters vs digits track the detected drive type, matching Rob's rendering --
+// A/B for IBM/PC, 0/1 for Shugart, and 0/A when the board has not been detected
+// and we do not yet know which.
+static void amigacd_extdrive_name(int ext, uint16_t osdMask, char *out, size_t outsz)
+{
+	if (ext < 1 || ext > 4) { snprintf(out, outsz, "off"); return; }
+
+	// 1/2 are the pair a Shugart or IBM cable exposes and get the detected-type
+	// label; 3/4 only exist on a 4-drive setup.
+	if (ext > 2) { snprintf(out, outsz, "External Drive %s", (ext == 3) ? "2" : "3"); return; }
+
+	const char *n = (osdMask & 64) ? ((osdMask & 128) ? ((ext == 1) ? "A" : "B")
+	                                                  : ((ext == 1) ? "0" : "1"))
+	                               : ((ext == 1) ? "0/A" : "1/B");
+	snprintf(out, outsz, "External Drive %s", n);
+}
+
 // Rows a menumask selects. Every mask below is a contiguous run from bit 0,
 // so this is simply the row count; written as a popcount because that stays
 // correct if a page ever grows a gap.
@@ -930,6 +999,7 @@ static constexpr unsigned rowhint_rows(uint32_t mask)
 #define AMIGACD_CONFIGS_MENUMASK  0x0Fu
 #define AMIGACD_ADV_MENUMASK_SNAC 0xFFu
 #define AMIGACD_ADV_MENUMASK      0x3Fu
+#define AMIGACD_DRIVES_MENUMASK   0x0Fu
 
 // The hint for the row the cursor is on, in the scrolling line at the bottom.
 //
@@ -7741,23 +7811,15 @@ void HandleUI(void)
 			}
 			else
 			{
-				// No image: show the external drive assignment instead. Letters
-				// vs digits track the detected drive type, matching Rob's
-				// rendering -- A/B for IBM/PC, 0/1 for Shugart.
+				// No image: show the external drive assignment instead, through
+				// the same namer the Drives page uses.
 				int ext = (minimig_config.userport == mmup_misterfloppy)
 				        ? minimig_config.floppy.extDrives[fu] : 0;
 				if (ext >= 1 && ext <= 4)
 				{
-					// 1/2 are the pair a Shugart or IBM cable exposes and get the
-					// detected-type label; 3/4 only exist on a 4-drive setup.
-					strcat(s, "External Drive ");
-					if (ext <= 2)
-					{
-						if (osdMask & 64) strcat(s, (osdMask & 128) ? ((ext == 1) ? "A" : "B")
-						                                            : ((ext == 1) ? "0" : "1"));
-						else              strcat(s, (ext == 1) ? "0/A" : "1/B");
-					}
-					else strcat(s, (ext == 3) ? "2" : "3");
+					char en[32];
+					amigacd_extdrive_name(ext, osdMask, en, sizeof(en));
+					strcat(s, en);
 				}
 				else strcat(s, "* no disk *");
 			}
@@ -8042,47 +8104,12 @@ void HandleUI(void)
 				int fu = menusub - 2;
 				if (left || right || minus || plus)
 				{
-					// Cycle the external-drive assignment. LEFT/RIGHT is the binding that
-					// matters: minus/plus are the keyboard -/+ keys only, so on a gamepad
-					// this was unreachable.
-					//
-					// driveMask is which external drives physically exist. An IBM/PC cable
-					// only carries two, so skip 3 and 4 rather than offer drives that
-					// cannot answer.
-					uint16_t mask16 = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
-					uint8_t  driveMask = 0x0F;
-					if ((mask16 & 64) && (mask16 & 128)) driveMask &= 0x03;
-
-					if (df[fu].status & DSK_INSERTED)   // an image was mounted; eject it
-					{
-						FileClose(&df[fu].file);
-						if (df[fu].fluxFile) df[fu].fluxFile->closeFile();
-					}
-
-					// 0 = image, 1..4 = external drive. Skip anything absent or already
-					// claimed by the other unit; fall back to image after a full lap.
-					bool inUse = false;
-					int  loops = 0;
-					do {
-						int e = minimig_config.floppy.extDrives[fu];
-						if (right || plus) e = (e + 1) % 5;
-						else               e = e ? (e - 1) : 4;
-						minimig_config.floppy.extDrives[fu] = (unsigned char)e;
-
-						inUse = false;
-						if (e)
-						{
-							if (!(driveMask & (1 << (e - 1)))) inUse = true;
-							else for (int d = 0; d < 4; d++)
-								if (d != fu && minimig_config.floppy.extDrives[d] == e) inUse = true;
-						}
-						loops++;
-					} while (inUse && loops <= 5);
-					if (inUse) minimig_config.floppy.extDrives[fu] = 0;
-
-					df[fu].status = 0;
-					minimig_ConfigFloppyExt(minimig_config.floppy.extDrives[0], minimig_config.floppy.extDrives[1],
-					                        minimig_config.floppy.extDrives[2], minimig_config.floppy.extDrives[3]);
+					// The shortcut. LEFT/RIGHT is the binding that matters:
+					// minus/plus are the keyboard -/+ keys only, so on a gamepad
+					// this was unreachable. Kept alongside the explicit rows on
+					// the Drives page -- removing a working shortcut to reward
+					// the new page would be a regression for anyone using it.
+					amigacd_cycle_extdrive(fu, right || plus);
 					menustate = MENU_AMIGACD_MAIN1;
 				}
 				// SELECT and the recent key both open a chooser, whether or not
@@ -8747,6 +8774,127 @@ void HandleUI(void)
 		}
 		break;
 
+	// The MiSTer Floppy board: which real drive each df unit uses, and turbo.
+	//
+	// Exists because the external-drive assignment had no row at all. It was a
+	// LEFT/RIGHT binding on the main page's floppy rows -- the least
+	// discoverable control in this OSD, and the per-row hints only made it
+	// described rather than visible. FDD Turbo came here from Advanced to sit
+	// with it; the main page keeps its mount rows, because mounting an image is
+	// the common case and does not belong behind a submenu.
+	case MENU_AMIGACD_DRIVES1:
+	{
+		OsdSetTitle("Drives", 0);
+
+		const int mf = (minimig_config.userport == mmup_misterfloppy);
+		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
+
+		{
+			static const char *const tips[] =
+			{
+				/* 0 Ext df0  */ "Which real drive on the MiSTer Floppy board df0 uses. Off means df0 uses a mounted image instead. Left and right on the main page's Floppy 0 row does the same.",
+				/* 1 Ext df1  */ "Which real drive df1 uses. A drive already taken by df0 is skipped, and an IBM/PC cable only carries two.",
+				/* 2 FDD Turbo*/ "Load floppies faster than the real drive could. Off is authentic; a few disks that time themselves against the drive need it off.",
+				/* 3 back     */ "Back to Advanced.",
+			};
+			static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_DRIVES_MENUMASK),
+				"AmigaCD drives page: one hint per selectable row");
+			helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
+		}
+		menumask = AMIGACD_DRIVES_MENUMASK;   // Ext df0(0), Ext df1(1), Turbo(2), Back(3)
+		parentstate = menustate;
+
+		m = 0;
+		OsdWrite(m++, "", 0, 0);
+
+		// Greyed when the user port is not the floppy board, for the same
+		// reason the main page greys the assignment out of its rows: the
+		// setting is stored either way but nothing is listening.
+		for (int fu = 0; fu < 2; fu++)
+		{
+			char en[32];
+			amigacd_extdrive_name(mf ? minimig_config.floppy.extDrives[fu] : 0,
+			                      osdMask, en, sizeof(en));
+			sprintf(s, " df%d drive : %.18s", fu, en);
+			OsdWrite(m++, s, menusub == (uint32_t)fu, !mf);
+		}
+
+		OsdWrite(m++, "", 0, 0);
+		sprintf(s, " FDD Turbo : %s", minimig_config.floppy.speed ? "On" : "Off");
+		OsdWrite(m++, s, menusub == 2, 0);
+
+		// What is actually in each unit, including whether it can be written.
+		// Informational: the mount rows are on the main page and duplicating
+		// them here would give two places to change one thing.
+		OsdWrite(m++, "", 0, 0);
+		for (int fu = 0; fu < 2; fu++)
+		{
+			strcpy(s, "  ");
+			if (df[fu].status & DSK_INSERTED)
+			{
+				char *p = strrchr(df[fu].name, '/');
+				char nm[32] = {};
+				snprintf(nm, sizeof(nm), "%s", p ? p + 1 : df[fu].name);
+				sprintf(s, "  df%d %.20s", fu, nm);
+				// Flux images are read-only by design (InsertFloppy omits
+				// DSK_WRITABLE), so the padlock is expected on SCP and IPF.
+				if (df[fu].status & DSK_FLUXMODE)    strcat(s, " \x1B");
+				if (!(df[fu].status & DSK_WRITABLE)) strcat(s, " \x17");
+			}
+			else sprintf(s, "  df%d empty", fu);
+			OsdWrite(m++, s, 0, 1);
+		}
+
+		if (!mf)
+		{
+			OsdWrite(m++, "", 0, 0);
+			OsdWrite(m++, "  Set the User Port to MiSTer", 0, 1);
+			OsdWrite(m++, "  Floppy to use real drives.", 0, 1);
+		}
+
+		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 3, 0);
+
+		menustate = MENU_AMIGACD_DRIVES2;
+		break;
+	}
+
+	case MENU_AMIGACD_DRIVES2:
+		if (menu)
+		{
+			menustate = MENU_NONE1;
+		}
+		else if (back || left || (select && menusub == 3))
+		{
+			menustate = MENU_AMIGACD_ADVANCED1;
+			// The Drives row on Advanced, which moves with SNAC tenancy the
+			// same way every row below the port rows does.
+			menusub = (minimig_config.userport == mmup_snacpsx) ? 6 : 4;
+		}
+		else if (select || right || minus || plus)
+		{
+			if (menusub == 0 || menusub == 1)
+			{
+				// Re-checked rather than trusting the greying, which is
+				// presentation and not a lock.
+				if (minimig_config.userport == mmup_misterfloppy)
+				{
+					amigacd_cycle_extdrive(menusub, !minus);
+					menustate = MENU_AMIGACD_DRIVES1;
+				}
+			}
+			else if (menusub == 2)
+			{
+				// minimig_ConfigFloppy carries drives and speed together, so the
+				// drive count has to be passed through unchanged -- the same
+				// call the two stranded upstream pages make.
+				minimig_config.floppy.speed ^= 1;
+				minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
+				menustate = MENU_AMIGACD_DRIVES1;
+			}
+		}
+		break;
+
 	// Confirming a "Reset <machine> to defaults". Shaped like the Clear NVRAM
 	// page below, and confirmed for the same reason: what is on the other side
 	// of it cannot be undone. Settings are not saved games, but a config you
@@ -8908,7 +9056,7 @@ void HandleUI(void)
 				/* 3 Port 2   */ "What the pad in SNAC port 2 is: off, pad, mouse, both at once, or a light gun.",
 				/* 4 Ethernet */ "The A2065 Zorro II Ethernet card. Off by default; the FPGA half is there either way.",
 				/* 5 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
-				/* 6 FDD Turbo*/ "Load floppies faster than the real drive could. Off is authentic; a few disks that time themselves against the drive need it off.",
+				/* 6 Drives   */ "The MiSTer Floppy board: which real drive each df unit uses, and floppy turbo.",
 				/* 7 back     */ "Back to the main page.",
 			};
 			static const char *const tips_plain[] =
@@ -9031,23 +9179,9 @@ void HandleUI(void)
 			OsdWrite(m++, s, menusub == (uint32_t)(snac ? 5 : 3), !ok);
 		}
 
-		// Floppy turbo. minimig_config.floppy.speed has always existed, is
-		// saved with the config and is pushed to the core by
-		// amigacd_apply_system -- but the only rows that could change it are on
-		// MENU_MINIMIG_CHIPSET1 and MENU_MINIMIG_DISK1, and MENU_MINIMIG_MAIN1
-		// redirects to this variant before either can be opened. So the
-		// setting was live, persistent, and unreachable.
-		//
-		// It matters here because this OSD draws two floppy rows and three of
-		// its four machines boot from floppy: a four-disk A500 game at the real
-		// drive's rate is the slowest thing this core does.
-		//
-		// Here rather than on Settings for two reasons. Settings is exactly
-		// full -- fifteen lines and Back, once the NVRAM detail line is up --
-		// and this page is where the core's deviations from the authentic
-		// machine already live, which is what turbo loading is.
-		sprintf(s, " FDD Turbo: %s", minimig_config.floppy.speed ? "On" : "Off");
-		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 6 : 4), 0);
+		// FDD Turbo moved to the Drives page, which is where the rest of the
+		// floppy hardware now lives. This row is the way in.
+		OsdWrite(m++, " Drives                   \x16", menusub == (uint32_t)(snac ? 6 : 4), 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
 		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 7 : 5), 0);
@@ -9073,7 +9207,7 @@ void HandleUI(void)
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
 			uint32_t eth_row  = snac ? 4 : 2;
 			uint32_t ide_row  = snac ? 5 : 3;
-			uint32_t fdd_row  = snac ? 6 : 4;
+			uint32_t fdd_row  = snac ? 6 : 4;   // the Drives submenu row
 			uint32_t back_row = snac ? 7 : 5;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
@@ -9129,14 +9263,10 @@ void HandleUI(void)
 					menustate = MENU_AMIGACD_ADVANCED1;
 				}
 			}
-			else if (menusub == fdd_row) // FDD Turbo
+			else if (menusub == fdd_row && select) // Drives
 			{
-				// minimig_ConfigFloppy carries drives and speed together, so
-				// the drive count has to be passed through unchanged -- the
-				// same call the two stranded pages make.
-				minimig_config.floppy.speed ^= 1;
-				minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
-				menustate = MENU_AMIGACD_ADVANCED1;
+				menustate = MENU_AMIGACD_DRIVES1;
+				menusub = 0;
 			}
 			else if (menusub == back_row && select) // Back
 			{
