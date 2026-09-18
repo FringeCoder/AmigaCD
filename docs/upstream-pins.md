@@ -9,12 +9,14 @@ against. Re-verify line numbers after moving off these.
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
-| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `f2963eb` "dvd fpga core support" | 2026-09-12 |
+| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `bcdb16f` "Fix for NGCD identification" | 2026-09-18 |
+| ^ previous pin, superseded 2026-09-18 | | `f2963eb` "dvd fpga core support" | 2026-09-12 |
 | ^ previous pin, superseded 2026-09-14 | | `de40622` "Merge PR #9, remount on savestate" | 2026-08-23 |
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `5b3ae64` "N64: Improved CIC detection (#1318)" -- **partial take, see below** | 2026-09-18 |
+| ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
 | `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
@@ -30,6 +32,62 @@ core side. It is a content superset, and it contains `7317947` — the
 physical-disc fork's own base, which our line predates by four months. See
 [userspace-branch-move.md](userspace-branch-move.md) for the gained/lost
 analysis and why moving first makes the physical-disc merge much smaller.
+
+## Main_MiSTer `5b3ae64` is a PARTIAL take, and the reason is an on-disk format
+
+`3d7a844` "Minimig: Add external floppy drive, SCP and IPF support (#1315)"
+landed upstream on 2026-09-18, from RobSmithDev -- the userspace half of the
+same feature the core repo's T26 covers. **It is not merged, and it must not be,
+because upstream's config struct and ours put the external drives in different
+places:**
+
+| | |
+|---|---|
+| ours | `extDrives[4]` inside `mm_floppyTYPE`, i.e. inside `floppy` |
+| upstream | a separate `mm_floppyexTYPE externalfloppy { exDrives[4] }` member |
+
+That changes `sizeof(mm_configTYPE)` and the offset of **every field after
+`floppy`** -- which on this fork means `cd_speed`, the SNAC port modes and the
+hardfiles. `minimig_cfg_load()` dispatches on exact file size and carries two
+migration rungs (pre-ext-floppy and pre-SNAC); taking upstream's layout
+invalidates all of it and silently misreads every config already on a user's
+card.
+
+So this is a permanent divergence in an on-disk format, not a merge that can be
+deferred until someone has time. Whoever revisits it is choosing between
+rewriting our layout plus a third migration rung, or staying where we are.
+**Staying is the recommendation** until there is a reason: ours works, it is
+migrated, and the feature is the same feature.
+
+### What WAS taken from 5b3ae64
+
+- `support/minimig/scpfile.{cpp,h}`, `ipffile.{cpp,h}`, `capsapi/` -- upstream's
+  copies wholesale. They contain no reference to `minimig_config` at all, so the
+  struct divergence does not reach them. Two real gains:
+  - **two extra `dlopen` fallbacks for `libcapsimg.so`** (`/media/fat/` and
+    `/media/fat/linux/CAPSIMG/`). `caps_init()` is what decides whether the
+    browser offers IPF at all, so a user with the library in either of those
+    places previously got **no IPF support, silently**;
+  - the `// RobSmithDev` attribution and the CAPSAPI licence note, which
+    upstream added after we vendored these files and which should travel with
+    third-party code.
+- `support/n64/n64.cpp` (#1318 CIC detection) and `support/a2/*` (#1317) --
+  cores we do not build, taken wholesale to stay close to upstream at no cost.
+
+`minimig_fdd.{cpp,h}` and `capsapi/CapsAPI.h` were already **byte-identical** to
+upstream's, so #1315 brought nothing there.
+
+### What was NOT taken
+
+Upstream's `menu.cpp` floppy rows, `minimig_config.{cpp,h}` struct and
+`minimig_ConfigUserPort()`. We have `minimig_ConfigSnac()` doing that job plus
+the SNAC third tenant, and our OSD rows already exist.
+
+**Our one standing patch to a taken file:** `scpfile.cpp` uses
+`std::max<int64_t>(1, ...)` where upstream has `std::max(1LL, ...)`. `int64_t` is
+`long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
+only on the target and makes the file unparseable by `syntax_check.sh`. It needs
+re-applying at every sync that touches this file.
 
 ## Minimig-AGA upstream has merged real floppy support, and we already have some
 
@@ -52,10 +110,15 @@ not read on hardware nobody has in front of them.
 **Compared 2026-09-17, and it is a downgrade.** The comparison is written up as
 T26 in the core repo's `docs/core-accuracy-todo.md`. In short: we lack nothing
 `c1134ac` adds, we are ahead in six ways -- including `MiSTerFloppyIBM.v`, a
-three-tenant user port, two retimings in `paula_floppy.v`, a bench for the
-`_READY` rule, and the entire userspace half, which upstream `Main_MiSTer` does
-not have at all -- and upstream's `misterfloppy.qip` lists a Verilog file that
+three-tenant user port, two retimings in `paula_floppy.v` and a bench for the
+`_READY` rule -- and upstream's `misterfloppy.qip` lists a Verilog file that
 commit does not ship.
+
+**One of those six has expired.** On 2026-09-17 upstream `Main_MiSTer` had no
+userspace side for the feature at all. `3d7a844` landed it on 2026-09-18, so
+that point no longer stands -- see the section above, where the userspace half
+turns out to diverge from ours in the config struct. The other five are
+unaffected.
 
 So the Minimig-AGA pin stays at `da7632e` deliberately, not for want of effort.
 Revisit when upstream adds the missing file, or when the MiSTerFloppy project
