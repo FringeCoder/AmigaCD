@@ -512,8 +512,23 @@ bool write_screenshot(const char *filename, const uint8_t *inbuf,
         imlib_context_set_blend(0);
     }
 
+    // `filename` is ALREADY ABSOLUTE -- resolved on the main thread by the
+    // callers below. It used to be getFullPath(filename) right here, which is a
+    // data race: getFullPath() returns a pointer into one file-scope static
+    // buffer (file_io.cpp: `static char full_path[2100]`) that twenty-odd call
+    // sites share, and this function runs on the offload worker while the main
+    // loop is free to call getFullPath() for anything else -- a file browse, a
+    // ROM load, a config read.
+    //
+    // The buffer is then rewritten under us between the call and imlib reading
+    // the string. Found by theshaneobrien in mister-disc-drive-support @c851777,
+    // who saw it on hardware as `ok=0, 27ms, no file`, and it is stock MiSTer
+    // code, so every fork has it. It matters here beyond the Win+PrtScr
+    // screenshot: amigacd_ss_preview()'s save state thumbnails come through
+    // this same path, so the symptom is a slot that intermittently has no
+    // picture.
     Imlib_Load_Error error;
-    imlib_save_image_with_error_return(getFullPath(filename), &error);
+    imlib_save_image_with_error_return(filename, &error);
 
     if (scaled && scaled != im) {
         imlib_context_set_image(scaled);
@@ -598,7 +613,9 @@ int screenshot_capture_to(const char *path)
 	mister_scaler_read(ms, screenshot_outputbuf);
 	mister_scaler_free(ms);
 
-	char *filename_copy = strdup(path);
+	// Resolved HERE, on the main thread, not in the worker. See
+	// write_screenshot() for the race this avoids.
+	char *filename_copy = strdup(getFullPath(path));
 	if (!filename_copy)
 	{
 		screenshot_silent_atomic  = false;
@@ -685,7 +702,9 @@ void do_screenshot(char* imgname)
 		scaled_width = scaled_height * ((float)base_width/base_height);
 	}
 	
-	char* filename_copy = strdup(filename);
+	// Resolved HERE, on the main thread, not in the worker. See
+	// write_screenshot() for the race this avoids.
+	char* filename_copy = strdup(getFullPath(filename));
 	
 	if (!filename_copy) {
 		screenshot_pending_atomic = false;
@@ -738,9 +757,26 @@ void screenshot_cb(void)
             case SCREENSHOT_SUCCESS:
                 if (result_data->filename)
                 {
+                    // filename is ABSOLUTE now -- resolved on the main thread to
+                    // close the getFullPath race, see write_screenshot(). This
+                    // used to be `filename + strlen(SCREENSHOT_DIR "/")`, which
+                    // assumed a relative path: on an absolute one that skips
+                    // twelve characters of "/media/fat/s" and toasts
+                    // "creenshots/shot.png".
+                    //
+                    // Show the part from the screenshots directory onwards where
+                    // it can be found, and fall back to the basename rather than
+                    // to arithmetic that can walk off the front of the string.
+                    const char *shown = strstr(result_data->filename, SCREENSHOT_DIR "/");
+                    if (shown) shown += strlen(SCREENSHOT_DIR "/");
+                    else
+                    {
+                        const char *slash = strrchr(result_data->filename, '/');
+                        shown = slash ? slash + 1 : result_data->filename;
+                    }
+
                     char msg[1024];
-                    snprintf(msg, sizeof(msg), "Screen saved to\n%s",
-                            result_data->filename + strlen(SCREENSHOT_DIR "/"));
+                    snprintf(msg, sizeof(msg), "Screen saved to\n%s", shown);
                     printf("%s\n", msg);
                     Info(msg);
                 }
