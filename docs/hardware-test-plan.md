@@ -1,7 +1,7 @@
 # Hardware test plan
 
 Everything in PRs #52–#57, plus the menu fixes added since, was written without
-a machine. Twenty-seven changes, none verified. This is the list, ordered so
+a machine. Twenty-nine changes, none verified. This is the list, ordered so
 that the things other things depend on come first.
 
 The value here is not the steps — those are mostly obvious — it is the **failure
@@ -157,7 +157,8 @@ nothing said before.
 | Check | Pass |
 |---|---|
 | Open the page with no disc, on a CD32 | The line above `Adjust screen position` reads the current mode, e.g. `320x256: not adjusted yet` |
-| `Adjust screen position`, move with the arrows, Enter | Toasts `Stored`, and the line **immediately** reads `position saved` -- not after the next mode change |
+| `Adjust screen position`, move with the arrows, Enter | Toasts `Stored` **and the four edge values**, e.g. `[123-456, 12-34]`, on two lines. The mode line then **immediately** reads `position saved` -- not after the next mode change |
+| Those four numbers against the `VMODE: store position:` log line | The same four, in the same order. That is the point of matching the format |
 | Esc instead of Enter | `Canceled`, the picture reverts, and the line still says what it said before |
 | Reload the core, reopen the page | Still `position saved`. It lives in `<core>_vadjust.dat`, not in the config slots |
 | `Save settings`, then `Configs -> Load a config` | The screen position is untouched either way. It is deliberately not part of a config |
@@ -165,12 +166,52 @@ nothing said before.
 | Adjust in that mode too, then switch back and forth | Each mode keeps its own position |
 | Before the Kickstart has produced video | `(no video mode reported yet)` rather than a stale or invented mode |
 
-**What is still missing, and needs RTL:** there is no test pattern. You are
-aligning against whatever the Amiga is drawing -- a boot animation on a CD32 --
-so there are no known edges to align to, and no way to pre-calibrate a mode
-before something displays it. A pattern generator in the video path is the real
-fix; it needs a Quartus fit and a display, and the design has 0.117 ns of setup
-margin, so it is not free. Not attempted.
+**Why the values are a toast and not a live readout.** Selecting the row sets
+`menustate = MENU_NONE1` -- the OSD CLOSES before adjust mode starts, and that is
+exactly why the arrows reach the core instead of the menu. So while adjusting
+there is no menu surface to draw on, and the toast at the end is the one moment a
+value can be shown. A live readout was written and reverted for this reason.
+
+**There is now a test pattern, and it is the least verified thing in this
+document.** `Adjust screen position (grid)` switches the Amiga's picture for a
+border, a centre crosshair and a grid, generated in the core from `hde`/`vde` so
+the border lands on the first and last active pixel and line. Adjust until all
+four edges are visible and the picture is both fully on screen and centred.
+
+| Check | Pass |
+|---|---|
+| Select the row | The picture is replaced by a grid on black with a white border |
+| The border | **All four edges present.** A missing edge is the bug -- the right and bottom are drawn from the PREVIOUS line and frame, so they are the ones that can be wrong |
+| Move with the arrows | The whole pattern moves, border included |
+| The first frame after enabling | May lack the right and bottom edge for one frame. By design; invisible at 50 Hz. If it persists, the size measurement is broken |
+| Enter | Pattern goes, picture returns, `Stored` toast with the values |
+| Esc | Pattern goes, picture returns, position reverts |
+| Grid spacing | Every 32 pixels across, 16 lines down -- close to square on PAL lores. If it looks nothing like square, the aspect is not what it should be |
+| Centre crosshair | Actually at the centre of the border, not offset |
+| With a scandoubler or hq2x on, and with gamma | The pattern scales with them. It is muxed into the mixer INPUT precisely so that it does |
+| A CD32, a CDTV, an A500 and an A1200 | Works on each; the pattern knows nothing about the machine |
+| **Timing after a Quartus fit** | **Unverified. This is the one to check first.** It adds a 24-bit 2:1 mux on the mixer's input path in a design with 0.117 ns of setup margin. If the fit regresses, that mux is the first suspect |
+
+**Everything about its appearance is unverified**, including whether the grid is
+legible, whether white-on-black is right for a CRT, and whether 2-pixel borders
+are visible after scaling. The geometry is benched
+(`rtl/sim/testpattern/tb_video_testpattern.sv`, thirteen checks, five mutations);
+nothing in simulation can say what it looks like.
+
+**The two cheaper routes were checked and are dead**, recorded so nobody spends
+time on them again:
+
+- **The OSD or info window.** `sys/osd.v` caps `infow`/`infoh` at 504 pixels, but
+  the real objection is that the info window is positioned INSIDE the active area
+  and therefore moves with the adjustment being made. It cannot show where the
+  screen edges are.
+- **The HPS framebuffer** (what the save state thumbnails use). It replaces core
+  video and is not subject to the core's blanking, so a pattern drawn there says
+  nothing about the window being adjusted.
+
+What is still missing even with the pattern: a mode cannot be calibrated before
+something displays it. The pattern shows the mode the core is in, so it does not
+help populate a preset for a resolution no software has selected yet.
 
 ---
 
