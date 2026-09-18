@@ -1582,7 +1582,6 @@ void minimig_adjust_vsize(char force)
 
 static void store_vsize()
 {
-	Info("Stored");
 	minimig_adjust = 0;
 
 	spi_uio_cmd_cont(UIO_GET_VMODE);
@@ -1596,6 +1595,28 @@ static void store_vsize()
 	DisableIO();
 
 	printf("\033[1;37mVMODE: store position: [%u-%u, %u-%u]\033[0m\n", scr_hbl_l, scr_hbl_r, scr_vbl_t, scr_vbl_b);
+
+	// The four numbers, on screen, once -- the only chance to see them.
+	//
+	// Adjusting happens with the OSD CLOSED: selecting the row sets menustate to
+	// MENU_NONE1 before entering the mode, which is exactly why the arrows reach
+	// the core instead of the menu. So there is no menu surface to put a live
+	// readout on, and this toast is the one moment a value can be shown.
+	//
+	// Worth showing because the picture is the only other feedback there is.
+	// Without it a setting that looked right cannot be written down, compared
+	// against another mode, or re-entered after something resets it -- and the
+	// same four numbers appear in the VMODE log line above, so one read off the
+	// screen and one read out of the log are the same value.
+	// Two lines, not one. OSD_PrintInfo() drops any character past INFO_MAXW,
+	// which is 32, SILENTLY -- and "Stored [65535-65535, 65535-65535]" is 33.
+	// Those values are not reachable in practice, but a message that truncates
+	// on an input nobody has bounded is the same shape of bug as a row drawn on
+	// a line the OSD never sends. Split, the widest line is 26.
+	char msg[64];
+	snprintf(msg, sizeof(msg), "Stored\n[%u-%u, %u-%u]",
+	         scr_hbl_l, scr_hbl_r, scr_vbl_t, scr_vbl_b);
+	Info(msg);
 
 	uint32_t mode = scr_hsize | (scr_vsize << 12) | ((res & 0xFF) << 24);
 	if (mode)
