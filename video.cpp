@@ -3914,16 +3914,37 @@ int video_fb_preview(const char *path)
 	int src_h = imlib_image_get_height();
 	if (src_w <= 0 || src_h <= 0)
 	{
-		imlib_free_image();
+		imlib_free_image_and_decache();
 		return 0;
 	}
 
-	Imlib_Image dst = imlib_create_image_using_data(fb_width, fb_height,
-	                                                (uint32_t*)(fb_base + (FB_SIZE * FB_BANK_PREVIEW)));
-	if (!dst)
+	// Drawn into a MALLOC'd shadow, then copied to the bank in one pass.
+	//
+	// It used to build straight in the framebuffer: a per-pixel clear loop
+	// through a volatile pointer, then imlib blending on top, both into
+	// uncached DDR. theshaneobrien measured that path on hardware at about
+	// 42 MB/s (mister-disc-drive-support @c851777), which for a 1920x1080 bank
+	// is ~197 ms per full pass -- and this did two of them. That is most of half
+	// a second of blocked main loop every time the cursor moves between save
+	// slots, which reads as the OSD hanging rather than as a slow preview.
+	//
+	// Cached memory makes the clear a memset and the blend ordinary writes; the
+	// bank then takes one sequential memcpy, which is the access pattern that
+	// wall punishes least. They measured ~2.5x for the same change.
+	uint32_t *shadow = (uint32_t*)malloc((size_t)fb_width * fb_height * 4);
+	if (!shadow)
 	{
 		imlib_context_set_image(img);
-		imlib_free_image();
+		imlib_free_image_and_decache();
+		return 0;
+	}
+
+	Imlib_Image dst = imlib_create_image_using_data(fb_width, fb_height, shadow);
+	if (!dst)
+	{
+		free(shadow);
+		imlib_context_set_image(img);
+		imlib_free_image_and_decache();
 		return 0;
 	}
 
@@ -3940,22 +3961,32 @@ int video_fb_preview(const char *path)
 	int dst_x = (fb_width  - dst_w) / 2;
 	int dst_y = (fb_height - dst_h) / 2;
 
-	// Black the whole bank first: the letterbox bars, and whatever a previous
-	// preview at a different aspect left behind. Written straight to the buffer
-	// the way draw_black() does, rather than through imlib's get_data /
-	// put_back_data pair, because the memory is ours already.
-	volatile uint32_t *buf = fb_base + (FB_SIZE * FB_BANK_PREVIEW);
-	for (int i = 0; i < fb_width * fb_height; i++) buf[i] = 0;
+	// Black the whole shadow first: the letterbox bars, and whatever a previous
+	// preview at a different aspect left behind. A memset on cached memory,
+	// where it used to be a per-pixel loop into the framebuffer.
+	memset(shadow, 0, (size_t)fb_width * fb_height * 4);
 
 	imlib_context_set_image(dst);
 	imlib_context_set_blend(0);
 	imlib_context_set_anti_alias(1);
 	imlib_blend_image_onto_image(img, 0, 0, 0, src_w, src_h, dst_x, dst_y, dst_w, dst_h);
 
+	// The one pass into the bank.
+	memcpy((void*)(fb_base + (FB_SIZE * FB_BANK_PREVIEW)), shadow,
+	       (size_t)fb_width * fb_height * 4);
+
 	imlib_context_set_image(dst);
-	imlib_free_image();
+	imlib_free_image();          // the wrapper only; the shadow is ours to free
+	free(shadow);
+
+	// AND_DECACHE, not plain free. imlib keys its cache on the path, and a save
+	// state thumbnail is OVERWRITTEN IN PLACE every time the slot is re-saved --
+	// so a cached decode is a picture of the previous capture, shown for the
+	// current one. theshaneobrien hit exactly this and called it "the
+	// repeat-image bug" (mister-disc-drive-support, overlay-poc v5). Nothing
+	// here is loaded often enough for the cache to be worth the risk.
 	imlib_context_set_image(img);
-	imlib_free_image();
+	imlib_free_image_and_decache();
 
 	video_fb_enable(1, FB_BANK_PREVIEW);
 	preview_shown = 1;
