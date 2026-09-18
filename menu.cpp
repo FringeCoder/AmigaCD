@@ -9585,7 +9585,7 @@ void HandleUI(void)
 			sprintf(s, "  %.29s", vinfo);
 			OsdWrite(m++, s, 0, 1);
 		}
-		OsdWrite(m++, minimig_get_adjust() ? " Finish screen adjustment" : " Adjust screen position", menusub == 11, 0);
+		OsdWrite(m++, minimig_get_adjust() ? " Finish screen adjustment" : " Adjust screen position (grid)", menusub == 11, 0);
 		for (; m < OsdGetSize() - 1; m++) OsdWrite(m);
 		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 12, 0);
 

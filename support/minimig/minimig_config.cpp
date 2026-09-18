@@ -1665,6 +1665,18 @@ void minimig_set_adjust(char n)
 	if (minimig_adjust && !n) store_vsize();
 	minimig_adjust = (n == 1) ? 1 : 0;
 	if (n == 2) minimig_adjust_vsize(1);
+
+	// The calibration pattern is on for exactly as long as the adjustment is.
+	//
+	// Tied to the mode rather than given a row of its own for two reasons. The
+	// Video & Audio page is exactly full, and more to the point this is the only
+	// time the pattern is any use: its whole job is to put a visible border on
+	// the first and last active pixel so there is something to align to, and
+	// the rest of the time it would just be hiding the Amiga.
+	//
+	// status[55] is free -- AmigaCD.sv used up to 54. rtl/video_testpattern.v
+	// in the core repo is the other half.
+	user_io_status_set("[55]", minimig_adjust ? 1 : 0);
 }
 
 char minimig_get_adjust()
