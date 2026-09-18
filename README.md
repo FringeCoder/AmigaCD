@@ -29,7 +29,13 @@ See [`docs/upstream-pins.md`](docs/upstream-pins.md) for the pins, the sync
 procedure, and what is worth taking from each.
 
 Fetch them into `upstream/` with `scripts/fetch-upstream.sh` (not tracked), or
-use the git remotes: `physdisc`, `cd32-main`, `discdrive`, `mister-upstream`.
+use the git remotes: `physdisc`, `kblood`, `discdrive`, `main-upstream`.
+
+Two of those four names were wrong until 2026-09-18 -- the remotes are `kblood`
+and `main-upstream`, not `cd32-main` and `mister-upstream` -- and `discdrive` did
+not exist at all, so the one repo this table calls *watched* could not be fetched
+by anyone following these instructions. It is
+`https://github.com/theshaneobrien/mister-disc-drive-support.git`.
 
 ## Key finding
 

@@ -14,7 +14,7 @@
 
 #define BUFFER_SIZE_IN_WORDS 2048
 
-
+// RobSmithDev
 
 // Actually read the file
 bool SCPFile::readSCPFile() {
@@ -300,10 +300,12 @@ bool SCPFile::fluxRead(uint16_t* outputBuffer, uint32_t numWords) {
 			const int64_t t = (uint64_t)value * m_fluxMultiplier;
 			m_timeRemainingInRevolution -= t;
 			m_lastTime += t;
-			// std::max<int64_t> rather than max(1LL, ...): int64_t is `long`
-			// on an LP64 host and `long long` on 32-bit ARM, so the bare call
-			// only resolves on the target and makes this file unparseable
-			// anywhere else.
+			// std::max<int64_t> rather than max(1LL, ...): int64_t is `long` on
+			// an LP64 host and `long long` on 32-bit ARM, so the bare call only
+			// resolves on the target, which makes this file unparseable by
+			// syntax_check.sh. Re-applied after taking upstream's copy at the
+			// 5b3ae64 sync -- upstream still has the unportable form, so this
+			// will need re-applying at every sync that touches this file.
 			m_fluxDelayStillWaiting = std::max<int64_t>(1, m_lastTime);			
 			m_lastTime = 0;			
 		}

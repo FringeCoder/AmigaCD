@@ -29,6 +29,10 @@ clone main-cd32-cdtv \
       https://github.com/kblood/Main_MiSTer-cd32-cdtv.git amiga-console
 clone core-cd32-cdtv \
       https://github.com/kblood/Minimig-AGA-cd32-cdtv-native-akiko.git amiga-console
+# Watched, not merged from: the parallel physical-disc effort. README calls it
+# watched and this script did not fetch it, so "watched" meant nobody looked.
+clone disc-drive-support \
+      https://github.com/theshaneobrien/mister-disc-drive-support.git physcd
 
 echo
 echo "done. see docs/upstream-pins.md for the commits the analysis was written against."
