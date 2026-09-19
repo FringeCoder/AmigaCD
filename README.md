@@ -118,3 +118,4 @@ See "Still to do" in [`docs/integration-plan.md`](docs/integration-plan.md).
 | Launching a game straight from the MiSTer menu | [`docs/mgl.md`](docs/mgl.md) |
 | Comparing the core against real hardware | [`docs/vamigats.md`](docs/vamigats.md), [`docs/timing-probe.md`](docs/timing-probe.md) |
 | What still needs testing on a machine | [`docs/hardware-test-plan.md`](docs/hardware-test-plan.md) |
+| Open items that are not hardware verification | [`docs/state-todo.md`](docs/state-todo.md) |
