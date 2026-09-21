@@ -83,7 +83,7 @@ correct**: `hbl_l`/`hbl_r` are pixel counts within a line, and a 320-wide and a
 needs to establish the scaling relationship first, on hardware, or it will
 confidently store wrong positions.
 
-## U4 — `minimig_vadjust_info()` cannot be unit tested  [HOST]
+## U4 — `minimig_vadjust_info()` cannot be unit tested  [HOST]  — **DONE 2026-09-21**
 
 `support/minimig/minimig_config.cpp:1697`, reading statics fed by
 `UIO_GET_VMODE` (`:1495`, `:1538`) in a file the host compiler cannot build. So
@@ -93,6 +93,25 @@ the one thing a test could pin — that the three states render the right string
 The fix is the one that worked for `cd_savename.cpp` and `rom_crypt.cpp`: move
 the pure part into a MiSTer-header-free module and pass the mode in. Small, and
 the precedent is established.
+
+**Done.** `support/minimig/vadjust_info.{h,cpp}` now holds `vadjust_info_text()`
+and `vadjust_mode_key()`, and `tests/test_vadjust_info.cpp` covers them — 26
+checks, falsified against nine mutations, with the one mutation it cannot catch
+recorded in its header. `minimig_vadjust_info()` is a four-line wrapper that does
+the only untestable part, reading the statics the SPI side fills.
+
+Two things came out of it that reading had not:
+
+- **`!known && found` is a reachable state, and nothing said the code handled
+  it.** `vadj_found` is a static that survives a mode change, and `store_vsize()`
+  sets it without consulting `vadj_known`. The old code did return 0 on that
+  path, correctly — but only by the order of its two branches, which no check
+  pinned. It is now a named check. The return value is also normalised to 0/1;
+  it was a raw `char` before, and callers compare it against 1.
+- **The mode key was undefined behaviour at one value.** `(res & 0xFF) << 24`
+  shifted an `int`; at `res & 0xFF == 255` that is `0xFF000000`, which does not
+  fit in a signed `int`. Reachable only for video mode 255, but free to fix: the
+  new function is unsigned throughout.
 
 Related and already paid for: a live readout of the blanking edges was written
 and **reverted**, because selecting the row sets `menustate = MENU_NONE1` — the
@@ -154,15 +173,18 @@ the log open there is nothing to write.
 
 ## Order
 
-1. **U4** — the only item that is cheap, needs no hardware, and has a working
-   precedent to copy. Do it when next touching that file.
-2. **U1** — also HOST-only, but the guard's shape is an open question rather
-   than a known edit, and the page it protects is nearly unreachable.
-3. **U2, U3** — both need a display. U2 is a defined change waiting for a way to
+1. **U1** — the only remaining HOST-only item, now that U4 is done. Its guard's
+   shape is an open question rather than a known edit, and the page it protects
+   is nearly unreachable, which is why it was second and not first.
+2. **U2, U3** — both need a display. U2 is a defined change waiting for a way to
    judge it; U3 needs a measurement before it can even be specified.
-4. **U7** — blocked on one log from the person holding the hardware.
-5. **U5, U6** — records. Neither is work. U6 is the one to reread before the
+3. **U7** — blocked on one log from the person holding the hardware.
+4. **U5, U6** — records. Neither is work. U6 is the one to reread before the
    next upstream sync.
+
+**U4** is done; its section is kept rather than deleted, because what it found
+on the way (a reachable `!known && found` state, and one undefined shift) is the
+kind of thing the next reader of that file should not have to rediscover.
 
 ## What is not on this list
 

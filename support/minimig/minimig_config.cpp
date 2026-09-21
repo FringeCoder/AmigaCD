@@ -18,6 +18,7 @@
 #include "minimig_profile.h"
 #include "minimig_config.h"
 #include "rom_crypt.h"
+#include "vadjust_info.h"
 #include "minimig_share.h"
 #include "akiko_cd32.h"
 #include "cdtv_cd.h"
@@ -1550,7 +1551,7 @@ void minimig_adjust_vsize(char force)
 			loaded = 1;
 		}
 
-		uint32_t mode = scr_hsize | (scr_vsize << 12) | ((res & 0xFF) << 24);
+		uint32_t mode = vadjust_mode_key(scr_hsize, scr_vsize, res);
 		if (mode)
 		{
 			for (uint i = 0; i < sizeof(vmodes_adj) / sizeof(vmodes_adj[0]); i++)
@@ -1618,7 +1619,7 @@ static void store_vsize()
 	         scr_hbl_l, scr_hbl_r, scr_vbl_t, scr_vbl_b);
 	Info(msg);
 
-	uint32_t mode = scr_hsize | (scr_vsize << 12) | ((res & 0xFF) << 24);
+	uint32_t mode = vadjust_mode_key(scr_hsize, scr_vsize, res);
 	if (mode)
 	{
 		int applied = 0;
@@ -1694,19 +1695,14 @@ char minimig_get_adjust()
 // saved rather than as it having been saved for a different mode.
 //
 // Returns 1 when a position is stored for the mode now showing.
+// The wording itself lives in vadjust_info.cpp, which no MiSTer header reaches
+// and tests/test_vadjust_info.cpp therefore links. This wrapper is the part
+// that cannot be tested: reading the statics the SPI side fills.
 int minimig_vadjust_info(char *out, int outsz)
 {
 	if (!out || outsz <= 0) return 0;
-
-	if (!vadj_known)
-	{
-		snprintf(out, outsz, "(no video mode reported yet)");
-		return 0;
-	}
-
-	snprintf(out, outsz, "%ux%u: %s", vadj_hsize, vadj_vsize,
-	         vadj_found ? "position saved" : "not adjusted yet");
-	return vadj_found;
+	return vadjust_info_text(vadj_known, vadj_found, vadj_hsize, vadj_vsize,
+	                         out, (size_t)outsz);
 }
 
 void minimig_ConfigVideo(unsigned char scanlines)
