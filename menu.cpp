@@ -8398,8 +8398,12 @@ void HandleUI(void)
 		strcat(s, (minimig_config.cpu & 0x20) ? "OFF" : "ON");
 		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
 
-		OsdWrite(m++, "", 0, 0);
-
+		// No blank between the CPU rows and the ROMs. Row budget: this page
+		// draws fifteen lines before Back on line 15 -- eleven selectable, the
+		// NVRAM status line, and three spacers. A fourth spacer put Video &
+		// Audio on line 15, where Back was drawn over it: the cursor still
+		// stopped there, on nothing, and SELECT opened the video page from a
+		// row nobody could see. Count the lines before adding one.
 		strcpy(s, " Main ROM : ");
 		{
 			const char *root = getRootDir();
