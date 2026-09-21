@@ -72,6 +72,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "support/minimig/mgl_rbf.h"             // rewriting an .mgl's <rbf> in place
 #include "profiling.h"
 #include "str_util.h"
+#include "osd_rowguard.h"                       // the per-paint cursor/menumask guard
 #include "autofire.h"
 
 /*menu states*/
@@ -258,6 +259,10 @@ enum MENU
 	// Atari 8bit cartridge type selection
 	MENU_ATARI8BIT_CART1,
 	MENU_ATARI8BIT_CART2,
+
+	// Not a state. The count, for the per-state "warned once" table the row
+	// guard in HandleUI keeps. Must stay last.
+	MENU_STATE_COUNT,
 };
 
 static uint32_t menustate = MENU_NONE1;
@@ -2034,6 +2039,58 @@ static void *close_pipe_async(void *arg)
 void HandleUI(void)
 {
 	PROFILE_FUNCTION();
+
+	// Does the page that just painted agree with its own menumask?
+	//
+	// docs/state-todo.md U1. A page declares how many rows the cursor can land
+	// on by setting menumask, and then draws the cursor by passing `menusub == k`
+	// as the invert flag at each row, with k written out as a literal. Nothing
+	// tied the two together. When they disagreed the symptom was invisible:
+	// MENU_MINIMIG_CHIPSET1 had two rows at k == 11 for as long as FDD Turbo
+	// existed, so both drew highlighted and the one below could never be
+	// toggled, and the only statement of that page's row count was a prose
+	// comment -- which was wrong.
+	//
+	// A static_assert cannot see this. The literals are spread over sixty lines
+	// of drawing code and only the invert FLAG reaches OsdWrite(), not the k it
+	// came from, so there is nothing for the compiler to count. What is checkable
+	// is the consequence: with the cursor on a selectable row, exactly one row
+	// comes out inverted. Two rows sharing a k give two; a bit set in menumask
+	// that no row draws gives none.
+	//
+	// Checked here, at the top of the pass AFTER the one that painted, because a
+	// page paints in its ...1 state and then hands off to its ...2 state, and
+	// this is the first point where the totals are complete. menumask and menusub
+	// still hold what the painting pass set; nothing between the two touches
+	// them.
+	//
+	// Console-only and once per state, same as osd_check_line() below it in
+	// osd.cpp: this is a claim about our own code being self-consistent, not
+	// something to put in front of a player mid-game.
+	{
+		static uint8_t  row_warned[MENU_STATE_COUNT] = {};
+		static uint32_t tally_state = MENU_NONE1;
+
+		const int writes = OsdRowTallyWrites();
+		const int sel = OsdRowTallySelected();
+
+		// The verdict itself is in osd_rowguard.cpp, which tests/ can link and
+		// tests/test_osd_rowguard.cpp falsifies. What stays here is the part a
+		// test cannot reach: the tally, and warning once per state.
+		if (osd_rowguard_warn(writes, sel, menusub, menumask) &&
+		    tally_state < MENU_STATE_COUNT && !row_warned[tally_state])
+		{
+			row_warned[tally_state] = 1;
+			printf("OSD: menu state %u painted %d rows, %d of them selected, with "
+			       "menusub %u set in menumask 0x%llx -- expected exactly one. "
+			       "Two rows sharing a menusub, or a menumask bit no row draws.\n",
+			       (unsigned)tally_state, writes, sel, (unsigned)menusub,
+			       (unsigned long long)menumask);
+		}
+
+		tally_state = menustate;
+		OsdRowTallyReset();
+	}
 
 	// A pending System change belongs to the AmigaCD main page. Any other state
 	// means the row is gone -- moved off, paged away, OSD closed by something
@@ -7117,6 +7174,13 @@ void HandleUI(void)
 
 				if (menusub == i && p)
 				{
+					// The selected config's second info line is drawn inverted
+					// too, so it reads as part of the same highlighted block.
+					// That makes two inverted rows on purpose, which is the one
+					// page in the tree where the guard at the top of HandleUI
+					// would be wrong -- hence the exemption rather than a
+					// changed rendering.
+					OsdRowTallyExempt();
 					sprintf(name, "  %s", strchr(info, '\n') + 1);
 					OsdWrite(m++, name, 1, !(menumask & (1 << i)));
 				}

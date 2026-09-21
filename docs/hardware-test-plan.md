@@ -1,7 +1,7 @@
 # Hardware test plan
 
 Everything in PRs #52–#57, plus the menu fixes added since, was written without
-a machine. Thirty-two changes, none verified. This is the list, ordered so
+a machine. Thirty-three changes, none verified. This is the list, ordered so
 that the things other things depend on come first.
 
 The value here is not the steps — those are mostly obvious — it is the **failure
@@ -168,6 +168,31 @@ from here.
 | **Save a slot, view it, re-save the same slot, view it again** | The **second** view shows the **new** capture. This is the repeat-image bug: imlib keys its cache on the path and a thumbnail is overwritten in place, so a stale decode shows the previous capture |
 | Move off the slot and back repeatedly | No leak and no slowdown over a few dozen passes -- the shadow is malloc'd per draw now |
 | A slot with no thumbnail, then one with | Falls back to the core's own video, then draws; no black frame held |
+
+### 1e3. The cursor/menumask guard
+
+New, from `docs/state-todo.md` U1. Every page draws its cursor by comparing
+`menusub` against a literal at each row, and declares the row set separately in
+`menumask`. When the two disagree the symptom is invisible: the System page had
+two rows at `menusub == 11` for as long as FDD Turbo existed, and the row below
+could never be toggled. There is now a runtime check that with the cursor on a
+selectable row exactly one row comes out inverted.
+
+The verdict is tested — `tests/test_osd_rowguard.cpp`, falsified against seven
+mutations. The **tally** is not, and cannot be here: it counts real
+`OsdWriteOffset()` calls.
+
+| Check | Pass |
+|---|---|
+| Walk the cursor over **every row of every page** of this OSD with the log open | **No** `OSD: menu state ... expected exactly one` lines. The check is that it stays quiet |
+| `Configs -> Load config`, cursor on a slot that has a second info line | Still quiet. That page inverts two rows deliberately and calls `OsdRowTallyExempt()`; if it speaks, the exemption is not being reached |
+| Deliberately break one page and confirm the check speaks | Change one row literal on the System page to duplicate its neighbour (e.g. the `menusub == 12` on `Save slot` to `11`), rebuild, put the cursor on row 11: **one** line naming the state, `2 of them selected`. This is the only falsification available for the tally half |
+
+If the third check does not print, the guard is not wired up and the first two
+checks mean nothing — a diagnostic that cannot speak reads exactly like a clean
+bill of health. Do it before trusting the other two.
+
+---
 
 ### 1f. Screen position, and that it is per video mode
 

@@ -27,7 +27,7 @@ An item marked **[no code]** is a decision or a record, not work.
 
 ---
 
-## U1 — The Minimig System page's row count has no compile-time guard  [HOST]
+## U1 — The Minimig System page's row count has no compile-time guard  [HOST]  — **DONE 2026-09-21**
 
 `menu.cpp:7322`. Every AmigaCD page ties its row count to its `menumask` with a
 `static_assert` against the length of its hints table, so adding a row without a
@@ -47,6 +47,42 @@ still silent.
 
 Doing it means either giving that page a hints table it does not otherwise need,
 or a different shape of guard. Neither is obvious, which is why it was left.
+
+**Done, and as a different shape of guard — for every page, not that one.** The
+compile-time framing was the wrong one and is worth recording as such: the row
+literals are spread over sixty lines of drawing code, and only the invert *flag*
+reaches `OsdWrite()`, never the `k` it was computed from. There is nothing for a
+`static_assert` to count. A hints table for that page would have tied its length
+to its mask and left every other page's literals unchecked.
+
+What is checkable is the consequence. With the cursor on a selectable row,
+exactly one row comes out inverted; two rows sharing a `k` give two, and a mask
+bit no row draws gives none. `osd.cpp` counts rows and inverted rows per paint,
+`osd_rowguard.cpp` decides, and `menu.cpp`'s `HandleUI()` reads the previous
+paint's totals and warns once per menu state. It covers all ~40 pages including
+the AmigaCD ones, not just `MENU_MINIMIG_CHIPSET1`.
+
+Split so the decision is testable: `tests/test_osd_rowguard.cpp`, 16 checks,
+falsified against seven mutations. The tally itself is not testable here — it
+counts real `OsdWriteOffset()` calls — so it is in
+`docs/hardware-test-plan.md` §1e3, with the one reproduction that can falsify it
+(break a row literal on purpose and confirm the check speaks). **Run that one
+first**: a diagnostic that cannot speak reads exactly like a clean bill of
+health.
+
+Two things it found:
+
+- **One page inverts two rows on purpose.** `Configs -> Load config` renders the
+  selected slot's second info line inverted so it reads as one highlighted
+  block (`menu.cpp:7121`). It gets `OsdRowTallyExempt()` rather than a changed
+  rendering. It is the only page in the tree that needs it; the warning names
+  the state, so a future one costs one console line and two lines of fix.
+- **A redundant guard, removed.** The verdict started with an explicit
+  `if (!menumask) return 0;`. Dropping it changed nothing any check could see —
+  a zero mask has no bit for the cursor to be on, so the cursor test already
+  covers it. Confirmed in both directions (removed: suite green; re-added: suite
+  green) and taken out, because a line that reads as load-bearing and is not is
+  worse than no line.
 
 ## U2 — The save state preview does not use the scaler's output rect  [TITLE]
 
@@ -83,7 +119,7 @@ correct**: `hbl_l`/`hbl_r` are pixel counts within a line, and a 320-wide and a
 needs to establish the scaling relationship first, on hardware, or it will
 confidently store wrong positions.
 
-## U4 — `minimig_vadjust_info()` cannot be unit tested  [HOST]
+## U4 — `minimig_vadjust_info()` cannot be unit tested  [HOST]  — **DONE 2026-09-21**
 
 `support/minimig/minimig_config.cpp:1697`, reading statics fed by
 `UIO_GET_VMODE` (`:1495`, `:1538`) in a file the host compiler cannot build. So
@@ -93,6 +129,25 @@ the one thing a test could pin — that the three states render the right string
 The fix is the one that worked for `cd_savename.cpp` and `rom_crypt.cpp`: move
 the pure part into a MiSTer-header-free module and pass the mode in. Small, and
 the precedent is established.
+
+**Done.** `support/minimig/vadjust_info.{h,cpp}` now holds `vadjust_info_text()`
+and `vadjust_mode_key()`, and `tests/test_vadjust_info.cpp` covers them — 26
+checks, falsified against nine mutations, with the one mutation it cannot catch
+recorded in its header. `minimig_vadjust_info()` is a four-line wrapper that does
+the only untestable part, reading the statics the SPI side fills.
+
+Two things came out of it that reading had not:
+
+- **`!known && found` is a reachable state, and nothing said the code handled
+  it.** `vadj_found` is a static that survives a mode change, and `store_vsize()`
+  sets it without consulting `vadj_known`. The old code did return 0 on that
+  path, correctly — but only by the order of its two branches, which no check
+  pinned. It is now a named check. The return value is also normalised to 0/1;
+  it was a raw `char` before, and callers compare it against 1.
+- **The mode key was undefined behaviour at one value.** `(res & 0xFF) << 24`
+  shifted an `int`; at `res & 0xFF == 255` that is `0xFF000000`, which does not
+  fit in a signed `int`. Reachable only for video mode 255, but free to fix: the
+  new function is unsigned throughout.
 
 Related and already paid for: a live readout of the blanking edges was written
 and **reverted**, because selecting the row sets `menustate = MENU_NONE1` — the
@@ -154,15 +209,19 @@ the log open there is nothing to write.
 
 ## Order
 
-1. **U4** — the only item that is cheap, needs no hardware, and has a working
-   precedent to copy. Do it when next touching that file.
-2. **U1** — also HOST-only, but the guard's shape is an open question rather
-   than a known edit, and the page it protects is nearly unreachable.
-3. **U2, U3** — both need a display. U2 is a defined change waiting for a way to
+**Nothing HOST-only is left.** U1 and U4 were the two, and both are done, which
+means every remaining item needs either a display or a log from the machine.
+
+1. **U2, U3** — both need a display. U2 is a defined change waiting for a way to
    judge it; U3 needs a measurement before it can even be specified.
-4. **U7** — blocked on one log from the person holding the hardware.
-5. **U5, U6** — records. Neither is work. U6 is the one to reread before the
+2. **U7** — blocked on one log from the person holding the hardware.
+3. **U5, U6** — records. Neither is work. U6 is the one to reread before the
    next upstream sync.
+
+The done sections are kept rather than deleted, because what each found on the
+way is the kind of thing the next reader of those files should not have to
+rediscover: for U4 a reachable `!known && found` state and one undefined shift,
+for U1 that the compile-time framing was impossible and why.
 
 ## What is not on this list
 
