@@ -37,6 +37,7 @@ as rotated copies of the first 128 entries.  -- AMR
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include "osd.h"
 #include "cfg.h"
@@ -77,6 +78,54 @@ struct star stars[64];
 static uint8_t osdbuf[256 * 32];
 static int  osdbufpos = 0;
 static int  osdset = 0;
+
+// A text mirror of the OSD, for looking at a menu from a shell.
+//
+// MiSTer's screenshot is the scaler framebuffer, and the OSD is composited
+// in the FPGA after it, so no capture ever contains the menu. The binary
+// draws every row, though, so it can say what it drew. When /tmp/osd_mirror
+// exists, each OsdUpdate writes the title and the rows to /tmp/osd.txt with
+// the selected row marked `>` and a greyed one `~`. That is a better record
+// than a picture for checking a page -- exact text and exact cursor -- and it
+// is what scripts/mister-remote.py reads after pressing keys.
+//
+// Cost when the marker is absent: one access() per OsdUpdate, and paints
+// happen on keypresses, not per frame.
+static char osd_mirror_text[32][OSDLINELEN + 1];
+static char osd_mirror_flag[32];              // '>' selected, '~' greyed, ' '
+static char osd_mirror_title[64];
+
+static void osd_mirror_row(int n, const char *s, int invert, int stipple)
+{
+	if (n < 0 || n >= 32) return;
+	strncpy(osd_mirror_text[n], s ? s : "", OSDLINELEN);
+	osd_mirror_text[n][OSDLINELEN] = 0;
+	osd_mirror_flag[n] = invert ? '>' : stipple ? '~' : ' ';
+}
+
+static void osd_mirror_flush(int rows)
+{
+	if (access("/tmp/osd_mirror", F_OK)) return;
+	FILE *f = fopen("/tmp/osd.txt.new", "w");
+	if (!f) return;
+	fprintf(f, "[%s]\n", osd_mirror_title);
+	for (int i = 0; i < rows; i++)
+		fprintf(f, "%2d %c %s\n", i, osd_mirror_flag[i], osd_mirror_text[i]);
+	fclose(f);
+	rename("/tmp/osd.txt.new", "/tmp/osd.txt");   // readers never see a half-written file
+}
+
+// A closed menu is a state worth recording too, or a reader after ESC would
+// still see the last page and think it is open.
+static void osd_mirror_closed()
+{
+	if (access("/tmp/osd_mirror", F_OK)) return;
+	FILE *f = fopen("/tmp/osd.txt.new", "w");
+	if (!f) return;
+	fprintf(f, "[closed]\n");
+	fclose(f);
+	rename("/tmp/osd.txt.new", "/tmp/osd.txt");
+}
 
 char framebuffer[16][256];
 static void framebuffer_clear()
@@ -154,6 +203,8 @@ static void rotatechar(unsigned char *in, unsigned char *out)
 
 void OsdSetTitle(const char *s, int a)
 {
+	strncpy(osd_mirror_title, s ? s : "", sizeof(osd_mirror_title) - 1);
+	osd_mirror_title[sizeof(osd_mirror_title) - 1] = 0;
 	// Compose the title, condensing character gaps
 	arrow = a;
 	int zeros = 0;
@@ -305,6 +356,7 @@ void OsdWriteOffset(unsigned char n, const char *s, unsigned char invert, unsign
 	osd_check_line(n);
 	row_writes++;
 	if (invert) row_selected++;
+	osd_mirror_row(n, s, invert, stipple);
 	unsigned short i;
 	unsigned char b;
 	const unsigned char *p;
@@ -602,6 +654,7 @@ void OsdDisable()
 {
 	user_io_osd_key_enable(0);
 	spi_osd_cmd(OSD_CMD_DISABLE);
+	osd_mirror_closed();
 }
 
 void OsdMenuCtl(int en)
@@ -614,6 +667,7 @@ void OsdMenuCtl(int en)
 	else
 	{
 		spi_osd_cmd(OSD_CMD_DISABLE);
+		osd_mirror_closed();
 	}
 }
 
@@ -750,4 +804,5 @@ void OsdUpdate()
 	}
 
 	osdset = 0;
+	osd_mirror_flush(n);
 }
