@@ -275,11 +275,36 @@ static void osd_check_line(unsigned char n)
 	       (unsigned)n, sent);
 }
 
+// How many rows this paint wrote, and how many of them inverted.
+//
+// The cursor is drawn by passing `menusub == k` as the invert flag at each row,
+// so on a page whose cursor is on a selectable row exactly one row comes out
+// inverted. A page whose row literals disagree with its menumask breaks that:
+// two rows sharing a k invert together, and a k in the mask that no row draws
+// inverts nothing. Both were invisible until someone noticed on a screen -- see
+// the guard in HandleUI.
+static int row_writes = 0;
+static int row_selected = 0;
+static int row_exempt = 0;
+
+void OsdRowTallyReset()
+{
+	row_writes = 0;
+	row_selected = 0;
+	row_exempt = 0;
+}
+
+int OsdRowTallyWrites()   { return row_writes; }
+int OsdRowTallySelected() { return row_exempt ? 1 : row_selected; }
+void OsdRowTallyExempt()  { row_exempt = 1; }
+
 // write a null-terminated string <s> to the OSD buffer starting at line <n>
 void OsdWriteOffset(unsigned char n, const char *s, unsigned char invert, unsigned char stipple, char offset, char leftchar, char usebg, int maxinv, int mininv)
 {
 	//printf("OsdWriteOffset(%d)\n", n);
 	osd_check_line(n);
+	row_writes++;
+	if (invert) row_selected++;
 	unsigned short i;
 	unsigned char b;
 	const unsigned char *p;

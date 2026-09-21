@@ -27,7 +27,7 @@ An item marked **[no code]** is a decision or a record, not work.
 
 ---
 
-## U1 — The Minimig System page's row count has no compile-time guard  [HOST]
+## U1 — The Minimig System page's row count has no compile-time guard  [HOST]  — **DONE 2026-09-21**
 
 `menu.cpp:7322`. Every AmigaCD page ties its row count to its `menumask` with a
 `static_assert` against the length of its hints table, so adding a row without a
@@ -47,6 +47,42 @@ still silent.
 
 Doing it means either giving that page a hints table it does not otherwise need,
 or a different shape of guard. Neither is obvious, which is why it was left.
+
+**Done, and as a different shape of guard — for every page, not that one.** The
+compile-time framing was the wrong one and is worth recording as such: the row
+literals are spread over sixty lines of drawing code, and only the invert *flag*
+reaches `OsdWrite()`, never the `k` it was computed from. There is nothing for a
+`static_assert` to count. A hints table for that page would have tied its length
+to its mask and left every other page's literals unchecked.
+
+What is checkable is the consequence. With the cursor on a selectable row,
+exactly one row comes out inverted; two rows sharing a `k` give two, and a mask
+bit no row draws gives none. `osd.cpp` counts rows and inverted rows per paint,
+`osd_rowguard.cpp` decides, and `menu.cpp`'s `HandleUI()` reads the previous
+paint's totals and warns once per menu state. It covers all ~40 pages including
+the AmigaCD ones, not just `MENU_MINIMIG_CHIPSET1`.
+
+Split so the decision is testable: `tests/test_osd_rowguard.cpp`, 16 checks,
+falsified against seven mutations. The tally itself is not testable here — it
+counts real `OsdWriteOffset()` calls — so it is in
+`docs/hardware-test-plan.md` §1e3, with the one reproduction that can falsify it
+(break a row literal on purpose and confirm the check speaks). **Run that one
+first**: a diagnostic that cannot speak reads exactly like a clean bill of
+health.
+
+Two things it found:
+
+- **One page inverts two rows on purpose.** `Configs -> Load config` renders the
+  selected slot's second info line inverted so it reads as one highlighted
+  block (`menu.cpp:7121`). It gets `OsdRowTallyExempt()` rather than a changed
+  rendering. It is the only page in the tree that needs it; the warning names
+  the state, so a future one costs one console line and two lines of fix.
+- **A redundant guard, removed.** The verdict started with an explicit
+  `if (!menumask) return 0;`. Dropping it changed nothing any check could see —
+  a zero mask has no bit for the cursor to be on, so the cursor test already
+  covers it. Confirmed in both directions (removed: suite green; re-added: suite
+  green) and taken out, because a line that reads as load-bearing and is not is
+  worse than no line.
 
 ## U2 — The save state preview does not use the scaler's output rect  [TITLE]
 
@@ -173,18 +209,19 @@ the log open there is nothing to write.
 
 ## Order
 
-1. **U1** — the only remaining HOST-only item, now that U4 is done. Its guard's
-   shape is an open question rather than a known edit, and the page it protects
-   is nearly unreachable, which is why it was second and not first.
-2. **U2, U3** — both need a display. U2 is a defined change waiting for a way to
+**Nothing HOST-only is left.** U1 and U4 were the two, and both are done, which
+means every remaining item needs either a display or a log from the machine.
+
+1. **U2, U3** — both need a display. U2 is a defined change waiting for a way to
    judge it; U3 needs a measurement before it can even be specified.
-3. **U7** — blocked on one log from the person holding the hardware.
-4. **U5, U6** — records. Neither is work. U6 is the one to reread before the
+2. **U7** — blocked on one log from the person holding the hardware.
+3. **U5, U6** — records. Neither is work. U6 is the one to reread before the
    next upstream sync.
 
-**U4** is done; its section is kept rather than deleted, because what it found
-on the way (a reachable `!known && found` state, and one undefined shift) is the
-kind of thing the next reader of that file should not have to rediscover.
+The done sections are kept rather than deleted, because what each found on the
+way is the kind of thing the next reader of those files should not have to
+rediscover: for U4 a reachable `!known && found` state and one undefined shift,
+for U1 that the compile-time framing was impossible and why.
 
 ## What is not on this list
 

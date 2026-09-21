@@ -33,6 +33,20 @@ void StarsInit();
 void StarsUpdate();
 void OsdShiftDown(unsigned char n);
 
+// Per-paint row tally, for the guard in HandleUI that checks a page's drawn
+// cursor against its menumask. OsdWriteOffset() counts every row it writes and
+// every row it writes inverted; HandleUI reads the previous paint's totals and
+// arms the next one. See the comment at the guard for what it catches and why
+// it is a runtime check rather than a static_assert.
+void OsdRowTallyReset();
+int  OsdRowTallyWrites();
+int  OsdRowTallySelected();
+
+// Declare that the page now painting inverts rows for a reason other than the
+// cursor, so the guard must not expect exactly one. Cleared by the next reset,
+// so it has to be called on every paint of such a page.
+void OsdRowTallyExempt();
+
 // get/set core currently loaded
 void OsdCoreNameSet(const char* str);
 char* OsdCoreNameGet();
