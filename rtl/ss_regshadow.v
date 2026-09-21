@@ -356,15 +356,35 @@ end
 //
 // 256 flip-flops, not a memory: it is read as a whole by the replay, and
 // the save reads it sixteen bits at a time through rd_addr 256-271.
+//
+// DIWHIGH is the one register whose bit is also CLEARED by writes to other
+// registers. The shadow keeps values, not order, and the replay writes in
+// address order -- DIWSTOP ($090) before DIWHIGH ($1E4) -- but on hardware a
+// DIWSTRT or DIWSTOP write overrides everything a DIWHIGH write set (Agnus
+// resets V10-V9 on DIWSTRT; Denise sets hdiwstop[8] on DIWSTOP). So a
+// DIWHIGH written BEFORE the last DIWSTRT/DIWSTOP left nothing behind, and
+// replaying it after them installs a state the machine never had. On a
+// CD32 that is every game: the ROM writes DIWHIGH (as zero) at boot, the
+// game later writes DIWSTOP, and the replay's DIWHIGH-after-DIWSTOP cleared
+// H8 and left Chuck Rock a 27-pixel strip. Clearing DIWHIGH's bit on a
+// DIWSTRT/DIWSTOP write makes the bit mean "written after them", which is
+// the only case in which replaying it is right.
 reg [255:0] written;
+
+localparam [7:0] IDX_DIWSTRT = 8'h47;   // $08E >> 1
+localparam [7:0] IDX_DIWSTOP = 8'h48;   // $090 >> 1
+localparam [7:0] IDX_DIWHIGH = 8'hF2;   // $1E4 >> 1
 
 always @(posedge clk) begin
 	if (!rst_n)
 		written <= 256'd0;
 	else if (ld_we && ld_addr[8])
 		written[ld_addr[3:0]*16 +: 16] <= ld_data;
-	else if (clk7_en && writable(wr_idx) && !ld_we)
+	else if (clk7_en && writable(wr_idx) && !ld_we) begin
 		written[wr_idx] <= 1'b1;
+		if (wr_idx == IDX_DIWSTRT || wr_idx == IDX_DIWSTOP)
+			written[IDX_DIWHIGH] <= 1'b0;
+	end
 end
 
 // ONE read port on the array, shared between the save readback and the replay

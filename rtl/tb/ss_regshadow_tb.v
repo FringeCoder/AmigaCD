@@ -441,6 +441,31 @@ initial begin
 	rd_mask(4'd15);
 	check("reset clears the mask", {16'd0, rd_data}, 32'h00000000);
 
+	// ------------------------------------------- DIWHIGH follows the window
+	//
+	// A DIWSTRT or DIWSTOP write overrides what DIWHIGH set, so DIWHIGH's
+	// bit must only survive a write that came AFTER them. The CD32 boot
+	// order first: ROM writes DIWHIGH (zero), the game then writes DIWSTOP.
+	// Replaying that DIWHIGH after DIWSTOP is the Chuck Rock strip.
+	wr(9'h1E4, 16'h0000);          // DIWHIGH, as the ROM does
+	wr(9'h08E, 16'h2C81);          // DIWSTRT
+	wr(9'h090, 16'hECB1);          // DIWSTOP -- H8 implied set
+	rd_mask(4'd15);
+	check("DIWSTOP after DIWHIGH clears DIWHIGH's bit", {31'd0, rd_data[2]}, 32'd0);
+	rd_mask(4'd4);
+	check("DIWSTRT/DIWSTOP themselves are marked", {31'd0, rd_data[7] & rd_data[8]}, 32'd1);
+
+	// The AGA order: window first, then DIWHIGH to widen it. That one is
+	// real and must be replayed.
+	wr(9'h1E4, 16'h2000);          // DIWHIGH after both, H8 stop set
+	rd_mask(4'd15);
+	check("DIWHIGH after the window keeps its bit", {31'd0, rd_data[2]}, 32'd1);
+
+	// And a later DIWSTRT alone clears it again.
+	wr(9'h08E, 16'h2C81);
+	rd_mask(4'd15);
+	check("DIWSTRT alone also clears it", {31'd0, rd_data[2]}, 32'd0);
+
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);
 		$fatal(1);
