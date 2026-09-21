@@ -2111,11 +2111,37 @@ void ss_apply_host_state(int slot)
 		printf("process_ss: slot %d host block not usable\n", (slot & 3) + 1);
 }
 
+// The last counter word seen in each slot's window, per slot.
+static uint32_t ss_cnt[4] = {};
+
+// Re-arm one slot's save handshake after a capture has been dealt with.
+//
+// The core does not count saves. ss_ctrl.v's S_COUNT publishes one by writing
+// the constant 1 to word 0 of the window, so once a save has been seen the
+// NEXT save to the same slot writes the same 1, the poller's "counter
+// changed" test never fires, and the user sees the core's "Save state:
+// captured" followed twenty seconds later by "Save state NOT written" from
+// the deadline in process_ss(). The second save to a slot on one disc was
+// lost, every time. Measured on hardware: Chuck Rock, two saves to slot 1
+// without a remount.
+//
+// Putting both the window word and the last-seen value back to the reset
+// value is what a constant needs: every capture then differs from what came
+// before it. Done AFTER the file is written so the file keeps the 1 the core
+// wrote, the same as every file before this existed; the core never reads
+// word 0 on restore (ss_ctrl.v, S_L_RELEASE) so the window's value does not
+// matter to it.
+static void ss_rearm(int slot)
+{
+	if (!ss_base_win[slot]) return;
+	*(uint32_t *)ss_base_win[slot] = 0xFFFFFFFF;
+	ss_cnt[slot] = 0xFFFFFFFF;
+}
+
 int process_ss(const char *rom_name, int enable)
 {
 	static char ss_name[1024] = {};
 	static char *ss_sufx = 0;
-	static uint32_t ss_cnt[4] = {};
 	static int enabled = 0;
 
 	if (!ss_base) return 0;
@@ -2300,6 +2326,7 @@ int process_ss(const char *rom_name, int enable)
 						{
 							printf("process_ss: slot %d failed validation, not written\n", i + 1);
 							Info("Save state not written", 2000);
+							ss_rearm(i);
 							continue;
 						}
 					
@@ -2414,6 +2441,7 @@ int process_ss(const char *rom_name, int enable)
 						Info("Save state write FAILED", 3000);
 					}
 				}
+				ss_rearm(i);
 			}
 		}
 	}
