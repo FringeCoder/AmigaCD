@@ -13,8 +13,8 @@ disks as well as the floppies.
 
 ## Let the OSD write it
 
-With a disc image mounted, select **Write .mgl for this disc** on the main
-page. That writes an `.mgl` beside the disc, named after it, and toasts the
+With a disc image mounted, select **Write .mgl for this disc** on the
+Advanced page. That writes an `.mgl` beside the disc, named after it, and toasts the
 filename.
 
 It is worth preferring over writing one by hand for one reason: the OSD knows

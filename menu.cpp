@@ -999,11 +999,11 @@ static constexpr unsigned rowhint_rows(uint32_t mask)
 // actually stated. Without the assert, adding a row and forgetting its hint
 // shows the row after it the wrong text, or nothing, and neither says
 // anything is wrong.
-#define AMIGACD_MAIN_MENUMASK     0x3FFFu
+#define AMIGACD_MAIN_MENUMASK     0x1FFFu
 #define AMIGACD_SETTINGS_MENUMASK 0x7FFu
 #define AMIGACD_CONFIGS_MENUMASK  0x0Fu
-#define AMIGACD_ADV_MENUMASK_SNAC 0x1FFu
-#define AMIGACD_ADV_MENUMASK      0x7Fu
+#define AMIGACD_ADV_MENUMASK_SNAC 0x3FFu
+#define AMIGACD_ADV_MENUMASK      0xFFu
 #define AMIGACD_DRIVES_MENUMASK   0x0Fu
 
 // The hint for the row the cursor is on, in the scrolling line at the bottom.
@@ -7761,18 +7761,20 @@ void HandleUI(void)
 			/* 5 Hard Disk */ "Mount an HDF as the IDE1 master: the second volume software like AmigaVision keeps its settings on. Backspace or A+B ejects.",
 			/* 6 System    */ "The machine: CD32, CDTV, A500 or A1200. Each keeps its own settings, so switching away and back does not lose them.",
 			/* 7 Settings  */ "RAM, ROMs, save states, CD speed, per-game NVRAM, and the Amiga's own video and audio.",
-			/* 8 Advanced  */ "The user port - MT32-pi, MiSTer Floppy or a PSX SNAC adapter - plus Ethernet and Fast-IDE.",
+			/* 8 Advanced  */ "The user port - MT32-pi, MiSTer Floppy or a PSX SNAC adapter - plus Ethernet, Fast-IDE, and writing an .mgl launcher.",
 			/* 9 Save      */ "Write these settings, including what is mounted, as the startup config. Loaded again the next time the core starts.",
 			/*10 Configs   */ "Load a saved config, or save this one to any of ten slots.",
-			/*11 Write mgl */ "Write an .mgl beside the mounted disc, so the MiSTer menu can launch straight into this core with it. Names the core running now.",
-			/*12 Reset     */ "Restart the Amiga; asks first. Ctrl+LAlt+RAlt does it straight away, without the menu and without asking.",
-			/*13 exit      */ "Close the menu. Esc or F12 does the same from anywhere.",
+			/*11 Reset     */ "Restart the Amiga; asks first. Ctrl+LAlt+RAlt does it straight away, without the menu and without asking.",
+			/*12 exit      */ "Close the menu. Esc or F12 does the same from anywhere.",
 		};
 		static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_MAIN_MENUMASK),
 			"AmigaCD main page: one hint per selectable row");
 		helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
 		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
-		// Load, Write .mgl, Reset, Exit -- fourteen rows.
+		// Load, Reset, Exit -- thirteen rows. Write .mgl was the fourteenth
+		// and is on the Advanced page now: it is a one-off setup step, not
+		// something reached for while playing, and the everyday page is
+		// shorter for its going.
 		menumask = AMIGACD_MAIN_MENUMASK;
 
 		// The A1200 profile has no CD drive at all, so its two rows are dead.
@@ -7977,26 +7979,10 @@ void HandleUI(void)
 		// of the two that gets used, and putting it behind a submenu to tidy
 		// the page would be paying for the tidying with the common case.
 		OsdWrite(m++, " Configs                  \x16", menusub == 10, 0);
-		// Writes a .mgl beside the mounted disc so the MiSTer menu can launch
-		// straight into this core with it. A row rather than the + / - binding
-		// it started as: a keypress announced only in the scrolling helptext is
-		// not a feature anyone finds, and a launcher nobody finds is not a
-		// launcher. The line it occupies is the one a contextual Eject hint row
-		// used to have. That binding moved to the bottom line, and since the
-		// hints became per-row it is back on the drive rows themselves, which
-		// is where it was legible in the first place.
-		//
-		// Greyed with no disc IMAGE, which includes the physical drive being
-		// selected: a disc in a real tray has no path to put in a file.
-		{
-			const char *cdfile = minimig_config.hardfile[0].filename;
-			const int can_mgl = cdfile[0] && strcmp(cdfile, PHYSICAL_DISC_SENTINEL);
-			OsdWrite(m++, " Write .mgl for this disc", menusub == 11, !can_mgl);
-		}
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 12, 0);
-		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 13, 0);
+		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 11, 0);
+		OsdWrite(OsdGetSize() - 1, STD_EXIT, menusub == 12, 0);
 
 		menustate = MENU_AMIGACD_MAIN2;
 
@@ -8315,36 +8301,7 @@ void HandleUI(void)
 				menustate = MENU_AMIGACD_CONFIGS1;
 				menusub = 0;
 			}
-			else if (menusub == 11 && select) // Write .mgl for this disc
-			{
-				char mgl[1024];
-				const int res = amigacd_write_mgl(mgl, sizeof(mgl));
-				if (res)
-				{
-					// Name the file rather than saying "done": it is written
-					// beside the disc, not somewhere this row could imply, and
-					// the name is how it will be found again. And say WHICH of
-					// the three happened -- "updated" and "wrote" are different
-					// promises about a file the user may have edited.
-					const char *base = strrchr(mgl, '/');
-					char msg[64];
-					snprintf(msg, sizeof(msg), "%s %s",
-					         (res == MGL_WROTE)   ? "Wrote" :
-					         (res == MGL_UPDATED) ? "Updated" : "Already current:",
-					         base ? base + 1 : mgl);
-					Info(msg, 2500);
-				}
-				else
-				{
-					// The row is greyed without a disc image, but a greyed row
-					// still takes SELECT, and a write can fail on a full or
-					// read-only card with a disc present. One message covers
-					// the refusal; the log carries the rest.
-					Info("Could not write a .mgl", 2500);
-				}
-				menustate = MENU_AMIGACD_MAIN1;
-			}
-			else if (menusub == 12 && select) // Reset
+			else if (menusub == 11 && select) // Reset
 			{
 				// Asks first. The row is pinned second from the bottom, one
 				// row above exit, and what it throws away is everything since
@@ -8358,7 +8315,7 @@ void HandleUI(void)
 				menustate = MENU_AMIGACD_RESET1;
 				menusub = 0;                 // land on No
 			}
-			else if (menusub == 13 && select) // Exit
+			else if (menusub == 12 && select) // Exit
 			{
 				menustate = MENU_NONE1;
 			}
@@ -8877,7 +8834,7 @@ void HandleUI(void)
 		else if (select || menu || back || left)
 		{
 			menustate = MENU_AMIGACD_MAIN1;
-			menusub = 12;                // the Reset row
+			menusub = 11;                // the Reset row
 		}
 		break;
 
@@ -9166,7 +9123,8 @@ void HandleUI(void)
 				/* 5 CD delay */ "How long a disc already in the drive is held back at power-on. 8 s is measured; Off announces it at once, which fragments chip RAM and breaks Flink.",
 				/* 6 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
 				/* 7 Drives   */ "The MiSTer Floppy board: which real drive each df unit uses, and floppy turbo.",
-				/* 8 back     */ "Back to the main page.",
+				/* 8 Write mgl*/ "Write an .mgl beside the mounted disc, so the MiSTer menu can launch straight into this core with it. Names the core running now.",
+				/* 9 back     */ "Back to the main page.",
 			};
 			static const char *const tips_plain[] =
 			{
@@ -9177,6 +9135,7 @@ void HandleUI(void)
 				tips_snac[6],
 				tips_snac[7],
 				tips_snac[8],
+				tips_snac[9],
 			};
 			static_assert(sizeof(tips_snac) / sizeof(tips_snac[0]) == rowhint_rows(AMIGACD_ADV_MENUMASK_SNAC),
 				"AmigaCD advanced page with SNAC: one hint per selectable row");
@@ -9187,7 +9146,7 @@ void HandleUI(void)
 				: amigacd_rowhint(tips_plain, sizeof(tips_plain) / sizeof(tips_plain[0]), menusub);
 		}
 		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet,
-		// CD Mount Delay, Fast-IDE, Drives, Back
+		// CD Mount Delay, Fast-IDE, Drives, Write .mgl, Back
 		menumask = snac ? AMIGACD_ADV_MENUMASK_SNAC : AMIGACD_ADV_MENUMASK;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
@@ -9308,8 +9267,27 @@ void HandleUI(void)
 		// floppy hardware now lives. This row is the way in.
 		OsdWrite(m++, " Drives                   \x16", menusub == (uint32_t)(snac ? 7 : 5), 0);
 
+		// Writes a .mgl beside the mounted disc so the MiSTer menu can launch
+		// straight into this core with it. It started as a + / - binding
+		// announced only in the scrolling helptext, which nobody found; then
+		// a row on the main page, where it sat between Configs and Reset as
+		// the one thing there that is not reached for while playing. A
+		// launcher is set up once per disc, which is this page's job.
+		//
+		// Greyed with no disc IMAGE, which includes the physical drive being
+		// selected: a disc in a real tray has no path to put in a file.
+		//
+		// No blank above it. With SNAC as the tenant this page is sixteen
+		// rows deep already, and a spacer here would push this row onto the
+		// last line, where Back is drawn over it.
+		{
+			const char *cdfile = minimig_config.hardfile[0].filename;
+			const int can_mgl = cdfile[0] && strcmp(cdfile, PHYSICAL_DISC_SENTINEL);
+			OsdWrite(m++, " Write .mgl for this disc", menusub == (uint32_t)(snac ? 8 : 6), !can_mgl);
+		}
+
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 8 : 6), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 9 : 7), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -9334,7 +9312,8 @@ void HandleUI(void)
 			uint32_t cd_row   = snac ? 5 : 3;
 			uint32_t ide_row  = snac ? 6 : 4;
 			uint32_t fdd_row  = snac ? 7 : 5;   // the Drives submenu row
-			uint32_t back_row = snac ? 8 : 6;
+			uint32_t mgl_row  = snac ? 8 : 6;
+			uint32_t back_row = snac ? 9 : 7;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -9402,6 +9381,35 @@ void HandleUI(void)
 			{
 				menustate = MENU_AMIGACD_DRIVES1;
 				menusub = 0;
+			}
+			else if (menusub == mgl_row && select) // Write .mgl for this disc
+			{
+				char mgl[1024];
+				const int res = amigacd_write_mgl(mgl, sizeof(mgl));
+				if (res)
+				{
+					// Name the file rather than saying "done": it is written
+					// beside the disc, not somewhere this row could imply, and
+					// the name is how it will be found again. And say WHICH of
+					// the three happened -- "updated" and "wrote" are different
+					// promises about a file the user may have edited.
+					const char *base = strrchr(mgl, '/');
+					char msg[64];
+					snprintf(msg, sizeof(msg), "%s %s",
+					         (res == MGL_WROTE)   ? "Wrote" :
+					         (res == MGL_UPDATED) ? "Updated" : "Already current:",
+					         base ? base + 1 : mgl);
+					Info(msg, 2500);
+				}
+				else
+				{
+					// The row is greyed without a disc image, but a greyed row
+					// still takes SELECT, and a write can fail on a full or
+					// read-only card with a disc present. One message covers
+					// the refusal; the log carries the rest.
+					Info("Could not write a .mgl", 2500);
+				}
+				menustate = MENU_AMIGACD_ADVANCED1;
 			}
 			else if (menusub == back_row && select) // Back
 			{
