@@ -109,7 +109,7 @@ wire        ddr_write;
 wire        ddr_read;
 reg  [63:0] ddr_readdata = 0;
 reg         ddr_readdatavalid = 0;
-reg         ddr_waitrequest = 0;
+wire        ddr_waitrequest;
 
 wire [24:1] sd_addr;
 wire        sd_cs;
@@ -447,11 +447,42 @@ end
 // either lose the request or take the following cycle's acceptance as a
 // second one.
 reg [1:0] stall_ctr = 0;
+reg       stall_periodic = 0;
 
 always @(posedge clk) begin
-	stall_ctr       <= stall_ctr + 2'd1;
-	ddr_waitrequest <= (stall_ctr == 2'd0);
+	stall_ctr      <= stall_ctr + 2'd1;
+	stall_periodic <= (stall_ctr == 2'd0);
 end
+
+// One LONG stall, at one place: the write of the last shadow word is held
+// off for forty cycles. That is the DDR3 arbiter on hardware -- a refresh,
+// the scaler, the ARM -- landing on the handover from the shadow walk to the
+// colour table, and it is where a save on the bench of 2026-09-21 lost its
+// first CLUT word: the walk into S_CLUT_CAP took the CLUT read's settle as
+// proof the previous write had gone, queued colour 0 on top of a write that
+// was still waiting, and the window came out one word short from there on
+// with a CRC the host refused. Every other queue_word() site waits on
+// word_busy; that one did not.
+//
+// Armed by the ACCEPTANCE of the word before it (word W_CLUT-2, whichever
+// half of its pair that is), so the stall is in force before the last shadow
+// word is presented and its whole wait is covered. Once only, so the rest of the
+// bench sees the one-in-four stall it always has.
+reg [5:0] long_stall      = 0;
+reg       long_stall_done = 0;
+
+always @(posedge clk) begin
+	if (long_stall != 0)
+		long_stall <= long_stall - 6'd1;
+	else if (!long_stall_done && ddr_write && !ddr_waitrequest &&
+	         ddr_address[8:0] == (W_CLUT - 2) / 2 &&
+	         ddr_byteenable == (((W_CLUT - 2) % 2) ? 8'hF0 : 8'h0F)) begin
+		long_stall      <= 6'd40;
+		long_stall_done <= 1'b1;
+	end
+end
+
+assign ddr_waitrequest = stall_periodic || (long_stall != 0);
 
 // Mock DDR3 read service, out of the same array the writes above land in.
 // Avalon-style: a read is accepted on the cycle `ddr_read` is high with
@@ -900,6 +931,14 @@ initial begin
 	// lower file offset; without the swap every Amiga word reads reversed and
 	// nothing in the payload is interpretable (measured on hardware,
 	// 2026-08-10, on the first real save state).
+	// The colour table sits between the shadow and chip RAM, and its first
+	// word is the one written straight after the long stall above: if the
+	// controller queued it while the last shadow word was still waiting, it
+	// is missing here and everything after it is one word early.
+	check("clut word 0",   ddr_word(W_CLUT),       32'hC0100000);
+	check("clut word 1",   ddr_word(W_CLUT + 1),   32'hC0100001);
+	check("clut word 255", ddr_word(W_CLUT + 255), 32'hC01000FF);
+	check("long stall happened", {31'd0, long_stall_done}, 32'd1);
 	check("chip word 0", ddr_word(W_CHIP), {bswap16(16'hD001), bswap16(16'hD000)});
 	check("chip word 1", ddr_word(W_CHIP + 1), {bswap16(16'hD003), bswap16(16'hD002)});
 	check("chip word 2", ddr_word(W_CHIP + 2), {bswap16(16'hD005), bswap16(16'hD004)});
