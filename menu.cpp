@@ -902,7 +902,7 @@ static int recent_open(int idx)
 // It has always returned to MENU_MINIMIG_MAIN1 row 9, which is the row the
 // full OSD links to it from. The console variant reaches it from its own
 // Settings page instead, and MENU_MINIMIG_MAIN1 redirects to
-// MENU_AMIGACD_MAIN1 whose row 9 is Save settings -- so the page would have
+// MENU_AMIGACD_MAIN1 whose row 10 is Save settings -- so the page would have
 // dropped the user on a different page, on an unrelated row, one keypress away
 // from overwriting their config. Each variant names its own way back.
 //
@@ -7762,16 +7762,16 @@ void HandleUI(void)
 			/* 6 System    */ "The machine: CD32, CDTV, A500 or A1200. Each keeps its own settings, so switching away and back does not lose them.",
 			/* 7 Settings  */ "RAM, ROMs, save states, CD speed, per-game NVRAM, and the Amiga's own video and audio.",
 			/* 8 Advanced  */ "The user port - MT32-pi, MiSTer Floppy or a PSX SNAC adapter - plus Ethernet, Fast-IDE, and writing an .mgl launcher.",
-			/* 9 Save      */ "Write these settings, including what is mounted, as the startup config. Loaded again the next time the core starts.",
-			/*10 Configs   */ "Load a saved config, or save this one to any of ten slots.",
+			/* 9 Configs   */ "Load a saved config, or save this one to any of ten slots.",
+			/*10 Save      */ "Write these settings, including what is mounted, as the startup config. Loaded again the next time the core starts.",
 			/*11 Reset     */ "Restart the Amiga; asks first. Ctrl+LAlt+RAlt does it straight away, without the menu and without asking.",
 			/*12 exit      */ "Close the menu. Esc or F12 does the same from anywhere.",
 		};
 		static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_MAIN_MENUMASK),
 			"AmigaCD main page: one hint per selectable row");
 		helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
-		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced, Save,
-		// Load, Reset, Exit -- thirteen rows. Write .mgl was the fourteenth
+		// CD, Real CD, DF0, DF1, HD0, HD1, System, Settings, Advanced,
+		// Configs, Save, Reset, Exit -- thirteen rows. Write .mgl was the fourteenth
 		// and is on the Advanced page now: it is a one-off setup step, not
 		// something reached for while playing, and the everyday page is
 		// shorter for its going.
@@ -7962,23 +7962,16 @@ void HandleUI(void)
 		// Hardware a real CD32/CDTV never shipped with. Kept off the Settings
 		// page so the everyday options stay a short list.
 		OsdWrite(m++, " Advanced                 \x16", menusub == 8, 0);
-		OsdWrite(m++, " Save settings", menusub == 9, 0);
-		// The counterpart. Until now the page could write a config and never
-		// read one back, so there was no way to undo an experiment short of
-		// reloading the core -- and no way to keep a second set of settings at
-		// all. It says (resets) because it does: minimig_cfg_load runs
-		// ApplyConfiguration, which halts the CPU, resets it and re-uploads the
-		// Kickstart.
-		// Was "Load settings", which opened the config list directly. It is a
-		// submenu now so that SAVING to a slot has somewhere to live: the list
-		// offers ten configs and Save settings above only ever writes slot 0,
-		// so a slot could be loaded that nothing in this OSD could write. The
-		// asymmetry arrived with the Load row and is closed here.
-		//
-		// Save settings keeps its own row and its single press. It is the one
-		// of the two that gets used, and putting it behind a submenu to tidy
-		// the page would be paying for the tidying with the common case.
-		OsdWrite(m++, " Configs                  \x16", menusub == 10, 0);
+		// The three submenus sit together, then the one-press actions. Configs
+		// was "Load settings", which opened the config list directly. It is a
+		// submenu so that SAVING to a slot has somewhere to live: the list
+		// offers ten configs and Save settings below only ever writes slot 0,
+		// so a slot could be loaded that nothing in this OSD could write.
+		OsdWrite(m++, " Configs                  \x16", menusub == 9, 0);
+		// Keeps its own row and its single press. It is the one of the two
+		// that gets used, and putting it behind a submenu to tidy the page
+		// would be paying for the tidying with the common case.
+		OsdWrite(m++, " Save settings", menusub == 10, 0);
 
 		for (int i = m; i < OsdGetSize() - 2; i++) OsdWrite(i, "", 0, 0);
 		OsdWrite(OsdGetSize() - 2, " Reset", menusub == 11, 0);
@@ -8283,7 +8276,7 @@ void HandleUI(void)
 				menusub = 0;
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
-			else if (menusub == 9 && select) // Save settings -> default config slot 0
+			else if (menusub == 10 && select) // Save settings -> default config slot 0
 			{
 				// Persists the whole minimig_config: mounted CD (hardfile[0]),
 				// the two hard disks, RAM, CPU/chipset (System profile),
@@ -8296,7 +8289,7 @@ void HandleUI(void)
 				Info("Settings saved", 1500);
 				menustate = MENU_AMIGACD_MAIN1;
 			}
-			else if (menusub == 10 && select) // Configs
+			else if (menusub == 9 && select) // Configs
 			{
 				menustate = MENU_AMIGACD_CONFIGS1;
 				menusub = 0;
@@ -8767,7 +8760,7 @@ void HandleUI(void)
 		else if (back || left || (select && menusub == 3))
 		{
 			menustate = MENU_AMIGACD_MAIN1;
-			menusub = 10;                // the Configs row
+			menusub = 9;                 // the Configs row
 		}
 		else if (select)
 		{
@@ -9217,8 +9210,6 @@ void HandleUI(void)
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
 		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 4 : 2), 0);
-		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
-		OsdWrite(m++, " is always present either way.", 0, 0);
 
 		OsdWrite(m++, "", 0, 0);
 
@@ -9277,9 +9268,11 @@ void HandleUI(void)
 		// Greyed with no disc IMAGE, which includes the physical drive being
 		// selected: a disc in a real tray has no path to put in a file.
 		//
-		// No blank above it. With SNAC as the tenant this page is sixteen
-		// rows deep already, and a spacer here would push this row onto the
-		// last line, where Back is drawn over it.
+		// Row budget: with SNAC as the tenant this page reaches fourteen rows
+		// before Back on line 15. Count that layout, not the one on screen,
+		// before adding anything here -- a spacer too many puts this row on
+		// the last line, where Back is drawn over it.
+		OsdWrite(m++, "", 0, 0);
 		{
 			const char *cdfile = minimig_config.hardfile[0].filename;
 			const int can_mgl = cdfile[0] && strcmp(cdfile, PHYSICAL_DISC_SENTINEL);
