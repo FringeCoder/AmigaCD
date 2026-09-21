@@ -1000,7 +1000,7 @@ static constexpr unsigned rowhint_rows(uint32_t mask)
 // shows the row after it the wrong text, or nothing, and neither says
 // anything is wrong.
 #define AMIGACD_MAIN_MENUMASK     0x1FFFu
-#define AMIGACD_SETTINGS_MENUMASK 0x7FFu
+#define AMIGACD_SETTINGS_MENUMASK 0xFFFu
 #define AMIGACD_CONFIGS_MENUMASK  0x0Fu
 #define AMIGACD_ADV_MENUMASK_SNAC 0x3FFu
 #define AMIGACD_ADV_MENUMASK      0xFFu
@@ -1224,7 +1224,7 @@ static void amigacd_video_back()
 	if (is_amigacd())
 	{
 		menustate = MENU_AMIGACD_SETTINGS1;
-		menusub = 9;                       // the Video & Audio row
+		menusub = 10;                      // the Video & Audio row
 	}
 	else
 	{
@@ -8351,23 +8351,30 @@ void HandleUI(void)
 			{
 				/* 0 FastRAM  */ "Zorro II and Zorro III fast RAM. Z3 and 68000 both stop save states working, and grey those rows out when selected.",
 				/* 1 D-Cache  */ "The 68020's instruction cache. Faster, and only available when the CPU is an 020.",
-				/* 2 Main ROM */ "The Kickstart. Amiga Forever ROMs work as they are, encrypted, as long as ROM.KEY sits beside them.",
-				/* 3 Ext ROM  */ "The extended ROM, which a CD32 needs to boot a disc. Minus clears the pairing.",
-				/* 4 Save slot*/ "Which of four save state slots to use. Shows when each was written, or that it is empty. Ctrl+Alt+F3 steps it without the menu.",
-				/* 5 Save     */ "Capture the machine into the selected slot. Ctrl+Alt+F1 does it without opening the menu, which is the point of it.",
-				/* 6 Restore  */ "Put the selected slot back. Ctrl+Alt+F2 does it without the menu. Refused when there is no disc or HDF to name the save after.",
-				/* 7 CD speed */ "Fast is the rate this core has always used. CD32 (2x) is what the real machine does: four times the loading, four times the margin.",
-				/* 8 Clear NVR*/ "Erase the CD32 saved games for the disc in the drive. Not a save state. Asks first, and the machine needs a reset to see it.",
-				/* 9 Video/A  */ "The Amiga's own video and audio: PAL or NTSC, stereo mix, the LED filter, Paula output, and screen centring.",
-				/*10 back     */ "Back to the main page.",
+				/* 2 CPU Turbo*/ "Run the 68020 at full speed rather than throttled to the stock rate. Only available when the CPU is an 020.",
+				/* 3 Main ROM */ "The Kickstart. Amiga Forever ROMs work as they are, encrypted, as long as ROM.KEY sits beside them.",
+				/* 4 Ext ROM  */ "The extended ROM, which a CD32 needs to boot a disc. Minus clears the pairing.",
+				/* 5 Save slot*/ "Which of four save state slots to use. Shows when each was written, or that it is empty. Ctrl+Alt+F3 steps it without the menu.",
+				/* 6 Save     */ "Capture the machine into the selected slot. Ctrl+Alt+F1 does it without opening the menu, which is the point of it.",
+				/* 7 Restore  */ "Put the selected slot back. Ctrl+Alt+F2 does it without the menu. Refused when there is no disc or HDF to name the save after.",
+				/* 8 CD speed */ "Fast is the rate this core has always used. CD32 (2x) is what the real machine does: four times the loading, four times the margin.",
+				/* 9 Clear NVR*/ "Erase the CD32 saved games for the disc in the drive. Not a save state. Asks first, and the machine needs a reset to see it.",
+				/*10 Video/A  */ "The Amiga's own video and audio: PAL or NTSC, stereo mix, the LED filter, Paula output, and screen centring.",
+				/*11 back     */ "Back to the main page.",
 			};
 			static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_SETTINGS_MENUMASK),
 				"AmigaCD settings page: one hint per selectable row");
 			helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
 		}
-		// FastRAM(0), D-Cache(1), Main ROM(2), Ext ROM(3), Save slot(4),
-		// Save state(5), Restore state(6), CD speed(7), Clear NVRAM(8),
-		// Video & Audio(9), Back(10) -- eleven rows, so 0x7FF.
+		// FastRAM(0), D-Cache(1), CPU Turbo(2), Main ROM(3), Ext ROM(4),
+		// Save slot(5), Save state(6), Restore state(7), CD speed(8),
+		// Clear NVRAM(9), Video & Audio(10), Back(11) -- twelve rows, 0xFFF.
+		//
+		// The merge that brought CPU Turbo in from develop left this page
+		// half-renumbered: the render drew Save slot on the same index as Ext
+		// ROM, and the handler had two menusub == 7 branches, Restore state
+		// and CD speed, so CD speed could never be changed. Every index below
+		// Turbo is +1 from the layout without it, all the way through.
 		menumask = AMIGACD_SETTINGS_MENUMASK;
 		parentstate = menustate;
 
@@ -8437,12 +8444,12 @@ void HandleUI(void)
 				sprintf(s, " Save slot: %s  %s",
 				        config_ss_slot_msg[minimig_config.ss_slot & 3], slotinfo);
 			}
-			OsdWrite(m++, s, menusub == 4, ss_blocked);
+			OsdWrite(m++, s, menusub == 5, ss_blocked);
 
-			amigacd_ss_preview(menusub == 4 && !ss_blocked, minimig_config.ss_slot & 3);
+			amigacd_ss_preview(menusub == 5 && !ss_blocked, minimig_config.ss_slot & 3);
 
-			OsdWrite(m++, " Save state", menusub == 5, ss_blocked);
-			OsdWrite(m++, " Restore state", menusub == 6, ss_blocked);
+			OsdWrite(m++, " Save state", menusub == 6, ss_blocked);
+			OsdWrite(m++, " Restore state", menusub == 7, ss_blocked);
 		}
 
 		// How fast sectors reach the machine. Grouped with the NVRAM rows
@@ -8459,7 +8466,7 @@ void HandleUI(void)
 			              ? (int)minimig_config.cd_speed : (int)mmcd_fast;
 			strcpy(s, " CD speed : ");
 			strcat(s, config_cd_speed_msg[spd]);
-			OsdWrite(m++, s, menusub == 7, !has_cd);
+			OsdWrite(m++, s, menusub == 8, !has_cd);
 		}
 
 		// Per-game NVRAM. A CD32 save lives in a file named after a hash of
@@ -8492,7 +8499,7 @@ void HandleUI(void)
 			// Greyed rather than hidden when there is nothing to clear: the row
 			// keeps its position, and a row that is there and dim says "not
 			// now" where a row that vanishes says "you imagined it".
-			OsdWrite(m++, " Clear NVRAM", menusub == 8, !have_nvr);
+			OsdWrite(m++, " Clear NVRAM", menusub == 9, !have_nvr);
 		}
 
 		// The Amiga's own video and audio: TV standard, stereo mix, the LED
@@ -8510,10 +8517,10 @@ void HandleUI(void)
 		// patched by deriving it from the system profile rather than by giving
 		// the OSD a way in (minimig_config.cpp, "never shows that row"). This
 		// is the way in.
-		OsdWrite(m++, " Video & Audio            \x16", menusub == 9, 0);
+		OsdWrite(m++, " Video & Audio            \x16", menusub == 10, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 10, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 11, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -8661,7 +8668,7 @@ void HandleUI(void)
 				// draw at all.
 				minimig_ss_request_restore();
 			}
-			else if (menusub == 7) // CD speed
+			else if (menusub == 8) // CD speed
 			{
 				// -/+ and SELECT all cycle it: two values, so there is nothing
 				// for a direction to mean, and SELECT is what a controller can
@@ -8673,7 +8680,7 @@ void HandleUI(void)
 				}
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 8 && select) // Clear NVRAM
+			else if (menusub == 9 && select) // Clear NVRAM
 			{
 				// Confirmed, because this deletes somebody's saves. The row is
 				// greyed when there is nothing to clear, but a greyed row still
@@ -8684,12 +8691,12 @@ void HandleUI(void)
 					menustate = MENU_AMIGACD_NVRCLEAR1;
 				}
 			}
-			else if (menusub == 9 && select) // Video & Audio
+			else if (menusub == 10 && select) // Video & Audio
 			{
 				menustate = MENU_MINIMIG_VIDEO1;
 				menusub = 0;
 			}
-			else if (menusub == 10 && select) // Back
+			else if (menusub == 11 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 7;   // Settings row -- 5 was Hard Disk 1, see above
@@ -9074,7 +9081,7 @@ void HandleUI(void)
 				// result -- it is the result: the disc has no save, which is
 				// the state a disc that was never saved on is in.
 				menustate = MENU_AMIGACD_SETTINGS1;
-				menusub = 8;
+				menusub = 9;                 // the Clear NVRAM row
 			}
 			else
 			{
@@ -9089,7 +9096,7 @@ void HandleUI(void)
 		else if (select || menu || back || left)
 		{
 			menustate = MENU_AMIGACD_SETTINGS1;
-			menusub = 8;
+			menusub = 9;                 // the Clear NVRAM row
 		}
 		break;
 
