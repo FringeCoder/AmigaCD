@@ -75,9 +75,28 @@ enum mm_snacPortMode {
 typedef struct
 {
 	unsigned char cfg;
+	// hardfile[0].reserved carries AMIGACD_HF0_CD32PLUS: this machine is a
+	// CD32+ rather than a stock CD32. The two agree on every other bit, and
+	// the thing that used to tell them apart -- whether IDE was enabled --
+	// turned out to be unavailable, because the CD32's own CD needs it.
+	//
+	// This byte is the marker because it is the only genuinely spare persisted
+	// storage in the config: declared, never read, never written, reachable
+	// from no menu path. Using it changes no struct size, so minimig_cfg_load's
+	// exact-size dispatch is untouched and every existing config keeps loading
+	// down the same branch, with the bit reading 0 and meaning "stock CD32".
+	//
+	// The alternatives were worse. ext_cfg/ext_cfg2 are a live 32-bit word sent
+	// to the core. hardfile[1].cfg is cleared when the user ejects a drive
+	// (menu.cpp), so a CD32+ would silently demote itself. Appending a field
+	// changes sizeof and needs a new migration branch in the riskiest function
+	// in minimig_config.cpp.
 	unsigned char reserved;
 	char filename[1024];
 } mm_hardfileTYPE;
+
+// Bit 0 of hardfile[0].reserved. See above.
+#define AMIGACD_HF0_CD32PLUS 0x01
 
 typedef struct
 {
@@ -117,19 +136,36 @@ typedef struct
 	mm_hardfileTYPE cd32_drive;
 	mm_hardfileTYPE cdtv_drive;
 	uint8_t         a2065_mode;
+	// Seconds to hold the first CD media announcement at cold boot. 0 disables
+	// the hold entirely; 8 is the default and the value measured to work.
+	//
+	// Presenting a disc that is already there at power-on is not what the
+	// hardware does, and a CD32 title that wants most of chip RAM in one
+	// allocation fails because of it -- the ROM allocates its CD structures in
+	// a different order and fragments the region. See
+	// docs/chip-ram-shortfall.md; the OSD row is on the Advanced page.
+	//
+	// Appended, so every older layout migrates through the branches in
+	// minimig_cfg_load and gets the working default rather than a zero.
+	unsigned char   cd_mount_delay;
+
 	// How fast sectors are handed to the CD32. See mm_cdSpeed below.
 	//
-	// Appended, and DELIBERATELY zero-defaulted to the shipped rate. The
-	// struct was exactly full at 7280 bytes, so this byte grows it to 7284
-	// and every config on a card is now smaller than sizeof(minimig_config).
-	// That is the one case minimig_cfg_load's final rung already handles
-	// correctly: it zeroes the destination, reads the short file in, and
-	// copies the lot -- so this field arrives as 0 and an existing config
-	// keeps behaving exactly as it did. A migration rung of its own would
-	// only restate that, so there is not one.
+	// Appended after cd_mount_delay, and the order is deliberate. Both fields
+	// were added as the single byte at offset 7280 on different branches, so
+	// a 7281-byte config on a card is ambiguous: it carries one or the other.
+	// The machines this core has actually run on saved cd_mount_delay there,
+	// and a delay read back into cd_speed would be a nonsense rate while a
+	// rate read back into cd_mount_delay would silently bring the Flink
+	// out-of-memory failure back. With cd_mount_delay first, those files load
+	// exactly as written and cd_speed arrives as 0 -- mmcd_fast, the shipped
+	// rate -- which is the one value that changes nothing.
 	uint8_t         cd_speed;
 } mm_configTYPE;
 
+// Seconds. Kept here because the menu, the config loader and akiko all need it.
+#define AMIGACD_CD_DELAY_DEFAULT 8
+#define AMIGACD_CD_DELAY_MAX     15
 // CD sector delivery rate.
 //
 // mmcd_fast is the floor the core has always shipped with (see
@@ -204,6 +240,10 @@ void amigacd_default_rom_names(int sys, const char **main_name, const char **ext
 // but as the wrong Amiga, and the only other clue is the Main ROM row.
 int amigacd_set_default_roms(int sys);
 int amigacd_apply_system(int sys);
+
+// True when the CD must be reached over IDE -- a physical disc only. An image is
+// served by Akiko, which is what allows a stock CD32 to run with no IDE at all.
+int amigacd_cd_needs_ide(void);
 int  amigacd_is_cdtv(void);
 // The AMIGACD_SYS_* values these two speak in live in minimig_profile.h, which
 // is included above so callers need only this header.

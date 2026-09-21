@@ -120,6 +120,38 @@ static uint32_t get_fp()
 	return fp;
 }
 
+// AmigaDOS protection bits, as ACTION_EXAMINE_* reports them and
+// ACTION_SET_PROTECT sets them.
+//
+//   bit 0  D  delete      bit 4  A  archive
+//   bit 1  E  execute     bit 5  P  pure
+//   bit 2  W  write       bit 6  S  script
+//   bit 3  R  read        bit 7  H  hold
+//
+// DEWR are inverted: a set bit DENIES the operation, which is why a file with
+// no bits set is the fully permitted one. APSH are not inverted, and none of
+// them has anything to correspond to on the host, so they are always reported
+// clear and ignored on the way in.
+//
+// Only W and R map to something real here. D follows W: a host that will not
+// let us write the file will not let us unlink it either, given both depend on
+// the same permission in practice for the single-user case this shares as. E is
+// deliberately left clear rather than mapped to the execute bit -- an Amiga
+// binary is not marked executable on the host, and reporting E set would deny
+// running every file on the share.
+#define AMIGA_PROT_D  (1 << 0)
+#define AMIGA_PROT_E  (1 << 1)
+#define AMIGA_PROT_W  (1 << 2)
+#define AMIGA_PROT_R  (1 << 3)
+
+static uint32_t amiga_protection(mode_t mode)
+{
+	uint32_t prot = 0;
+	if (!(mode & S_IWUSR)) prot |= AMIGA_PROT_W | AMIGA_PROT_D;
+	if (!(mode & S_IRUSR)) prot |= AMIGA_PROT_R;
+	return prot;
+}
+
 static char* find_path(uint32_t key, const char *name)
 {
 	dbg_print("find_path(%d, %s)\n", key, name);
@@ -478,10 +510,12 @@ static int process_request(void *reqres_buffer)
 			time_t time = 0;
 			uint32_t size = 0;
 
+			uint32_t protection = 0;
 			struct stat64 *st = getPathStat(name);
 			if (st)
 			{
 				time = st->st_mtime;
+				protection = amiga_protection(st->st_mode);
 				if (type == ST_FILE)
 				{
 					if (st->st_size > UINT32_MAX) size = UINT32_MAX;
@@ -492,7 +526,7 @@ static int process_request(void *reqres_buffer)
 			res->disk_key = SWAP_INT(disk_key);
 			res->entry_type = SWAP_INT(type);
 			res->size = SWAP_INT(size);
-			res->protection = 0;
+			res->protection = SWAP_INT(protection);
 			fill_date(time, res->date);
 
 			res->file_name[0] = strlen(fn);
@@ -525,10 +559,12 @@ static int process_request(void *reqres_buffer)
 			time_t time = 0;
 			uint32_t size = 0;
 
+			uint32_t protection = 0;
 			struct stat64 st;
 			if (fstat64(fileno(open_file_handles[key].filp), &st) == 0)
 			{
 				time = st.st_mtime;
+				protection = amiga_protection(st.st_mode);
 				if (st.st_mode & S_IFDIR) type = ST_USERDIR;
 				else
 				{
@@ -551,7 +587,7 @@ static int process_request(void *reqres_buffer)
 			res->disk_key = SWAP_INT(disk_key);
 			res->entry_type = SWAP_INT(type);
 			res->size = SWAP_INT(size);
-			res->protection = 0;
+			res->protection = SWAP_INT(protection);
 			fill_date(time, res->date);
 
 			res->file_name[0] = strlen(fn);
@@ -848,15 +884,67 @@ static int process_request(void *reqres_buffer)
 
 		case ACTION_SET_PROTECT:
 		{
-			dbg_print("> ACTION_SET_PROTECT unimplemented\n");
+			dbg_print("> ACTION_SET_PROTECT\n");
+			SetProtectRequest *req = (SetProtectRequest*)reqres_buffer;
+
+			uint32_t mask = SWAP_INT(req->mask);
+
+			// Same idiom as ACTION_DELETE_OBJECT: the name arrives as a BSTR
+			// and find_path takes the string after the length byte.
+			char *cp = find_path(SWAP_INT(req->key), req->name + 1);
+			if (!cp[0])
+			{
+				ret = ERROR_OBJECT_NOT_FOUND;
+				break;
+			}
+
+			const char *fp = getFullPath(cp);
+
+			struct stat64 st;
+			if (stat64(fp, &st))
+			{
+				dbg_print("  couldn't stat %s: %d\n", fp, errno);
+				ret = ERROR_OBJECT_NOT_FOUND;
+				break;
+			}
+
+			// Only the two bits that mean anything on the host are acted on,
+			// and both are inverted -- set denies. Everything else in the mask
+			// is accepted and dropped, which is what a handler on a file system
+			// without those attributes does; refusing the whole packet because
+			// of an A or P bit would fail an otherwise ordinary Protect.
+			mode_t mode = st.st_mode & 07777;
+			if (mask & AMIGA_PROT_W) mode &= ~(mode_t)(S_IWUSR | S_IWGRP | S_IWOTH);
+			else                     mode |=  (mode_t)S_IWUSR;
+			if (mask & AMIGA_PROT_R) mode &= ~(mode_t)(S_IRUSR | S_IRGRP | S_IROTH);
+			else                     mode |=  (mode_t)S_IRUSR;
+
+			DISKLED_ON;
+			if (chmod(fp, mode))
+			{
+				dbg_print("  chmod %s to %04o failed: %d\n", fp, mode, errno);
+				ret = ERROR_OBJECT_NOT_FOUND;
+				break;
+			}
+
 			ret = 0;
 		}
 		break;
 
 		case ACTION_SET_COMMENT:
 		{
-			dbg_print("> ACTION_SET_COMMENT unimplemented\n");
-			ret = 0;
+			// Nothing on the host holds an AmigaDOS file note, so this cannot
+			// be honoured. It answers ERROR_ACTION_NOT_KNOWN, which is the
+			// answer AmigaDOS defines for a packet a handler does not
+			// implement, rather than the success it used to report.
+			//
+			// This is a behaviour change: a Filenote that silently did nothing
+			// now fails visibly. That is the point -- a caller had no way to
+			// tell the comment was discarded -- but if some title turns out to
+			// abort on the error where it previously carried on, this case is
+			// the one line to revert.
+			dbg_print("> ACTION_SET_COMMENT (not supported by the host)\n");
+			ret = ERROR_ACTION_NOT_KNOWN;
 		}
 		break;
 

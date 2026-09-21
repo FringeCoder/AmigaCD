@@ -2,6 +2,11 @@
 
 **Date:** 2026-08-06
 **Status:** analysis, with one experiment run. No fix merged.
+
+**Updated 2026-08-31.** The designated fix below was attempted, it landed, the problem
+returned anyway, and a seed then absorbed it. See "What actually happened" at the end of
+that section before using anything here to plan work — the *analysis* holds up, the
+prediction attached to it did not.
 **Occasion:** PSX SNAC Plan 2 added 62 ALMs and broke timing. This is what we found
 underneath.
 
@@ -104,8 +109,9 @@ Recording this because the idea is an obvious one to have twice.
 
 ## THE DESIGNATED NEXT FIX: reduce fan-in pressure on `sd_addr`
 
-**Status: not attempted. This is the one to reach for when the problem returns — and it
-will.**
+**Status: attempted 2026-08-09, landed, and did not hold. See "What actually happened"
+below.** The reasoning in this section is still the best account we have of why `sd_addr`
+keeps losing; treat it as diagnosis rather than as a remedy in reserve.
 
 `emu|ram1|sd_addr` has now been the destination of the binding path on **three separate
 occasions**, with a different source register each time. That is the signature of an
@@ -172,6 +178,70 @@ They have been measured and are dead ends — see the experiments above:
 
 When a change fails timing on `sd_addr` and a seed sweep does not recover it — or sooner, if
 someone is planning a feature larger than the ~62 ALMs that started all this.
+
+### What actually happened
+
+Recorded 2026-08-31, because the prediction above was confident and wrong in a way worth
+keeping.
+
+The fix was implemented as described — `5cb32ea perf(sdram): split sd_addr into chip and
+CPU halves, select at the output`. It landed. **The problem returned regardless.** At the
+tip of `sync/minimig-upstream-74d6ce0` the design read setup −0.347 / hold −0.401, TNS
+−3.303 / −1.104, and the four builds before that had each needed a seed sweep to close.
+
+So this was not the fix that ends the problem. What ends each occurrence, in practice, is
+a seed: the 74d6ce0 merge closed on seed 10 (`1a4c33e quartus: seed 10 for the 74d6ce0
+netlist`) at **+0.117 setup / +0.234 hold**, TNS 0.000 on every domain, with no logic
+change at all. That is the honest state of this core's timing — it closes, thinly, on a
+seed found by sweeping, and it has done so through every change since.
+
+Two consequences for anyone reading this doc to plan work:
+
+1. **Do not gate accuracy work on "fixing timing" as a prerequisite.** The core accuracy
+   backlog did exactly that (T0 in the core repo's `docs/core-accuracy-todo.md`) and had
+   to be corrected: it concluded from the pre-sweep numbers that the merge's chipset
+   commits might have to be dropped, when in fact all four fit. Fit the change and look at
+   both slacks; do not reason about affordability in advance.
+2. **Rank the seed sweep as a first-class step, not a workaround.** It has resolved more
+   of these than any logic change in this document has. `seed_sweep_both.sh` in the core
+   repo requires both slacks positive, which is the part that matters — seed 1 in the
+   2026-08-31 sweep looked healthy at +0.134 setup while carrying −0.495 hold.
+
+### The binding path has moved off `sd_addr` entirely
+
+Measured 2026-08-31 with `quartus_sta -t` and `report_timing -setup -npaths 10` against the
+seed 10 netlist — ten seconds, no re-fit. **Neither `sd_addr` nor anything else in
+`sdram_ctrl` appears in the worst ten paths.** Seven of the ten end inside `ss_ctrl`, the
+save state controller:
+
+```
+    0.117  f2sdram~FF_3780                     -> ss_ctrl|state.S_L_KICK_CHK
+    0.122  f2sdram~FF_3780                     -> ss_ctrl|state.S_L_KICK_CHK
+    0.146  f2sdram~FF_3777                     -> ss_ctrl|state.S_L_KICK_CHK
+    0.151  f2sdram~FF_3777                     -> ss_ctrl|state.S_L_KICK_CHK
+    0.219  ss_ctrl|hdr_length[12]              -> ss_ctrl|rd_idx[1]
+    0.219  ss_ctrl|hdr_length[12]              -> ss_ctrl|rd_idx[2]
+    0.230  ss_ctrl|hdr_length[12]              -> ss_ctrl|rd_idx[23]
+    0.263  ddram_ctrl|a2065_ddram_arbiter|busy -> f2sdram~FF_1381
+    0.286  f2sdram~FF_3780                     -> ss_ctrl|state.S_L_MAGIC
+    0.307  ss_ctrl|rd_data[52]                 -> ss_ctrl|rd_idx[1]
+```
+
+Hold is comfortable and unrelated: worst +0.234 on an `IIR_filter` tap.
+
+So the `sd_addr` framing that this entire document is built around describes a problem the
+design has moved past. The three occasions tabulated above were real, and the reasoning
+about fan-in pressure is still sound as history — but the register under pressure today is
+not that one, and none of the remedies below are aimed at what is actually binding.
+
+What is binding is the save state controller's restore-side load path: a DDR3 read arriving
+at the `S_L_KICK_CHK` and `S_L_MAGIC` states (four of the worst ten, including both of the
+top two), and the header/index arithmetic feeding `rd_idx` (four more). That is tracked as
+T17 in the core repo's `docs/core-accuracy-todo.md`, which was already proposing to trim
+`ss_ctrl` — 2,530 lines, much of it diagnostics for a bug fixed in 2026-08 — and has now
+been promoted on the strength of this measurement.
+
+Re-measure before acting on anything below this line.
 
 ## Other things that would buy headroom
 
@@ -274,3 +344,73 @@ minimum:
 
 That is a real test campaign, not a smoke test. It is the reason this document ends with
 analysis rather than a patch.
+
+---
+
+## 2026-09-02: the `sd_addr` framing above is out of date
+
+Everything before this section is still accurate as history, and wrong as a description of
+the current design. Two things have happened since.
+
+**The designated fix was attempted, and it landed.** The section above says reducing fan-in
+pressure on `sd_addr` is "not attempted. This is the one to reach for when the problem
+returns". It was reached for -- `5cb32ea perf(sdram): split sd_addr into chip and CPU
+halves, select at the output` -- and the problem returned anyway, and a seed then absorbed
+it. That whole sequence is worth more than the original prediction: a fix aimed at one
+register moved which source wins, and the pressure reappeared elsewhere.
+
+**`sd_addr` is no longer the destination of anything that binds.** `report_timing -setup
+-npaths 10` against the seed 10 netlist (2026-08-31) found neither `sd_addr` nor
+`sdram_ctrl` anywhere in the worst ten. Seven of the ten were inside `ss_ctrl`, the save
+state controller, in two shapes: the DDR3 read return arriving at the restore state
+machine, and the header/index arithmetic feeding `rd_idx`.
+
+### The DDR3 read return, fixed 2026-09-02
+
+The first shape was the f2sdram bridge reaching `ss_ctrl`'s state register directly across
+the die:
+
+    0.117  f2sdram~FF_3780 -> ss_ctrl|state.S_L_KICK_CHK      <- worst in the design
+    0.286  f2sdram~FF_3780 -> ss_ctrl|state.S_L_MAGIC
+
+Both of those states are only ever entered from `S_L_RD_DATA`'s
+`if (ddr_readdatavalid) state <= rd_ret`, so the source was the valid strobe itself.
+Registering the read return inside `ss_ctrl` splits that hop in two. `ddr_waitrequest` is
+deliberately not registered: Avalon requires it sampled in the same cycle as the command.
+
+**Result: the entire `f2sdram -> ss_ctrl|state` family left the worst twelve.** The cycle it
+costs is free -- both consumers sit waiting on the beat, a 64-bit read already costs tens of
+cycles of DDR3 latency, and a restore is a bulk transfer with the machine frozen.
+
+### What binds now
+
+    0.095  ss_ctrl|rom_scan -> sdram_ctrl|cpu_cache|fill_tag[10]
+    0.124  ss_ctrl|rom_scan -> sdram_ctrl|cpu_cache|cpu_sm_tag_dat_w[*]    (ten of these)
+
+A different shape again, and a promising one. `rom_scan` is a mode flag: raised when the
+module needs the SDRAM CPU port, held for the length of a scan, dropped at the end. It
+feeds `ss_port_own = ss_freeze | ss_rom_scan | ss_peek_scan` at `Minimig.sv:741`. A signal
+that is static for thousands of cycles is being held to a single-cycle budget, which is
+exactly the case `Minimig.sdc` already documents for `ram1|init_done`. `ss_ctrl.v:366`
+records that widening this signal's fan-in once cost 0.136 ns, so the pressure on it is
+known.
+
+The obvious next step is a `-setup 2` from `rom_scan` into the cache, written conservatively
+rather than as a false path for the same reason `init_done` was: the 0->1 edge does change
+downstream behaviour, and on a memory path "it only moves once per scan" is not an argument
+worth relying on unaltered. Establish first that the port mux cannot act on the edge within
+one cycle.
+
+### The lottery is structural, not a settings problem
+
+Five seed changes in two days, each invalidated by a smaller RTL edit than the last -- the
+final one differed from its predecessor by two parameters defaulting to zero. Quartus Prime
+Lite cannot preserve placement across edits: incremental compilation and Rapid Recompile are
+Standard and Pro features. There is no setting that fixes this, and the fitter settings in
+`Minimig.qsf` are already at maximum (`HIGH PERFORMANCE EFFORT`, `STANDARD FIT`, physical
+synthesis combo/duplication/retiming all on, aggressive routability always). The only cure
+is to fix the marginal paths themselves so no seed is needed, which is what this section is
+a log of.
+
+Utilisation is not the constraint and has never been: 70% ALM, 50% RAM blocks, 62% DSP,
+46% pins. The cost is routing distance between blocks that must talk.

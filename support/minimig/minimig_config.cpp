@@ -20,6 +20,7 @@
 #include "rom_crypt.h"
 #include "vadjust_info.h"
 #include "minimig_share.h"
+#include "../physical_disc/physical_disc.h"   // PHYSICAL_DISC_SENTINEL
 #include "akiko_cd32.h"
 #include "cdtv_cd.h"
 #include "minimig_a2065.h"
@@ -135,6 +136,35 @@ typedef struct
 	unsigned char    snac[2];
 	unsigned char    ss_slot;
 } mm_configTYPE_NoCdSlots;
+
+// The layout as it was before the CD mount delay was appended: everything
+// through a2065_mode. Every config written before 2026-09-03 is this shape.
+typedef struct
+{
+	char             id[8];
+	unsigned short   version;
+	unsigned short   ext_cfg2;
+	char             kickstart[992];
+	char             label[32];
+	unsigned short   ext_cfg;
+	unsigned char    memory;
+	unsigned char    chipset;
+	mm_floppyTYPE    floppy;
+	unsigned char    disable_ar3;
+	unsigned char    ide_cfg;
+	unsigned char    scanlines;
+	unsigned char    audio;
+	mm_hardfileTYPE  hardfile[4];
+	unsigned char    cpu;
+	unsigned char    autofire;
+	char             info[64];
+	mm_userportMode  userport;
+	unsigned char    snac[2];
+	unsigned char    ss_slot;
+	mm_hardfileTYPE  cd32_drive;
+	mm_hardfileTYPE  cdtv_drive;
+	uint8_t          a2065_mode;
+} mm_configTYPE_NoCdDelay;
 
 // Every layout above predates the dedicated CD drive slots, so none of them
 // says anything about them -- and minimig_ConfigChipset() now derives
@@ -826,13 +856,73 @@ static void ApplyConfiguration(char reloadkickstart)
 
 	rstval = SPI_CPU_HLT;
 	spi_uio_cmd8(UIO_MM2_RST, rstval);
-	spi_uio_cmd8(UIO_MM2_HDD, (minimig_config.ide_cfg & 0x21) |
-		(hdd_open(0) ? 2 : 0) |
-		(hdd_open(1) ? 4 : 0) |
-		(hdd_open(2) ? 8 : 0) |
-		(hdd_open(3) ? 16 : 0));
+	// Unit 0 is the CD slot and is always offered. Units 1..3 are hard disks,
+	// and a stock CD32 has none. This is what "no hard disk support" means now
+	// that ide_cfg has to stay set for the CD to work: greying the OSD rows
+	// alone would leave a hardfile from an earlier profile mounted and still
+	// visible to the guest.
+	const int hdd_ok = !is_amigacd() || amigacd_profile_has_hdd(amigacd_system());
 
-	minimig_cd_drive_open(0, minimig_config.cd32_drive.cfg ? minimig_config.cd32_drive.filename : "");
+	// Unit 0 is the CD. On an AmigaCD machine Akiko serves the disc, so
+	// mounting it as an IDE unit as well is redundant -- proven on hardware:
+	// with the IDE mount gone the CD still loads and the game still runs, and
+	// the memory map came back byte-identical, so the unit itself costs
+	// nothing. What it does do is keep the disc dependent on IDE, which is what
+	// blocked turning Gayle off.
+	//
+	// The short-circuit matters: when this is false, hdd_open(0) -- and so
+	// ide_open() -- is never called for the image.
+	//
+	// A physical disc is the exception and stays on IDE; see
+	// amigacd_cd_needs_ide().
+	const int cd_on_ide = !is_amigacd() || amigacd_cd_needs_ide();
+
+	// CD32+ pays for Gayle in contiguous chip RAM: measured at ~52 KB, which is
+	// the difference between Flink running and not on a 2 MB machine. It is a
+	// fair price for hard disks and a pointless one without them, so the
+	// controller only comes up when a drive is actually configured.
+	//
+	// Computed here rather than stored, so it cannot drift from the hardfile
+	// state. Attaching a drive already sets ide_cfg and hardfile[n].cfg
+	// together (MENU_AMIGACD_HDFFILE_SELECTED), so the bit comes back on the
+	// next reset -- which a hard disk needs anyway, on this machine as on a
+	// real one.
+	//
+	// Deliberately narrow: only CD32+. A stock CD32 already has no IDE, and
+	// A1200 and CDTV keep exactly the behaviour they have today. The physical
+	// disc exception applies here too, since that reaches its drive over IDE.
+	unsigned char ide_bits = minimig_config.ide_cfg;
+	if (is_amigacd()
+	    && amigacd_system() == AMIGACD_SYS_CD32PLUS
+	    && !amigacd_cd_needs_ide()
+	    && !minimig_config.hardfile[1].cfg
+	    && !minimig_config.hardfile[2].cfg
+	    && !minimig_config.hardfile[3].cfg)
+	{
+		ide_bits &= (unsigned char)~0x01;
+	}
+
+	spi_uio_cmd8(UIO_MM2_HDD, (ide_bits & 0x21) |
+		((cd_on_ide && hdd_open(0)) ? 2 : 0) |
+		((hdd_ok && hdd_open(1)) ? 4 : 0) |
+		((hdd_ok && hdd_open(2)) ? 8 : 0) |
+		((hdd_ok && hdd_open(3)) ? 16 : 0));
+
+	// cd32_drive.filename is written when the user PICKS a disc, so a config
+	// saved before that -- or by any older build -- carries the path in
+	// hardfile[0].filename instead. That used to be mounted by hdd_open(0) on
+	// the IDE side, and cd_is_mounted() was satisfied through ide_inst. With
+	// the disc off IDE nothing mounted it at boot, and the machine came up at
+	// the CD32 animation until the disc was selected by hand. Reported from
+	// hardware; this is the fallback that fixes it.
+	const char *cd0 = minimig_config.cd32_drive.cfg
+	                ? minimig_config.cd32_drive.filename : "";
+	if (!cd0[0] && minimig_config.hardfile[0].cfg == 2
+	    && strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL))
+	{
+		cd0 = minimig_config.hardfile[0].filename;
+	}
+	minimig_cd_drive_open(0, cd0);
 	minimig_cd_drive_open(1, minimig_config.cdtv_drive.cfg ? minimig_config.cdtv_drive.filename : "");
 
 	minimig_ConfigMemory(memcfg);
@@ -1100,6 +1190,29 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 			}
 			else BootPrint("Cannot migrate configuration file\n");
 		}
+		else if (size == sizeof(mm_configTYPE_NoCdDelay))
+		{
+			// Written before the CD mount delay existed. A straight memcpy
+			// would leave cd_mount_delay reading whatever followed in memory,
+			// and a zero there means "no delay" -- silently restoring the
+			// behaviour this setting exists to fix. So it is set explicitly.
+			printf("Pre CD-delay configuration file, migrating.\n");
+			static mm_configTYPE_NoCdDelay oldconf = {};
+			if (FileLoadConfig(filename, &oldconf, sizeof(oldconf))
+			    && !strncmp(oldconf.id, config_id, sizeof(minimig_config.id))
+			    && oldconf.floppy.drives <= 4)
+			{
+				memcpy((void*)&minimig_config, (void*)&oldconf, sizeof(oldconf));
+				minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
+				// Also appended after this layout; the memcpy above stops
+				// short of it, so it would keep whatever the previous load
+				// left there. The shipped rate is the value that changes
+				// nothing.
+				minimig_config.cd_speed = mmcd_fast;
+				result = 1;
+			}
+			else BootPrint("Cannot migrate configuration file\n");
+		}
 		else if (size == (int)sizeof(minimig_config))
 		{
 			static mm_configTYPE tmpconf = {};
@@ -1189,6 +1302,7 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		minimig_config.cd32_drive.filename[0] = 0;
 		minimig_config.cdtv_drive.cfg = 0;
 		minimig_config.cdtv_drive.filename[0] = 0;
+		minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
 		BootPrintEx(">>> No config found. Using defaults. <<<");
 
 		// AmigaCD console variant: no saved CFG -> start as a CD32 with its
@@ -1222,6 +1336,29 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 			printf("AmigaCD: correcting chip RAM for %s: memory 0x%02X -> 0x%02X\n",
 			       amigacd_system_name(sys), minimig_config.memory, fixed);
 			minimig_config.memory = fixed;
+		}
+
+		// The floppy drive count needs exactly the same treatment, and for
+		// exactly the same reason. Making it a machine property in
+		// amigacd_apply_system() only reached machines the user re-selected:
+		// every config already on a card kept its stored count, which for a
+		// CD32 written before that change is TWO drives (the field is a count
+		// minus one). Kickstart probes both and trackdisk.device takes an MFM
+		// track buffer per unit out of chip RAM, which is what the change was
+		// meant to stop.
+		//
+		// Only CD32 and CDTV are forced here. For an A500 or A1200 the count is
+		// a preference with an OSD row, and amigacd_profile_floppy_drives_onload
+		// returns it untouched -- forcing it every load would undo the user's
+		// choice the same way forcing FastRAM above would.
+		uint8_t fixed_drives =
+			amigacd_profile_floppy_drives_onload(minimig_config.floppy.drives, sys);
+		if (fixed_drives != minimig_config.floppy.drives)
+		{
+			printf("AmigaCD: correcting floppy drives for %s: %d -> %d\n",
+			       amigacd_system_name(sys),
+			       minimig_config.floppy.drives + 1, fixed_drives + 1);
+			minimig_config.floppy.drives = fixed_drives;
 		}
 	}
 
@@ -1374,6 +1511,20 @@ int amigacd_set_default_roms(int sys)
 // AmigaCD Settings menu. Defaults match an authentic CD32: D-Cache OFF (the
 // 68EC020 has no data cache) and no FastRAM. CDTV is a 68000 (cpu 0x00,
 // chipset 0x20, 1M chip).
+// Does this machine's CD have to be reached over IDE?
+//
+// Only for a PHYSICAL disc. physical_disc_autoboot.cpp mounts it with
+// ide_open(), so the controller has to be there. An image is served by Akiko and
+// needs no IDE at all, which is what lets a stock CD32 drop Gayle and recover
+// the contiguous chip RAM that CD32 titles want.
+//
+// Not a machine property, so it is not in minimig_profile.h: it depends on what
+// is in the drive right now, not on which machine was selected.
+int amigacd_cd_needs_ide(void)
+{
+	return !strcmp(minimig_config.hardfile[0].filename, PHYSICAL_DISC_SENTINEL);
+}
+
 int amigacd_apply_system(int sys)
 {
 	if (sys == AMIGACD_SYS_CDTV)
@@ -1423,25 +1574,89 @@ int amigacd_apply_system(int sys)
 		minimig_config.memory  = 0x33; // 2M chip + 8M Zorro II fast
 		minimig_config.ide_cfg = 0x01; // Gayle IDE
 	}
+	else if (sys == AMIGACD_SYS_CD32PLUS)
+	{
+		// A CD32 with the expansions people actually fitted -- an SX-1 or an
+		// SX-32 brought a floppy drive and IDE. Identical to the stock machine
+		// in CPU, chipset and chip RAM, because that is what those cartridges
+		// left alone.
+		//
+		// Both CD32s run with IDE enabled, so the marker is a spare persisted
+		// byte instead -- see AMIGACD_HF0_CD32PLUS. It is set below, after
+		// hardfile[0] is configured, so that assignment cannot clear it.
+		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF, as the CD32
+		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
+		minimig_config.memory  = 0x03; // 2M chip, no fast
+		minimig_config.ide_cfg = 0x01; // as the stock machine; the CD needs it
+	}
 	else
 	{
+		// A stock CD32: no floppy drive, and no hard disks offered.
+		//
+		// IDE STAYS ENABLED, and the comment that used to sit here was wrong.
+		// It argued that clearing ide_cfg was safe because Akiko is decoded
+		// separately -- sel_akiko in fastchip.v really is independent of
+		// ide_ena, so that half was correct and irrelevant. The CD32's disc
+		// also travels the USERSPACE IDE path: hardfile[0] holds the same
+		// image and ide_open runs against it on every config apply. Clearing
+		// the bit left the drive present at mount and gone seconds later, when
+		// the machine reset to boot it. Measured on hardware -- the CHD
+		// mounted, its 19-track TOC built, then "media level -> absent".
+		//
+		// So a stock CD32 is not authentic in this one respect, and cannot be
+		// until the CD is served without the IDE path. What it does not get is
+		// any hard disk: amigacd_profile_has_hdd() keeps units 1..3 unopened
+		// and their OSD rows greyed, which is the part that was asked for.
 		minimig_config.cpu     = 0x03; // 68EC020, D-Cache OFF (authentic CD32 default)
 		minimig_config.chipset = 0x18; // AGA + ECS (PAL)
 		minimig_config.memory  = 0x03; // 2M chip, no fast (authentic CD32 default)
-		minimig_config.ide_cfg = 0x01; // akiko / IDE
+		// No IDE. A real CD32 has none, and on this core it is not free:
+		// Gayle's guest-side allocations cost about 190 KB and, worse, they
+		// fragment low memory. Measured on hardware -- with IDE enabled the
+		// largest contiguous block is 1703 KB, and Flink wants a single
+		// 1774.8 KB allocation, so it fails. With IDE off the block reaches
+		// exactly 1774.8 KB and the game runs. See docs/chip-ram-shortfall.md.
+		//
+		// This is safe now only because the disc no longer travels the IDE
+		// path: Akiko serves it, which was proven separately before this was
+		// switched off. An earlier attempt to clear ide_cfg on its own took the
+		// CD away entirely and shipped as a regression -- the disc's only mount
+		// was the IDE unit at the time.
+		//
+		// A PHYSICAL disc still needs IDE: physical_disc_autoboot.cpp opens it
+		// with ide_open(). So the bit stays set for that one case, and such a
+		// machine pays the memory. An image gets the authentic, lean machine.
+		minimig_config.ide_cfg = amigacd_cd_needs_ide() ? 0x01 : 0x00;
 	}
 	// One removable CD slot on every machine that has a CD drive. The A1200
 	// has none -- see above.
 	minimig_config.hardfile[0].cfg = (sys == AMIGACD_SYS_A1200) ? 0 : 2;
+
+	// After the line above, which writes the same struct. This is what tells a
+	// CD32+ from a stock CD32 on the next config load.
+	if (sys == AMIGACD_SYS_CD32PLUS)
+		minimig_config.hardfile[0].reserved |= AMIGACD_HF0_CD32PLUS;
+	else
+		minimig_config.hardfile[0].reserved &= (unsigned char)~AMIGACD_HF0_CD32PLUS;
 
 	// Upstream's dedicated drive slots have to agree with the profile:
 	// minimig_ConfigChipset() derives CONFIG_CDTV from cdtv_drive.cfg and
 	// clears the bit when that slot is empty, so setting minimig_config.chipset
 	// above is not on its own enough to bring the core up as a CDTV.
 	minimig_config.cdtv_drive.cfg = (sys == AMIGACD_SYS_CDTV) ? 1 : 0;
-	minimig_config.cd32_drive.cfg = (sys == AMIGACD_SYS_CD32) ? 1 : 0;
+	minimig_config.cd32_drive.cfg =
+		(sys == AMIGACD_SYS_CD32 || sys == AMIGACD_SYS_CD32PLUS) ? 1 : 0;
 
-	if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1; // single df0
+	// Floppy drive count is a machine property, so it comes from the profile.
+	// This used to read
+	//
+	//     if (minimig_config.floppy.drives < 1) minimig_config.floppy.drives = 1;
+	//
+	// commented "single df0" -- but the field is a count minus one, so that is
+	// TWO drives, and it ran for every machine including CD32 and CDTV, which
+	// have none. Kickstart then probed two drives and spent chip RAM on a
+	// trackdisk buffer for each. See amigacd_profile_floppy_drives().
+	minimig_config.floppy.drives = amigacd_profile_floppy_drives(sys);
 
 	int rom_ok = amigacd_set_default_roms(sys);
 
@@ -1470,7 +1685,18 @@ int amigacd_system(void)
 	// the user happens to have mounted. hardfile[0].cfg is the slot, not the
 	// disc: 2 means "there is a removable CD device", 0 means there is not.
 	if (minimig_config.hardfile[0].cfg == 0)  return AMIGACD_SYS_A1200;
-	return AMIGACD_SYS_CD32;
+
+	// Stock CD32 and CD32+ agree on CPU, chipset, chip RAM and now IDE as well,
+	// so the marker is an explicit bit in a spare persisted byte. IDE was tried
+	// first and had to be abandoned: clearing it for the stock machine took
+	// that machine's own CD away, on hardware.
+	//
+	// A config written before this bit existed reads 0 and is therefore a stock
+	// CD32, so anyone with hard disks configured picks CD32+ once to get them
+	// back. That is the safe direction now: a visibly missing drive beats a
+	// machine that quietly is not the one the System row names.
+	return (minimig_config.hardfile[0].reserved & AMIGACD_HF0_CD32PLUS)
+	         ? AMIGACD_SYS_CD32PLUS : AMIGACD_SYS_CD32;
 }
 
 static char minimig_adjust = 0;
@@ -1733,7 +1959,17 @@ void minimig_ConfigChipset(mm_configTYPE *config)
 
 void minimig_ConfigFloppy(unsigned char drives, unsigned char speed)
 {
-	spi_uio_cmd8(UIO_MM2_FLP, ((drives & 0x03) << 2) | (speed & 0x03));
+	// Bit 4 says the machine has NO floppy drive at all, which the drive count
+	// cannot say: it is a count minus one on both sides of the link, so 0
+	// already means one drive.
+	//
+	// Derived here rather than passed in, so every existing call site gets it
+	// and none of them can forget. It is a fact about the machine, so there is
+	// nothing to store, migrate or correct on load -- unlike the drive count,
+	// where a stored value outlived the fix that was supposed to change it.
+	unsigned char none = (is_amigacd() && amigacd_profile_floppy_none(amigacd_system()))
+	                   ? 0x10 : 0x00;
+	spi_uio_cmd8(UIO_MM2_FLP, none | ((drives & 0x03) << 2) | (speed & 0x03));
 }
 
 // External-drive assignment, 3 bits per unit, split across two commands because
@@ -1799,7 +2035,7 @@ void minimig_cfg_set(int preset)
 	switch (preset)
 	{
 	case CONFIG_PRESET_CD32:
-		minimig_config.cpu = 0x23; // 68020 14MHz, d-cache off;
+		minimig_config.cpu = 3; // 68020, d-cache off, Turbo on (bit 5 clear)
 		minimig_config.chipset = (6 << 2); // AGA
 		minimig_config.memory = 3; // ChipRAM 2MB, FastRAM 0MB
 		minimig_set_kickstart(preset_rom_path(CD32_MAIN_ROM));
@@ -1845,7 +2081,7 @@ void minimig_cfg_set(int preset)
 		break;
 
 	case CONFIG_PRESET_A1200:
-		minimig_config.cpu = 0x23; // 68020 14MHz, d-cache off;
+		minimig_config.cpu = 3; // 68020, d-cache off, Turbo on (bit 5 clear)
 		minimig_config.chipset = (6 << 2); // AGA
 		minimig_config.memory = 3; // ChipRAM 2MB, FastRAM 0MB
 		minimig_set_kickstart(preset_rom_path(A1200_MAIN_ROM));
