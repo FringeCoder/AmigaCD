@@ -803,6 +803,10 @@ void OsdUpdate()
 		}
 	}
 
+	// Only after a paint. OsdUpdate runs every main-loop pass whether or not
+	// anything was written, and flushing on each pass rewrote the last page
+	// over the [closed] marker a moment after OsdDisable wrote it -- the
+	// mirror then always showed a menu, closed or not.
+	if (osdset) osd_mirror_flush(n);
 	osdset = 0;
-	osd_mirror_flush(n);
 }
