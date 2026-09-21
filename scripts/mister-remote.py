@@ -203,8 +203,12 @@ def osd_text(host):
     r = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
                         "root@" + host,
                         "touch /tmp/osd_mirror; cat /tmp/osd.txt 2>/dev/null"],
-                       capture_output=True, text=True)
-    return r.stdout
+                       capture_output=True)
+    # The OSD font has glyphs above 0x7F -- the stock menu's box drawing,
+    # the submenu arrow -- and they are not UTF-8. Decode as Latin-1 so
+    # nothing ever raises; the shapes come out as odd characters, which is
+    # fine, the text and the cursor are what this is for.
+    return r.stdout.decode("latin-1")
 
 
 def expand_keys(spec):
