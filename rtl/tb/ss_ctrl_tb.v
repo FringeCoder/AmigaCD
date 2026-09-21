@@ -55,7 +55,13 @@ localparam STATE_WORDS = (STATE_W + 31) / 32;
 // and cannot test the packing at all. 32 reaches $020-$03E, which is writable,
 // and still fits the mock DDR3 below.
 localparam SHADOW_ENTRIES = 32;
-localparam SHADOW_WORDS   = SHADOW_ENTRIES / 2;
+// Plus the WRITTEN mask: sixteen half-word entries after the registers, eight
+// payload words. ss_regshadow keeps them at address 256-271 whatever this
+// bench sets SHADOW_ENTRIES to, which is why ss_ctrl places them by bit 8
+// rather than by continuing its count -- see sh_addr() there.
+localparam SHADOW_MASK_ENTRIES = 16;
+localparam SHADOW_WORDS   = (SHADOW_ENTRIES + SHADOW_MASK_ENTRIES) / 2;
+localparam W_MASK_IN_SHADOW = SHADOW_ENTRIES / 2;   // word offset of the mask within the section
 // Denise's colour table: 256 entries, one payload word each. Full size even
 // though the rest of this bench is scaled down, because the design's CLUT_WORDS
 // is not a parameter -- the table is 256 deep in the hardware.
@@ -199,6 +205,7 @@ always @(posedge clk) begin
 end
 
 reg  [15:0] exp_shadow [0:SHADOW_ENTRIES-1];
+reg [255:0] exp_written = 256'd0;   // what the design's WRITTEN mask must say
 
 // Zeroed here rather than inside the stimulus block, where an earlier attempt
 // silently did not apply and left the array X -- which showed up only as a
@@ -206,10 +213,10 @@ reg  [15:0] exp_shadow [0:SHADOW_ENTRIES-1];
 integer ei;
 initial for (ei = 0; ei < SHADOW_ENTRIES; ei = ei + 1) exp_shadow[ei] = 16'd0;
 
-wire  [7:0] sh_rd_addr;
+wire  [8:0] sh_rd_addr;
 wire [15:0] sh_rd_data;
 wire        sh_ld_we;
-wire  [7:0] sh_ld_addr;
+wire  [8:0] sh_ld_addr;
 wire [15:0] sh_ld_data;
 wire        sh_replay_start, sh_replay_done;
 wire        sh_replay_we;
@@ -343,7 +350,7 @@ integer cl_we_run = 0, cl_we_min = 999;
 // is being walked, so the idle gaps between sections do not mask a short hold.
 integer sh_ad_run = 0, sh_ad_min = 999;
 integer cl_ad_run = 0, cl_ad_min = 999;
-reg [7:0] sh_ad_d = 8'd0;
+reg [8:0] sh_ad_d = 9'd0;
 reg [7:0] cl_ad_d = 8'd0;
 reg       sh_walk = 1'b0, cl_walk = 1'b0;
 
@@ -695,7 +702,10 @@ begin
 	// here rather than at each call site keeps the CRC reference honest: it is
 	// computed from this array, so an entry recorded that the design does not
 	// actually store would make the reference agree with the wrong payload.
-	if (!sh_excluded(idx)) exp_shadow[idx] = val;
+	if (!sh_excluded(idx)) begin
+		exp_shadow[idx]  = val;
+		exp_written[idx] = 1'b1;
+	end
 end
 endtask
 
@@ -865,7 +875,7 @@ initial begin
 	@(negedge clk);
 
 	check("magic",      ddr_word(2), 32'h53534341);
-	check("version",    ddr_word(3), 32'h00010003);
+	check("version",    ddr_word(3), 32'h00010004);
 	check("core_words", ddr_word(4), CORE_WORDS);
 	check("host_words", ddr_word(5), 32'd0);
 	check("host_crc32", ddr_word(7), 32'd0);
@@ -923,6 +933,17 @@ initial begin
 	      ddr_word(W_SHADOW + 13), {16'hA5A5, 16'h0000});
 	check("shadow word 0 is the read window, zero",
 	      ddr_word(W_SHADOW), 32'h00000000);
+	// The WRITTEN mask follows the registers: eight words, one bit per entry.
+	// Entries $020,$022,$028,$034,$036 were written and not excluded, so bits
+	// 16,17,20,26,27 of the first word are set and nothing else anywhere is.
+	check("mask word 0 marks exactly the written entries",
+	      ddr_word(W_SHADOW + W_MASK_IN_SHADOW), exp_written[31:0]);
+	check("mask word 0 is not empty",
+	      {31'd0, (ddr_word(W_SHADOW + W_MASK_IN_SHADOW) != 32'd0)}, 32'd1);
+	check("mask word 1 is empty",
+	      ddr_word(W_SHADOW + W_MASK_IN_SHADOW + 1), 32'h00000000);
+	check("mask word 7 is empty",
+	      ddr_word(W_SHADOW + W_MASK_IN_SHADOW + 7), 32'h00000000);
 
 	check("chip word 0 in 68k byte order", ddr_word(W_CHIP), 32'h01D000D0);
 	check("chip word 3 in 68k byte order", ddr_word(W_CHIP + 3), 32'h07D006D0);
@@ -942,8 +963,11 @@ initial begin
 	// words. It still has to be in the CRC: a design that streamed the section
 	// but left it out of the running value, or vice versa, would round-trip
 	// against itself and fail only here.
-	for (si = 0; si < SHADOW_WORDS; si = si + 1)
+	for (si = 0; si < SHADOW_ENTRIES / 2; si = si + 1)
 		crc_word_step({exp_shadow[2*si + 1], exp_shadow[2*si]});
+	// Then the WRITTEN mask, low half-word first, the same packing.
+	for (si = 0; si < SHADOW_MASK_ENTRIES / 2; si = si + 1)
+		crc_word_step(exp_written[32*si +: 32]);
 	// The colour table, straight out of the mock, in address order. A sweep
 	// that sampled the RAM a cycle early would hand over the table shifted by
 	// one entry and land here rather than looking like working colours.
@@ -1033,21 +1057,27 @@ initial begin
 	check("replayed $020", {16'd0, seen_replay[8'h10]}, 32'h00001234);
 	check("replayed $022", {16'd0, seen_replay[8'h11]}, 32'h00005678);
 	check("replayed $028", {16'd0, seen_replay[8'h14]}, 32'h00009ABC);
-	// The untouched neighbour has to be a register that IS replayed, or the
-	// check passes for the wrong reason. $02E (COPCON) is plain and unwritten;
-	// $024 and $026 are both excluded now and never appear at all.
-	check("replayed $02E is still zero",
-	      {16'd0, seen_replay[8'h17]}, 32'h00000000);
+	// $02E (COPCON) is plain and was never written, so with the WRITTEN mask
+	// it is not replayed at all. That is the guarantee the mask exists for:
+	// before it, this check read "replayed $02E is still zero" and passed,
+	// and the zero it replayed was clearing DIWSTOP's H8 on real hardware.
+	check("$02E (unwritten) not replayed",
+	      {31'd0, seen_replay_valid[8'h17]}, 32'd0);
 	// VPOSW: written above, and must reach neither the payload nor the bus.
 	// agnus_beamcounter.v loads vpos and long_frame from it, so a replay
 	// jumps the beam mid-restore.
 	check("$02A (VPOSW) never replayed",
 	      {31'd0, seen_replay_valid[8'h15]}, 32'd0);
 	check("replayed $036", {16'd0, seen_replay[8'h1B]}, 32'h0000A5A5);
-	check("every plain entry was replayed",
+	// $1FE used to be in this list as proof the walk reached the last entry;
+	// it was never written, so the mask now keeps it off the bus like $02E.
+	// That the walk runs to the end is pinned by "DMACON set is the last
+	// write" in ss_regshadow_tb, which can only be true if it did.
+	check("every written plain entry was replayed",
 	      {31'd0, seen_replay_valid[8'h10] & seen_replay_valid[8'h14] &
-	              seen_replay_valid[8'h17] & seen_replay_valid[8'h1B] &
-	              seen_replay_valid[8'hFF]}, 32'd1);
+	              seen_replay_valid[8'h1B]}, 32'd1);
+	check("$1FE (unwritten) not replayed",
+	      {31'd0, seen_replay_valid[8'hFF]}, 32'd0);
 
 	// Chip RAM back in SDRAM, in SDRAM's own word order -- the inverse of the
 	// 68k-order file contract asserted above, pinned to literals for the same

@@ -59,8 +59,11 @@ module ss_regshadow
 	input       [8:1] reg_address_in,
 	input      [15:0] data_in,
 
-	// Readback for the save. Combinational on addr, one entry per register.
-	input       [7:0] rd_addr,
+	// Readback for the save. One entry per register at 0-255, and the WRITTEN
+	// mask (see below) as sixteen half-words at 256-271, so the save streams
+	// the mask with the same walk that streams the shadow and the file carries
+	// it directly after the shadow section.
+	input       [8:0] rd_addr,
 	output     [15:0] rd_data,
 
 	// Whether the entry at rd_addr is one this module tracks. The save side
@@ -93,8 +96,9 @@ module ss_regshadow
 	// bypasses writable() deliberately -- the payload is a fixed 256-entry
 	// section, so every index is written, and the excluded ones simply hold
 	// values the replay will never look at.
+	// 256-271 load the WRITTEN mask, half-word at a time, the same way.
 	input             ld_we,
-	input       [7:0] ld_addr,
+	input       [8:0] ld_addr,
 	input      [15:0] ld_data,
 
 	input             replay_start,
@@ -301,17 +305,17 @@ end
 // restore's load writes every entry of the section before the replay reads
 // any of them, and outside a restore the machine's own writes fill it.
 always @(posedge clk) begin
-	if (ld_we) begin
+	if (ld_we && !ld_addr[8]) begin
 		// A restore loading the saved section. Takes precedence over the snoop:
 		// the machine is frozen while this runs, so there is nothing legitimate
 		// for the snoop to see, and if there were, the payload is what the
 		// restore is here to install.
 		// Loaded values are contents, not writes, so the set/clear registers
 		// take them verbatim rather than through the accumulate rule.
-		if      (ld_addr == IDX_DMACON) r_dmacon <= ld_data;
-		else if (ld_addr == IDX_INTENA) r_intena <= ld_data;
-		else if (ld_addr == IDX_ADKCON) r_adkcon <= ld_data;
-		else                            shadow[ld_addr] <= ld_data;
+		if      (ld_addr[7:0] == IDX_DMACON) r_dmacon <= ld_data;
+		else if (ld_addr[7:0] == IDX_INTENA) r_intena <= ld_data;
+		else if (ld_addr[7:0] == IDX_ADKCON) r_adkcon <= ld_data;
+		else                                 shadow[ld_addr[7:0]] <= ld_data;
 	end
 	else if (clk7_en && writable(wr_idx)) begin
 		if      (wr_idx == IDX_DMACON) r_dmacon <= applied;
@@ -321,9 +325,51 @@ always @(posedge clk) begin
 	end
 end
 
+// WRITTEN: one bit per entry, set when the machine writes that register.
+//
+// The replay used to write every tracked entry back, and an entry the game
+// never wrote holds zero -- "the value the machine powers up with", as the
+// init comment says. That is true of the STORAGE and false of four registers
+// it feeds, whose power-up state is not zero or is not a stored value at all:
+//
+//   DIWHIGH  ($1E4)  has no storage of its own; a write overrides DIWSTOP's
+//                    implied H8. Replaying zero after DIWSTOP clears H8 and
+//                    the display window collapses to a strip 27 lores pixels
+//                    wide. Chuck Rock, restored, 2026-09-21.
+//   BEAMCON0 ($1DC)  resets to PAL on a PAL machine; replaying zero makes it
+//                    NTSC. Flink, and why a TV standard toggle "fixed" it.
+//   BPLCON4  ($10C)  resets to $0011 -- sprite palette banks. Zero is a real
+//                    AGA value, so zero cannot be read as "unwritten" there.
+//   BPLCON1  ($102)  resets to $3300 on AGA.
+//
+// A bit per entry is the only answer that is right for all four: an entry
+// that was never written is never replayed, and the chipset keeps whatever
+// its own reset left there. The vector is saved with the payload and loaded
+// back before the replay, so a restore knows what the SAVED machine had
+// written, not what this one has.
+//
+// Cleared on rst_n, which is the Amiga's reset: a new game starts with
+// nothing written, as the hardware does. Set on the same snoop that stores
+// the value, so the two cannot disagree. Not set by ld_we -- a load is the
+// mask's own business, carried in beside it -- and not by the replay's own
+// writes, which the mux keeps off reg_address_in.
+//
+// 256 flip-flops, not a memory: it is read as a whole by the replay, and
+// the save reads it sixteen bits at a time through rd_addr 256-271.
+reg [255:0] written;
+
+always @(posedge clk) begin
+	if (!rst_n)
+		written <= 256'd0;
+	else if (ld_we && ld_addr[8])
+		written[ld_addr[3:0]*16 +: 16] <= ld_data;
+	else if (clk7_en && writable(wr_idx) && !ld_we)
+		written[wr_idx] <= 1'b1;
+end
+
 // ONE read port on the array, shared between the save readback and the replay
 // walk. They never run together: a save is not a restore.
-wire [7:0]  mem_addr = replay_active ? ridx[7:0] : rd_addr;
+wire [7:0]  mem_addr = replay_active ? ridx[7:0] : rd_addr[7:0];
 
 // REGISTERED read. A 256-deep asynchronous read is a very wide mux, and with
 // ss_ctrl's address register on one side and replay_data on the other it was
@@ -339,9 +385,19 @@ reg [15:0] mem_q;
 
 always @(posedge clk) mem_q <= shadow[mem_addr];
 
-assign rd_data     = setclear(rd_addr) ? `SC_REG(rd_addr) : mem_q;
-assign rd_writable = writable(rd_addr);
-assign rd_setclear = setclear(rd_addr);
+// The mask read is registered too, so an address at 256-271 answers with the
+// same one-cycle latency the array does and ss_ctrl's settle covers both.
+reg [15:0] mask_q;
+reg        mask_sel_q;
+always @(posedge clk) begin
+	mask_q     <= written[rd_addr[3:0]*16 +: 16];
+	mask_sel_q <= rd_addr[8];
+end
+
+assign rd_data     = mask_sel_q                ? mask_q :
+                     setclear(rd_addr[7:0])   ? `SC_REG(rd_addr[7:0]) : mem_q;
+assign rd_writable = writable(rd_addr[7:0]);
+assign rd_setclear = setclear(rd_addr[7:0]);
 
 // ------------------------------------------------------------------- replay
 //
@@ -436,10 +492,10 @@ always @(posedge clk) begin
 				rstate <= R_ADKCON;
 				rphase <= 1'b0;
 			end
-			else if (writable(ridx[7:0]) && !setclear(ridx[7:0]))
+			else if (writable(ridx[7:0]) && !setclear(ridx[7:0]) && written[ridx[7:0]])
 				rstate <= R_PLAIN_EMIT;
 			else
-				ridx <= ridx + 9'd1;    // excluded: skipped, nothing driven
+				ridx <= ridx + 9'd1;    // excluded or never written: skipped, nothing driven
 		end
 
 		// mem_q now holds shadow[ridx].

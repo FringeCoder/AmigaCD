@@ -49,6 +49,38 @@ bool ss_header_parse(const uint32_t *win, uint32_t win_words, ss_header_t *out)
 	return true;
 }
 
+int ss_upgrade_13_to_14(uint32_t *win, uint32_t win_words)
+{
+	if (!win || win_words < 8) return 0;
+	if (win[2] != SS_MAGIC || win[3] != SS_VERSION_13) return 0;
+
+	// The same bounds ss_header_parse applies, on the 1.3 numbers, so a file
+	// that would have been refused as 1.3 is refused here rather than moved.
+	uint64_t core_words = win[4];
+	uint64_t host_words = win[5];
+	uint32_t length     = win[1];
+	if (length < SS_HEADER_TAIL_WORDS) return 0;
+	if (length > win_words - 2) return 0;
+	if (core_words + host_words != (uint64_t)length - SS_HEADER_TAIL_WORDS) return 0;
+	if (8u + core_words + host_words + SS_MASK_WORDS > win_words) return 0;
+	if (core_words < SS_MASK_OFFSET_13) return 0;
+	if (crc32_compute((const uint8_t *)&win[8], (int)(core_words * 4)) != win[6]) return 0;
+
+	// Open eight words after the shadow section: everything from there to the
+	// end of the host block moves up. memmove, because the ranges overlap.
+	uint32_t *at   = &win[8 + SS_MASK_OFFSET_13];
+	uint64_t  tail = core_words + host_words - SS_MASK_OFFSET_13;
+	memmove(at + SS_MASK_WORDS, at, (size_t)(tail * 4));
+	for (uint32_t i = 0; i < SS_MASK_WORDS; i++) at[i] = 0xFFFFFFFFu;
+
+	win[1] = length + SS_MASK_WORDS;
+	win[3] = SS_VERSION;
+	win[4] = (uint32_t)(core_words + SS_MASK_WORDS);
+	win[6] = crc32_compute((const uint8_t *)&win[8], (int)((core_words + SS_MASK_WORDS) * 4));
+	// The host block moved with the tail; its own words and CRC are unchanged.
+	return 1;
+}
+
 uint32_t ss_host_block_offset(const ss_header_t *h)
 {
 	return 8u + h->core_words;

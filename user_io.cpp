@@ -2221,6 +2221,13 @@ int process_ss(const char *rom_name, int enable)
 						ProgressMessage(0, 0, 0, 0);
 						FileClose(&f);
 						printf("process_ss: read %d bytes from file: %s\n", ret, ss_name);
+
+						// A 1.3 file has no WRITTEN mask. Insert one here, in
+						// the window, before the core reads any of it -- every
+						// bit set, which replays exactly what 1.3 replayed. The
+						// core knows only 1.4. See ss_upgrade_13_to_14().
+						if (ss_upgrade_13_to_14((uint32_t *)ss_base_win[i], len / 4))
+							printf("process_ss: upgraded a 1.3 state in place: %s\n", ss_name);
 					}
 				}
 				*(uint32_t*)(ss_base_win[i]) = 0xFFFFFFFF;
