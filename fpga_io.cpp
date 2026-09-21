@@ -614,6 +614,18 @@ char *getappname()
 	sprintf(path, "/proc/%d/exe", getpid());
 	readlink(path, dest, PATH_MAX);
 
+	// Once the binary on disk has been replaced under a running process --
+	// which is how every deploy works, mv over the live file -- the kernel
+	// reports the exe as "/media/fat/MiSTer_AmigaCD (deleted)". Passed to
+	// execl that path does not exist, the grandchild in app_restart falls
+	// through to "Something went wrong. Rebooting...", and a load_core sent
+	// right after a deploy cold-reboots the machine. Twice on 2026-09-21.
+	// Without the suffix the path is valid again and names the NEW binary,
+	// which is the one a restart after a deploy should be running anyway.
+	static const char suffix[] = " (deleted)";
+	size_t n = strlen(dest), s = sizeof(suffix) - 1;
+	if (n > s && !strcmp(dest + n - s, suffix)) dest[n - s] = 0;
+
 	return dest;
 }
 
