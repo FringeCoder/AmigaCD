@@ -130,8 +130,10 @@ int amiga_lightpen_usb_active(void)
 //
 // Held state per player, in JOY_* bits, OR'd into that port's mask by
 // input.cpp after build_joy_mask(). Kept here rather than in input.cpp so the
-// SNAC gun can use the same route when its trigger is wired up: both guns then
-// press the same button on the same port and behave identically to the guest.
+// SNAC gun uses the same route: both guns press the same button on the same
+// port and behave identically to the guest. The SNAC side was wired up on
+// 2026-08-31 -- support/snac/snac_psx.cpp calls in with BTN_TRIGGER and
+// BTN_THUMB, which is why this is a shared route and not a USB one.
 static uint32_t lp_buttons[NUMPLAYERS];
 
 // Which port the pen is on.

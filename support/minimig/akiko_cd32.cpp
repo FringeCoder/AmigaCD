@@ -199,6 +199,8 @@ static const int command_lengths[16] = {
 //   1 = we sent the {0x0a, present} media-status response.
 //   2 = host sent INFO (0x07); fully initialised.
 static uint8_t  cd_initialized      = 0;
+static uint32_t cd_boot_ready_ms    = 0;   // 0 = no hold pending
+static uint32_t cd_boot_settle_ms   = 0;
 static uint8_t  cd_paused           = 0;
 static uint8_t  cd_playing          = 0;       // unused in M3, set by 0x04 (audio)
 static uint8_t  cd_led_state        = 0;
@@ -296,7 +298,7 @@ static int akiko_prefetch_pick_evict(void)
 // ("play starting"), but BIOS won't advance past the audio-cued state until
 // it sees the asynchronous opcode-0x04 follow-up frame. Values:
 //    2,1 -> countdown to "play started" emission (CDS_PLAYING|2)
-//   -1   -> stop audio engine (placeholder until Phase 33), advance to -2
+//   -1   -> stop audio engine, advance to -2 (teardown happens at the stop site)
 //   -2   -> emit "play ended" (CDS_PLAYEND)
 //   -3   -> emit "play failed" (CDS_ERROR)
 static int8_t   cd_audio_timeout    = 0;
@@ -345,20 +347,68 @@ static uint32_t cd_media_swap_ready_ms = 0;
 // no change at all.
 #define AKIKO_SWAP_SETTLE_MS 700
 
+// Hold the FIRST media-present announcement after a cold boot, so the CD32 ROM
+// comes up and reaches its animation before the disc appears.
+//
+// WHY. A CD32 title that wants most of chip RAM in one allocation would fail:
+// Flink asks for a single contiguous 1774.8 KB block and got 1724.8 KB. It was
+// never a consumption problem -- measured against a fair reference (WinUAE with
+// its boot ROM enabled, as ours has) we used 666.4 KB against 665.8 KB at the
+// same point, a 0.6 KB difference. What differed was how the guest PACKED
+// identical demand, and the one input to that we control is WHEN the disc shows
+// up.
+//
+// Presenting a disc that is already there at power-on is not what the hardware
+// does. A real CD32 spins up and reads the TOC while the ROM is already
+// running, and WinUAE behaves the same way -- the animation shows briefly
+// before the disc mounts. Announcing at t=0 made the ROM allocate its CD
+// structures in a different order and fragment the region.
+//
+// The tell was on hardware the whole time: selecting the SAME disc by hand
+// after the animation always worked, and a cold boot with it pre-selected never
+// did. That was recorded as a false positive early on -- wrongly, because
+// "cannot reproduce from a cold boot" WAS the bug rather than evidence against
+// it.
+//
+// THE VALUE. 8000 ms is measured, not chosen: 6000 fails and 8000 works on this
+// machine, so the real threshold is between them and the margin here is about
+// two seconds. That is thinner than it looks -- a slower disc, another
+// Kickstart, or a busier card could push the boot past it, and the symptom
+// would be an intermittent out-of-memory indistinguishable from a game bug.
+// If that is ever reported, RAISE THIS FIRST.
+//
+// The value is the user's, from "CD Mount Delay" on the Advanced page, and 0
+// there restores the old immediate announce -- which is what makes this cheap
+// to falsify if a title ever behaves oddly because of it.
+//
+// Only the cold boot is delayed. akiko_cd32_init() runs from BootInit
+// (minimig_boot.cpp), not on a disc change, so swapping a disc from the OSD
+// keeps the existing 700 ms swap settle and does not wait eight seconds.
+
 // TOC streaming state. After cmd_info completes we proactively push TOC
 // entries (cmd 0x06 / cdrom_return_toc_entry) one per poll until the BIOS
 // has seen each point TOC_REPEAT times. WinUAE pushes one per video frame
 // (akiko.cpp:1438-1440). Without this, CD32 BIOS sits at the spinning-CD
 // splash forever — it never sends MULTI/READ until TOC is known.
-//   AKIKO_TOC_MAX_POINTS = 0xA0 + 0xA1 + 0xA2 + up to 99 tracks. The original
-//   M5 cap of 16 was sized for Cannon Fodder (2 tracks → 5 points). Bumped
-//   to 32 on 2026-05-07 after Fire & Ice (23-track multi-CDDA disc) was
-//   observed truncating its TOC to 13 audio points and wedging post-scan-TOC.
-//   32 covers everything in the user's collection (Fire & Ice has the most
-//   tracks at 23; AKIKO_TOC_REPEAT=3 still keeps the drip under 2s @ 20ms/frame).
+//
+//   AKIKO_TOC_MAX_POINTS = 0xA0 + 0xA1 + 0xA2 + real tracks.
+//
+//   Twice sized to "the biggest disc seen so far" instead of the actual
+//   ceiling, and twice bitten by it: 16 fit Cannon Fodder (2 tracks), then 32
+//   fit Fire & Ice (23 tracks) and truncated Super Street Fighter II Turbo's
+//   CD32 disc (46 tracks) to 29 points, which wedges the BIOS at the spinning
+//   CD splash exactly as the untruncated case does -- reported from hardware,
+//   2026-09-03.
+//
+//   The real ceiling is structural, not observational: drive_t.track[] in
+//   ide.h is track_t[50], and ide_cdrom.cpp:198 refuses to grow track_cnt past
+//   that, so real_tracks (= track_cnt - 1) can never exceed 49. 3 + 49 = 52 is
+//   therefore every point this module can ever be asked to send, for any disc
+//   the rest of the CD pipeline can load at all. If drive_t.track[] is ever
+//   resized, this bound and that one have to move together.
 #define AKIKO_TOC_REPEAT       3
 #define AKIKO_TOC_PUSH_PERIOD_MS 20 // 50 Hz, matches WinUAE PAL framesync (akiko.cpp:1438)
-#define AKIKO_TOC_MAX_POINTS   32
+#define AKIKO_TOC_MAX_POINTS   52
 static uint8_t  toc_buffer[AKIKO_TOC_MAX_POINTS * 13];
 static uint8_t  toc_point_count     = 0;
 static int16_t  toc_push_idx        = -1;   // -1 = idle; else next slot in 3x sequence
@@ -925,6 +975,32 @@ static void cmd_pause(const uint8_t *cmd)
 	// 57+ seconds until BIOS times out, by which time the boot has hung.
 	toc_push_idx     = -1;
 	toc_push_last_ms = 0;
+	// WinUAE cdrom_command_pause (akiko.cpp:1011) clears cdrom_audiotimeout
+	// unconditionally as the first act of PAUSE. We deliberately do NOT copy
+	// that verbatim: our cd_audio_timeout carries semantics WinUAE's field
+	// does not. WinUAE's cdrom_audiotimeout only ever holds a positive
+	// "play started" countdown, so an unconditional clear is harmless there.
+	// Ours also uses negative values (-1/-2/-3) to encode a pending, not-yet-
+	// emitted "play ended / play failed" async frame (see the state machine
+	// in the poll loop and the arm sites in cmd_multi / akiko_cdda_pump).
+	// Clearing those on PAUSE would swallow an end-of-play notification BIOS
+	// is waiting on. So we mirror cmd_stop's rule: drop only a pending
+	// positive "play started" ack (you paused — you do not want a delayed
+	// "now playing" frame) and let a negative end-of-play emission survive.
+	if (cd_audio_timeout > 0) cd_audio_timeout = 0;
+	// WinUAE early-outs with `if (cdrom_paused) return 2;` (akiko.cpp:1017)
+	// before setting cdrom_paused = 1, so a PAUSE arriving while already
+	// paused changes no state — it still returns the status frame but does
+	// not re-arm anything. Match that: a redundant PAUSE is idempotent. The
+	// TOC-drip teardown and the positive-ack clear above still run first,
+	// exactly as WinUAE runs its cdrom_toc_counter / cdrom_audiotimeout
+	// writes ahead of its early-out.
+	if (cd_paused) {
+		akiko_send_response(r, 2);
+		akiko_dbg("PAUSE (already paused; playing=%d, present=%d)\n",
+		          cd_playing, cd_media_present());
+		return;
+	}
 	cd_paused = 1;
 	akiko_send_response(r, 2);
 	akiko_dbg("PAUSE (playing=%d, present=%d)\n", cd_playing, cd_media_present());
@@ -2429,8 +2505,21 @@ void akiko_cd32_set_cd_path(const char *path)
 	           path, cd_save_path_active);
 }
 
+// Milliseconds to hold the first media announcement, from the user's setting on
+// the Advanced page. 0 means no hold, which restores the immediate announce.
+static uint32_t akiko_boot_settle_ms(void)
+{
+	unsigned d = minimig_config.cd_mount_delay;
+	if (d > AMIGACD_CD_DELAY_MAX) d = AMIGACD_CD_DELAY_DEFAULT;   // corrupt config
+	return (uint32_t)d * 1000u;
+}
+
 void akiko_cd32_init(void)
 {
+	cd_boot_settle_ms = akiko_boot_settle_ms();
+	cd_boot_ready_ms  = cd_boot_settle_ms ? (uint32_t)GetTimer(cd_boot_settle_ms) : 0;
+	akiko_diag("[akiko] boot settle: holding first media announce %u ms",
+	           cd_boot_settle_ms);
 	cd_initialized   = 0;
 	cd_paused        = 0;
 	cd_playing       = 0;
@@ -2523,7 +2612,18 @@ static inline bool cd32_active(void)
 
 void akiko_cd32_poll(void)
 {
-	const bool mounted = cd32_active() && cd_is_mounted();
+	// Hold the disc genuinely ABSENT until the boot settle expires, not merely
+	// unannounced. Delaying only the unsolicited push was not enough: the guest
+	// also QUERIES media status, cd_media_present() kept answering "present",
+	// and from the ROM's point of view the disc was there from power-on -- the
+	// animation never appeared. Measured on hardware: the push was held for
+	// 2.45 s and nothing else changed.
+	//
+	// Reporting absent here is what a real late insertion looks like, which is
+	// the sequence that produces a 1774.8 KB contiguous block when a disc is
+	// selected by hand.
+	const bool boot_held = cd_boot_ready_ms && !CheckTimer(cd_boot_ready_ms);
+	const bool mounted = cd32_active() && cd_is_mounted() && !boot_held;
 	const cd_media_level_t level = mounted ? CD_MEDIA_PRESENT : CD_MEDIA_ABSENT;
 
 	if (level != cd_media_level || cd_media_event) {
@@ -2626,6 +2726,12 @@ void akiko_cd32_poll(void)
 
 	if (cd_initialized == 0 && rx_idle) {
 		if (cd_media_present()) {
+			// Hold the arrival until the settle expires, so the ROM boots into
+			// its animation first and allocates in the order it does when a
+			// disc is inserted afterwards. Returning WITHOUT setting
+			// cd_initialized keeps this branch live for the next poll.
+			if (cd_boot_ready_ms && !CheckTimer(cd_boot_ready_ms)) return;
+			cd_boot_ready_ms = 0;
 			uint8_t r[2];
 			r[0] = 0x0a;
 			r[1] = 0x01;
@@ -2756,8 +2862,9 @@ void akiko_cd32_poll(void)
 			emit_playend_notify(0);
 			cd_audio_timeout = 0;
 		} else if (cd_audio_timeout == -1) {
-			// Phase 33 will tear down the CDDA pump here. For now we
-			// just advance to the play-ended emission.
+			// The pump teardown is not done here -- cmd_stop() clears
+			// cd_cdda_lba_next/end and cd_cdda_drv itself. This arm
+			// only advances to the play-ended emission.
 			cd_audio_timeout = -2;
 		} else if (cd_audio_timeout == -2) {
 			emit_playend_notify(1);

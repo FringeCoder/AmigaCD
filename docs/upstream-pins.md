@@ -365,3 +365,4 @@ commits** ahead of `0f3a6ad`, the base our tree shares with it. Unlike the physi
 touches `menu.cpp`, `ide.cpp`, `ide_cdrom.cpp` and `user_io.cpp`, all of which
 we have modified. Treat it as a real merge with conflicts, on its own branch,
 with a hardware test afterwards.
+

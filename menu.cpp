@@ -1002,8 +1002,8 @@ static constexpr unsigned rowhint_rows(uint32_t mask)
 #define AMIGACD_MAIN_MENUMASK     0x3FFFu
 #define AMIGACD_SETTINGS_MENUMASK 0x7FFu
 #define AMIGACD_CONFIGS_MENUMASK  0x0Fu
-#define AMIGACD_ADV_MENUMASK_SNAC 0xFFu
-#define AMIGACD_ADV_MENUMASK      0x3Fu
+#define AMIGACD_ADV_MENUMASK_SNAC 0x1FFu
+#define AMIGACD_ADV_MENUMASK      0x7Fu
 #define AMIGACD_DRIVES_MENUMASK   0x0Fu
 
 // The hint for the row the cursor is on, in the scrolling line at the bottom.
@@ -7410,14 +7410,20 @@ void HandleUI(void)
 		m = 0;
 		strcpy(s, " CPU      : ");
 		strcat(s, config_cpu_msg[minimig_config.cpu & 0x03]);
-		if ((minimig_config.cpu & 0x23) == 0x23) strcat(s, " ~14MHz");
-		if ((minimig_config.cpu & 0x23) == 0x03) strcat(s, " Fast");
 		OsdWrite(m++, s, menusub == 0, 0);
 		strcpy(s, " D-Cache  : ");
 		strcat(s, (minimig_config.cpu & 16) ? "On" : "Off");
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
-		strcpy(s, " CPU Speed : ");
-		strcat(s, (minimig_config.cpu & 0x20) ? "14 MHz" : "Full");
+		// CPU CFG bit 5 read the other way up: set means the stock-speed throttle
+		// is engaged, so Turbo On is the bit CLEAR. Phrased as Turbo because that
+		// is the question being asked -- "faster than the real machine?" -- rather
+		// than as a clock rate the core does not literally produce.
+		//
+		// "CPU Turbo" and not just "Turbo": FDD Turbo is a few rows down on this
+		// same page, and two rows both called Turbo is a support question waiting
+		// to happen.
+		strcpy(s, " CPU Turbo: ");
+		strcat(s, (minimig_config.cpu & 0x20) ? "Off" : "On");
 		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
 		strcpy(s, " Chipset   : ");
 		strcat(s, config_chipset_msg[(minimig_config.chipset >> 2) & 7]);
@@ -7504,15 +7510,16 @@ void HandleUI(void)
 		{
 			if (menusub == 0)
 			{
-				static const unsigned char cpu_steps[4] = { 0, 1, 3, 0x23 };
-				int step = ((minimig_config.cpu & 3) == 0) ? 0 :
-				           ((minimig_config.cpu & 3) == 1) ? 1 :
-				           (minimig_config.cpu & 0x20) ? 3 : 2;
-
-				step = (step + (minus ? 3 : 1)) & 3;
+				// 68000 / 68010 / 68020. Upstream folded a fourth step in here for
+				// the stock-speed variant, which made the CPU row silently change
+				// Turbo; the Turbo row owns that bit instead, so this leaves it
+				// alone. Mask keeps bit 5 (Turbo) and bit 4 (D-Cache) untouched.
+				int cpu = minimig_config.cpu & 3;
+				if (minus) cpu = (cpu == 0) ? 3 : (cpu == 3) ? 1 : 0;
+				else       cpu = (cpu == 0) ? 1 : (cpu == 1) ? 3 : 0;
 
 				menustate = MENU_MINIMIG_CHIPSET1;
-				minimig_config.cpu = (minimig_config.cpu & 0xdc) | cpu_steps[step];
+				minimig_config.cpu = (minimig_config.cpu & 0xfc) | cpu;
 				minimig_ConfigCPU(minimig_config.cpu);
 			}
 			else if (menusub == 1 && (minimig_config.cpu & 0x2))
@@ -7775,6 +7782,15 @@ void HandleUI(void)
 		// "not on this machine".
 		const int amigacd_has_cd = (amigacd_system() != AMIGACD_SYS_A1200);
 		if (!amigacd_has_cd) menumask &= ~0x003;
+
+		// A stock CD32 has no hard disk interface at all -- Akiko gives it the
+		// CD, and the IDE and Gayle decodes belong to hardware it never
+		// shipped with. The rows are masked as well as greyed so the selection
+		// cannot land on something that cannot work; they keep their positions
+		// because every menusub below would shift otherwise, which is the same
+		// reason the A1200's dead CD rows are kept.
+		const int amigacd_has_hdd = amigacd_profile_has_hdd(amigacd_system());
+		if (!amigacd_has_hdd) menumask &= ~0x030;
 		parentstate = menustate;
 
 		// mister_floppy_status rides in the core's OSD mask: bit 6 board
@@ -7887,7 +7903,17 @@ void HandleUI(void)
 				}
 				else strcat(s, "* no disk *");
 			}
-			OsdWrite(m++, s, menusub == (uint32_t)(2 + fu), 0);
+			// Grey a drive the machine does not have, rather than dropping the
+			// row: positions are shared across systems and every menusub below
+			// would shift, which is the same reason the A1200's CD rows stay.
+			// A CD32 or a CDTV has no floppy drive at all, so both rows grey
+			// rather than only the second. The rows stay present because row
+			// positions are shared across systems and every menusub below
+			// would shift otherwise -- the same reason the A1200's dead CD
+			// rows are kept.
+			OsdWrite(m++, s, menusub == (uint32_t)(2 + fu),
+			         amigacd_profile_floppy_none(amigacd_system())
+			         || fu > minimig_config.floppy.drives);
 		}
 
 		// Two hard disks. HD0 is hardfile[1], the IDE0 slave, so it sits beside
@@ -7910,8 +7936,8 @@ void HandleUI(void)
 				char *hp = strrchr(hname, '/');
 				strncat(s, hp ? hp + 1 : hname, 22);
 			}
-			else strcat(s, "* none *");
-			OsdWrite(m++, s, menusub == (uint32_t)(4 + hu), 0);
+			else strcat(s, amigacd_has_hdd ? "* none *" : "-");
+			OsdWrite(m++, s, menusub == (uint32_t)(4 + hu), !amigacd_has_hdd);
 		}
 
 		// The detail line above is paid for here rather than out of the page's
@@ -8407,6 +8433,14 @@ void HandleUI(void)
 		strcat(s, (minimig_config.cpu & 16) ? "ON" : "OFF");
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
 
+		// CPU Turbo = CPU byte bit5 read the other way up: the bit SET engages
+		// the stock-speed throttle, so Turbo On is the bit clear. Same 020-only
+		// gate as D-Cache above, and sat next to it because they are the two
+		// CPU settings on this page.
+		strcpy(s, " CPU Turbo: ");
+		strcat(s, (minimig_config.cpu & 0x20) ? "OFF" : "ON");
+		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
+
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " Main ROM : ");
@@ -8418,7 +8452,7 @@ void HandleUI(void)
 			if (!name[0]) strcat(s, "<none>");
 			else strncat(s, name, 22);
 		}
-		OsdWrite(m++, s, menusub == 2, 0);
+		OsdWrite(m++, s, menusub == 3, 0);
 
 		strcpy(s, " Ext ROM  : ");
 		{
@@ -8433,7 +8467,7 @@ void HandleUI(void)
 				strncat(s, disp, 22);
 			}
 		}
-		OsdWrite(m++, s, menusub == 3, 0);
+		OsdWrite(m++, s, menusub == 4, 0);
 
 		// Save states. These rows were originally added to MENU_MINIMIG_CHIPSET1,
 		// which the AmigaCD console variant never reaches -- menu.cpp:5859 sends
@@ -8578,12 +8612,21 @@ void HandleUI(void)
 				}
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 2 && select) // Main ROM
+			else if (menusub == 2) // CPU Turbo (CPU bit5 inverted; 020 only)
+			{
+				if (minimig_config.cpu & 0x2)
+				{
+					minimig_config.cpu ^= 0x20;
+					minimig_ConfigCPU(minimig_config.cpu);
+				}
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 3 && select) // Main ROM
 			{
 				ioctl_index = 1;
 				SelectFile(Selected_F[4], "ROM", SCANO_DIR, MENU_AMIGACD_ROMFILE_SELECTED, MENU_AMIGACD_SETTINGS1);
 			}
-			else if (menusub == 3) // Ext ROM ('-' clears the pairing)
+			else if (menusub == 4) // Ext ROM ('-' clears the pairing)
 			{
 				if (minus)
 				{
@@ -8596,14 +8639,14 @@ void HandleUI(void)
 					SelectFile(Selected_F[5], "ROM", SCANO_DIR | SCANO_UMOUNT, MENU_AMIGACD_EXTROMFILE_SELECTED, MENU_AMIGACD_SETTINGS1);
 				}
 			}
-			else if (menusub == 4 && !minimig_ss_blocked()) // Save slot 1-4
+			else if (menusub == 5 && !minimig_ss_blocked()) // Save slot 1-4
 			{
 				int slot = minimig_config.ss_slot & 3;
 				slot = minus ? (slot + 3) & 3 : (slot + 1) & 3;
 				minimig_config.ss_slot = (unsigned char)slot;
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 5 && select && !minimig_ss_blocked()) // Save state
+			else if (menusub == 6 && select && !minimig_ss_blocked()) // Save state
 			{
 				// Arming the host poller happens here and nowhere earlier.
 				//
@@ -8635,7 +8678,7 @@ void HandleUI(void)
 				// not sit in a menu while it does.
 				menustate = MENU_NONE1;
 			}
-			else if (menusub == 6 && select && !minimig_ss_blocked()) // Restore state
+			else if (menusub == 7 && select && !minimig_ss_blocked()) // Restore state
 			{
 				// This is not housekeeping, it is the load. process_ss() maps
 				// the four DDR3 windows AND reads the four .ss files off disk
@@ -8932,8 +8975,9 @@ void HandleUI(void)
 		{
 			menustate = MENU_AMIGACD_ADVANCED1;
 			// The Drives row on Advanced, which moves with SNAC tenancy the
-			// same way every row below the port rows does.
-			menusub = (minimig_config.userport == mmup_snacpsx) ? 6 : 4;
+			// same way every row below the port rows does -- and moved once
+			// more when CD Mount Delay went in above it.
+			menusub = (minimig_config.userport == mmup_snacpsx) ? 7 : 5;
 		}
 		else if (select || right || minus || plus)
 		{
@@ -9119,9 +9163,10 @@ void HandleUI(void)
 				/* 2 Port 1   */ "What the pad in SNAC port 1 is: off, pad, mouse, both at once, or a light gun.",
 				/* 3 Port 2   */ "What the pad in SNAC port 2 is: off, pad, mouse, both at once, or a light gun.",
 				/* 4 Ethernet */ "The A2065 Zorro II Ethernet card. Off by default; the FPGA half is there either way.",
-				/* 5 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
-				/* 6 Drives   */ "The MiSTer Floppy board: which real drive each df unit uses, and floppy turbo.",
-				/* 7 back     */ "Back to the main page.",
+				/* 5 CD delay */ "How long a disc already in the drive is held back at power-on. 8 s is measured; Off announces it at once, which fragments chip RAM and breaks Flink.",
+				/* 6 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
+				/* 7 Drives   */ "The MiSTer Floppy board: which real drive each df unit uses, and floppy turbo.",
+				/* 8 back     */ "Back to the main page.",
 			};
 			static const char *const tips_plain[] =
 			{
@@ -9131,6 +9176,7 @@ void HandleUI(void)
 				tips_snac[5],
 				tips_snac[6],
 				tips_snac[7],
+				tips_snac[8],
 			};
 			static_assert(sizeof(tips_snac) / sizeof(tips_snac[0]) == rowhint_rows(AMIGACD_ADV_MENUMASK_SNAC),
 				"AmigaCD advanced page with SNAC: one hint per selectable row");
@@ -9141,7 +9187,7 @@ void HandleUI(void)
 				: amigacd_rowhint(tips_plain, sizeof(tips_plain) / sizeof(tips_plain[0]), menusub);
 		}
 		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet,
-		// Fast-IDE, FDD Turbo, Back
+		// CD Mount Delay, Fast-IDE, Drives, Back
 		menumask = snac ? AMIGACD_ADV_MENUMASK_SNAC : AMIGACD_ADV_MENUMASK;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
@@ -9212,10 +9258,25 @@ void HandleUI(void)
 		strcpy(s, " Ethernet : ");
 		strcat(s, a2065_iface_msg(a2065_get_iface()));
 		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 4 : 2), 0);
-
-		OsdWrite(m++, "", 0, 0);
 		OsdWrite(m++, " Card off by default. The FPGA half", 0, 0);
 		OsdWrite(m++, " is always present either way.", 0, 0);
+
+		OsdWrite(m++, "", 0, 0);
+
+		// How long the first CD media announcement is held at cold boot.
+		// Presenting a disc that is already there at power-on is not what the
+		// hardware does, and a CD32 title that wants most of chip RAM in one
+		// allocation fails because of it. 8 s is the measured value: 6 fails.
+		// Off restores the old immediate announce.
+		strcpy(s, " CD Mount Delay : ");
+		if (!minimig_config.cd_mount_delay) strcat(s, "Off");
+		else
+		{
+			char d[8];
+			sprintf(d, "%u s", minimig_config.cd_mount_delay);
+			strcat(s, d);
+		}
+		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 5 : 3), 0);
 
 		// Fast-IDE, which lives on MENU_MINIMIG_DISK1 -- a page this variant
 		// cannot open, and one that would drag in four IDE slot rows the CD and
@@ -9240,15 +9301,15 @@ void HandleUI(void)
 			else if (!ide_on) strcat(s, "N/A (no IDE)");
 			else if (!(minimig_config.cpu & 2)) strcat(s, "N/A (68000)");
 			else strcat(s, (minimig_config.ide_cfg & 0x20) ? "Off" : "On");
-			OsdWrite(m++, s, menusub == (uint32_t)(snac ? 5 : 3), !ok);
+			OsdWrite(m++, s, menusub == (uint32_t)(snac ? 6 : 4), !ok);
 		}
 
 		// FDD Turbo moved to the Drives page, which is where the rest of the
 		// floppy hardware now lives. This row is the way in.
-		OsdWrite(m++, " Drives                   \x16", menusub == (uint32_t)(snac ? 6 : 4), 0);
+		OsdWrite(m++, " Drives                   \x16", menusub == (uint32_t)(snac ? 7 : 5), 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 7 : 5), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 8 : 6), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -9270,9 +9331,10 @@ void HandleUI(void)
 			// Ethernet and Back slide down the menusub list when it is.
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
 			uint32_t eth_row  = snac ? 4 : 2;
-			uint32_t ide_row  = snac ? 5 : 3;
-			uint32_t fdd_row  = snac ? 6 : 4;   // the Drives submenu row
-			uint32_t back_row = snac ? 7 : 5;
+			uint32_t cd_row   = snac ? 5 : 3;
+			uint32_t ide_row  = snac ? 6 : 4;
+			uint32_t fdd_row  = snac ? 7 : 5;   // the Drives submenu row
+			uint32_t back_row = snac ? 8 : 6;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -9312,6 +9374,15 @@ void HandleUI(void)
 					if (a2065_mode_available(m2)) break;
 				}
 				a2065_set_iface(m2);
+				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == cd_row) // CD mount delay, 0 (Off) .. AMIGACD_CD_DELAY_MAX
+			{
+				int d = minimig_config.cd_mount_delay;
+				if (d > AMIGACD_CD_DELAY_MAX) d = AMIGACD_CD_DELAY_DEFAULT;
+				d = minus ? (d + AMIGACD_CD_DELAY_MAX) % (AMIGACD_CD_DELAY_MAX + 1)
+				          : (d + 1) % (AMIGACD_CD_DELAY_MAX + 1);
+				minimig_config.cd_mount_delay = (unsigned char)d;
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
 			else if (menusub == ide_row && select) // Fast-IDE
