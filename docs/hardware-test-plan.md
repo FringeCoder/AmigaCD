@@ -266,7 +266,7 @@ help populate a preset for a resolution no software has selected yet.
 | Check | Pass | Watch for |
 |---|---|---|
 | Disc detail under the CD row | Volume label and `N trk  M CDDA` | An empty label is **normal** — Simon the Sorcerer ships as `CD32_TEST` |
-| `Write .mgl for this disc` | Toast says `Wrote <name>.mgl`, file appears beside the disc | |
+| `Write .mgl for this disc` (Advanced page) | Toast says `Wrote <name>.mgl`, file appears beside the disc | |
 | Press it again | `Already current: <name>.mgl` | Not `Wrote` — that would mean the no-change path is broken |
 | Hand-edit the `.mgl` (add a `<reset/>`), deploy a new core, press again | `Updated <name>.mgl`, and **your `<reset/>` is still there** | If the edit is gone, the in-place rewrite is not working and it fails silently |
 | Launch that `.mgl` from the MiSTer menu | Core loads with the disc mounted | Also exercises the `index 4` path from #52 |
