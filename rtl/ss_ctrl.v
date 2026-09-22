@@ -1781,9 +1781,24 @@ always @(posedge clk) begin
 			else ss_hold <= ss_hold + 3'd1;
 		end
 
+		// Wait for word_busy like every other queue_word() site. The first
+		// colour word follows the last shadow word by the CLUT read's settle,
+		// about seven cycles, and that was taken as long enough for the shadow
+		// word's DDR3 write to have gone. It is not when the arbiter holds
+		// waitrequest -- a refresh, the scaler, the ARM -- and then this
+		// queued colour 0 on top of a write still waiting: pending_valid was
+		// cleared by that write's acceptance, colour 0 never reached DDR3, the
+		// CRC had already taken it, and the window came out one word short
+		// from here on with a CRC the host refused. Seen on hardware,
+		// 2026-09-21, Chuck Rock: "Save state: captured" and no file, the
+		// window's CLUT starting at colour 1 and chip RAM one word early.
+		// The chip and fast RAM paths drain after every word; this one only
+		// drained AFTER each colour, never before the first.
 		S_CLUT_CAP: begin
-			queue_word(clut_rd_data);
-			state <= S_CLUT_DRAIN;
+			if (!word_busy) begin
+				queue_word(clut_rd_data);
+				state <= S_CLUT_DRAIN;
+			end
 		end
 
 		// Wait for the queued word to reach DDR3 before producing the next
