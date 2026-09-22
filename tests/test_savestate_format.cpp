@@ -116,6 +116,60 @@ int main(void)
 	check("host block sets host_crc32", win[7] == 0x12345678);
 	check("host block extends length", win[1] == 6 + 3 + 2);
 
+	// ---- the 1.3 -> 1.4 upgrade -------------------------------------------
+	//
+	// A 1.3 image with a core payload and a host block. The mask goes in at
+	// SS_MASK_OFFSET_13 with every bit set, everything after it moves up eight
+	// words, the header's length, version, core_words and core_crc32 follow,
+	// and the host block is byte-for-byte where the new header says it is.
+	{
+		const uint32_t core13 = SS_MASK_OFFSET_13 + 40;   // past the insert point
+		const uint32_t hostw  = 5;
+		build_window(win, core13);
+		win[3] = SS_VERSION_13;
+		win[5] = hostw;
+		win[1] = 6 + core13 + hostw;
+		for (uint32_t i = 0; i < hostw; i++) win[8 + core13 + i] = 0x48420000 + i;
+		win[7] = crc32_compute((const uint8_t *)&win[8 + core13], hostw * 4);
+		win[6] = crc32_compute((const uint8_t *)&win[8], core13 * 4);
+
+		uint32_t before_at = win[8 + SS_MASK_OFFSET_13];           // first word to be displaced
+		uint32_t last_core = win[8 + core13 - 1];
+
+		check("1.3 is refused as-is", !ss_header_parse(win, SS_MAX_WORDS, &h));
+		check("upgrade accepts a valid 1.3", ss_upgrade_13_to_14(win, SS_MAX_WORDS) == 1);
+		check("upgraded header parses", ss_header_parse(win, SS_MAX_WORDS, &h));
+		check("version is 1.4", h.version == SS_VERSION);
+		check("core grew by the mask", h.core_words == core13 + SS_MASK_WORDS);
+		check("length grew by the mask", h.length == 6 + core13 + SS_MASK_WORDS + hostw);
+		check("mask word 0 is all ones", win[8 + SS_MASK_OFFSET_13] == 0xFFFFFFFFu);
+		check("mask word 7 is all ones", win[8 + SS_MASK_OFFSET_13 + 7] == 0xFFFFFFFFu);
+		check("word before the insert is untouched", win[8 + SS_MASK_OFFSET_13 - 1] == 0xA5A50000 + SS_MASK_OFFSET_13 - 1);
+		check("displaced word moved up eight", win[8 + SS_MASK_OFFSET_13 + 8] == before_at);
+		check("last core word moved up eight", win[8 + core13 + 8 - 1] == last_core);
+		check("host block found at the new offset", ss_host_block_offset(&h) == 8 + core13 + SS_MASK_WORDS);
+		check("host block content moved intact", win[ss_host_block_offset(&h)] == 0x48420000u);
+		check("host crc still matches",
+		      crc32_compute((const uint8_t *)&win[ss_host_block_offset(&h)], hostw * 4) == h.host_crc32);
+		check("a second upgrade is a no-op", ss_upgrade_13_to_14(win, SS_MAX_WORDS) == 0);
+		check("still parses after the no-op", ss_header_parse(win, SS_MAX_WORDS, &h));
+
+		// Refusals leave the image alone.
+		build_window(win, core13); win[3] = SS_VERSION_13; win[9] ^= 1;
+		check("corrupt 1.3 is not upgraded", ss_upgrade_13_to_14(win, SS_MAX_WORDS) == 0);
+		check("and its version is untouched", win[3] == SS_VERSION_13);
+		build_window(win, core13); win[3] = SS_VERSION_13;
+		check("no room for the mask is refused", ss_upgrade_13_to_14(win, 8 + core13 + 3) == 0);
+		build_window(win, SS_MASK_OFFSET_13 - 1); win[3] = SS_VERSION_13;
+		win[6] = crc32_compute((const uint8_t *)&win[8], (SS_MASK_OFFSET_13 - 1) * 4);
+		check("a payload shorter than the insert point is refused", ss_upgrade_13_to_14(win, SS_MAX_WORDS) == 0);
+
+		// The insert point is a number this test pins on purpose: it is
+		// KICK_META + STATE_WORDS + 128, and STATE_WORDS follows `SS_STATE_W
+		// in rtl/ss_state.vh. If that width changes, this fails first.
+		check("mask offset is 1 + 66 + 128", SS_MASK_OFFSET_13 == 195u);
+	}
+
 	if (failures) { printf("%d FAILURE(S)\n", failures); return 1; }
 	printf("ALL TESTS PASSED\n");
 	return 0;

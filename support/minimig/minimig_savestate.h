@@ -16,7 +16,28 @@
 // 1.1 added Denise's 256-entry colour table between the register shadow and
 // chip RAM. A 1.0 file has a different core_words and every section after the
 // shadow at a different offset, so it must be refused rather than misread.
-#define SS_VERSION  0x00010003u   // major 1, minor 3
+// 1.4 added the register shadow's WRITTEN mask: eight words directly after the
+// 256 shadow entries, one bit per entry, saying whether the machine ever
+// wrote that register. The core replays only entries whose bit is set. A 1.3
+// file has no mask; ss_upgrade_13_to_14() below inserts one with every bit
+// set, which replays exactly what 1.3 replayed, so the core need only know
+// 1.4. That is the only backward step this format has ever taken, and the
+// reason it could: the core's payload layout is fixed, so the insert point is
+// a constant.
+#define SS_VERSION    0x00010004u   // major 1, minor 4
+#define SS_VERSION_13 0x00010003u   // the last layout without a mask
+
+// Where the mask goes in a 1.3 payload: after the Kickstart fingerprint (one
+// word), the state vector and the 256 shadow entries (two per word). The
+// state vector width is `SS_STATE_W in the core's rtl/ss_state.vh, 2093 bits
+// as of 1.4, and this constant has to move with it -- tests/test_savestate_
+// format.cpp pins it, and the core's ss_ctrl_tb pins the same number from the
+// RTL side.
+#define SS_KICK_META_WORDS   1u
+#define SS_STATE_WORDS       66u              // (2093 + 31) / 32
+#define SS_SHADOW_ENTRIES    256u
+#define SS_MASK_WORDS        8u               // 256 bits
+#define SS_MASK_OFFSET_13    (SS_KICK_META_WORDS + SS_STATE_WORDS + SS_SHADOW_ENTRIES / 2u)
 
 // 12 MB slot / 4 bytes per word. The slot grew from 4 MB when Zorro II fast
 // RAM joined the payload: 2 MB chip + 1.5 MB slow + 8 MB fast is 11.5 MB, and
@@ -39,6 +60,13 @@ typedef struct
 	uint32_t core_crc32;
 	uint32_t host_crc32;
 } ss_header_t;
+
+// Upgrades a 1.3 image in place to 1.4 by inserting the WRITTEN mask, every
+// bit set. `win_words` is the whole window, which must have room for eight
+// more words after the file's content. Returns 1 if upgraded, 0 if the image
+// was not a valid 1.3 file or would not fit (in which case it is untouched);
+// a 1.4 image is left alone and also returns 0.
+int ss_upgrade_13_to_14(uint32_t *win, uint32_t win_words);
 
 // Validates magic, version, bounds and the core payload CRC. Returns false and
 // leaves *out untouched on any failure. A window the host memset and then

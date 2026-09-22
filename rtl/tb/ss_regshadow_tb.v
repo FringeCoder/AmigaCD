@@ -19,13 +19,13 @@ reg rst_n = 0;
 reg  [8:1] reg_address_in = 8'd0;
 reg [15:0] data_in = 16'd0;
 
-reg  [7:0] rd_addr = 8'd0;
+reg  [8:0] rd_addr = 9'd0;
 wire [15:0] rd_data;
 wire        rd_writable;
 wire        rd_setclear;
 
 reg         ld_we = 0;
-reg   [7:0] ld_addr = 0;
+reg   [8:0] ld_addr = 0;
 reg  [15:0] ld_data = 0;
 reg         replay_start = 0;
 reg  [14:0] intreq_in = 0;
@@ -127,7 +127,16 @@ endtask
 // would not need this, but reading them the same way keeps one task.
 task rd(input [8:0] addr);
 begin
-	rd_addr = addr[8:1];
+	rd_addr = {1'b0, addr[8:1]};
+	@(negedge clk);
+	#1;
+end
+endtask
+
+// The WRITTEN mask, half-word n of sixteen, at index 256+n.
+task rd_mask(input [3:0] n);
+begin
+	rd_addr = {1'b1, 4'd0, n};
 	@(negedge clk);
 	#1;
 end
@@ -314,6 +323,27 @@ initial begin
 	rd(9'h180);
 	check("load overwrites the shadow", {16'd0, rd_data}, 32'h00000777);
 
+	// ------------------------------------------------------------ WRITTEN
+	//
+	// The mask: one bit per entry, set by the snoop, streamed as sixteen
+	// half-words at index 256-271. COLOR00 was written above (index $C0 = bit
+	// 192 = half-word 12, bit 0); DIWHIGH ($1E4, index $F2 = bit 242 =
+	// half-word 15, bit 2) never was.
+	rd_mask(4'd12);
+	check("mask: COLOR00's bit is set",      {31'd0, rd_data[0]}, 32'd1);
+	rd_mask(4'd15);
+	check("mask: DIWHIGH's bit is clear",    {31'd0, rd_data[2]}, 32'd0);
+
+	// A loaded entry the mask says was never written. The old replay wrote
+	// every entry; this one is the Chuck Rock strip -- DIWHIGH replayed as
+	// zero after DIWSTOP, clearing the implied H8. It must not be driven.
+	@(negedge clk);
+	ld_addr = 9'h0F2;             // DIWHIGH >> 1
+	ld_data = 16'h0000;
+	ld_we   = 1'b1;
+	@(negedge clk);
+	ld_we   = 1'b0;
+
 	// ------------------------------------------------------------- replay
 	//
 	// Ordering is the point. Replaying in address order would bring DMA and
@@ -344,6 +374,9 @@ initial begin
 	check("replay drove no strobe",      {31'd0, saw_strobe},   32'd0);
 	check("replay drove no read window", {31'd0, saw_readwin},  32'd0);
 
+	// Never written, so never replayed -- whatever the entry holds.
+	check("replay skipped DIWHIGH (never written)", {31'd0, (idx_of(9'h1E4) == -1)}, 32'd1);
+
 	// Plain registers come back with their values.
 	check("replay wrote the loaded COLOR00", {16'd0, val_of(9'h180)}, 32'h00000777);
 	check("replay wrote BPLCON0", {16'd0, val_of(9'h100)}, 32'h00004200);
@@ -366,6 +399,72 @@ initial begin
 	check("colours before DMACON",{31'd0, (idx_of(9'h180) < idx_of(9'h096))}, 32'd1);
 	check("DMACON set is the last write",
 	      {31'd0, ((idx_of(9'h096) + 1) == (rec_n - 1))}, 32'd1);
+
+	// ------------------------------------------------ mask loaded, replayed
+	//
+	// A restore loads the saved mask through the same window the save read
+	// it from, and the replay obeys THAT mask, not what this machine has
+	// written since. Load half-word 15 with DIWHIGH's bit set and half-word
+	// 12 with COLOR00's bit clear, replay again, and the two swap places.
+	@(negedge clk);
+	ld_addr = {1'b1, 4'd0, 4'd15}; ld_data = 16'h0004; ld_we = 1'b1;   // bit 2: DIWHIGH
+	@(negedge clk);
+	ld_addr = {1'b1, 4'd0, 4'd12}; ld_data = 16'h0000;                 // COLOR00 cleared
+	@(negedge clk);
+	ld_we = 1'b0;
+	rd_mask(4'd15);
+	check("mask load: DIWHIGH's bit now set",   {31'd0, rd_data[2]}, 32'd1);
+	rd_mask(4'd12);
+	check("mask load: COLOR00's bit now clear", {31'd0, rd_data[0]}, 32'd0);
+
+	@(negedge clk);
+	rec_n  = 0;
+	recording = 1;
+	replay_start = 1;
+	@(negedge clk);
+	replay_start = 0;
+	for (i = 0; i < 4000 && !replay_done; i = i + 1) begin
+		@(negedge clk); clk7_en = 1'b1;
+		@(negedge clk); clk7_en = 1'b0;
+	end
+	check("second replay finished", {31'd0, replay_done}, 32'd1);
+	@(negedge clk);
+	recording = 0;
+
+	check("loaded mask: DIWHIGH replayed",     {31'd0, (idx_of(9'h1E4) != -1)}, 32'd1);
+	check("loaded mask: DIWHIGH value",        {16'd0, val_of(9'h1E4)},          32'h00000000);
+	check("loaded mask: COLOR00 not replayed", {31'd0, (idx_of(9'h180) == -1)}, 32'd1);
+
+	// And reset clears the mask: a new game starts with nothing written.
+	@(negedge clk); rst_n = 1'b0;
+	@(negedge clk); rst_n = 1'b1;
+	rd_mask(4'd15);
+	check("reset clears the mask", {16'd0, rd_data}, 32'h00000000);
+
+	// ------------------------------------------- DIWHIGH follows the window
+	//
+	// A DIWSTRT or DIWSTOP write overrides what DIWHIGH set, so DIWHIGH's
+	// bit must only survive a write that came AFTER them. The CD32 boot
+	// order first: ROM writes DIWHIGH (zero), the game then writes DIWSTOP.
+	// Replaying that DIWHIGH after DIWSTOP is the Chuck Rock strip.
+	wr(9'h1E4, 16'h0000);          // DIWHIGH, as the ROM does
+	wr(9'h08E, 16'h2C81);          // DIWSTRT
+	wr(9'h090, 16'hECB1);          // DIWSTOP -- H8 implied set
+	rd_mask(4'd15);
+	check("DIWSTOP after DIWHIGH clears DIWHIGH's bit", {31'd0, rd_data[2]}, 32'd0);
+	rd_mask(4'd4);
+	check("DIWSTRT/DIWSTOP themselves are marked", {31'd0, rd_data[7] & rd_data[8]}, 32'd1);
+
+	// The AGA order: window first, then DIWHIGH to widen it. That one is
+	// real and must be replayed.
+	wr(9'h1E4, 16'h2000);          // DIWHIGH after both, H8 stop set
+	rd_mask(4'd15);
+	check("DIWHIGH after the window keeps its bit", {31'd0, rd_data[2]}, 32'd1);
+
+	// And a later DIWSTRT alone clears it again.
+	wr(9'h08E, 16'h2C81);
+	rd_mask(4'd15);
+	check("DIWSTRT alone also clears it", {31'd0, rd_data[2]}, 32'd0);
 
 	if (errors) begin
 		$display("%0d FAILURE(S)", errors);

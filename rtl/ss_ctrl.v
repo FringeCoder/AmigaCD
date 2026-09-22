@@ -288,10 +288,10 @@ module ss_ctrl
 
 	// Custom chipset register shadow (ss_regshadow, instantiated in AmigaCD.sv).
 	// Read out on a save, loaded back and replayed on a restore.
-	output reg  [7:0]         shadow_rd_addr,
+	output reg  [8:0]         shadow_rd_addr,
 	input      [15:0]         shadow_rd_data,
 	output reg                shadow_ld_we,
-	output reg  [7:0]         shadow_ld_addr,
+	output reg  [8:0]         shadow_ld_addr,
 	output reg [15:0]         shadow_ld_data,
 	output reg                replay_start,
 	input                     replay_done,
@@ -422,8 +422,27 @@ localparam KICK_PAIRS  = KICK_WORDS / 2;         // 32-bit words scanned per fin
 // corrupt file rather than misdiagnosed as the wrong ROM.
 localparam KICK_META    = 1;
 
-// Two 16-bit shadow entries per 32-bit payload word, low entry in the low half.
-localparam SHADOW_WORDS = SHADOW_ENTRIES / 2;
+// The shadow section: 256 register entries, then sixteen half-words of the
+// WRITTEN mask -- one bit per entry, saying whether the machine ever wrote it.
+// ss_regshadow serves both through one address (rd_addr 256-271 is the mask)
+// so the walks below stream them as one section of 272 entries. Two 16-bit
+// entries per 32-bit payload word, low entry in the low half.
+//
+// The mask exists because a replayed zero is not "no change" for every
+// register: DIWHIGH, BEAMCON0, BPLCON4 and BPLCON1 all end up somewhere other
+// than their reset state when written with zero, and a game that never wrote
+// them got exactly that on every restore. See WRITTEN in ss_regshadow.v.
+localparam SHADOW_MASK_ENTRIES = 16;
+localparam SHADOW_STREAM = SHADOW_ENTRIES + SHADOW_MASK_ENTRIES;
+localparam SHADOW_WORDS  = SHADOW_STREAM / 2;
+
+// Stream index to ss_regshadow address. Register entries are their own index;
+// the sixteen mask entries live at 256-271 in ss_regshadow whatever
+// SHADOW_ENTRIES is here -- the bench shrinks it to 32 -- so they are placed
+// by bit 8 and the low nibble rather than by continuing the count.
+function [8:0] sh_addr(input [8:0] idx);
+	sh_addr = (idx < SHADOW_ENTRIES) ? {1'b0, idx[7:0]} : {1'b1, 4'd0, idx[3:0]};
+endfunction
 
 // Denise's colour table: 256 entries of 32 bits, one payload word each.
 //
@@ -476,7 +495,12 @@ localparam SS_MAGIC   = 32'h53534341;
 // Amiga with a black screen. The format cannot tell those files apart from
 // good ones, so the version has to, and a refusal the user can read beats a
 // machine that stops.
-localparam SS_VERSION = 32'h00010003;
+// 1.4: the shadow section grew by eight words -- the WRITTEN mask, streamed
+// as sixteen half-word entries after the 256 registers -- and everything
+// after it moved. A 1.3 file has no mask; the host upgrades one in memory
+// before it is uploaded (all entries marked written, which is what 1.3
+// replayed), so this core only ever reads 1.4. See minimig_savestate.cpp.
+localparam SS_VERSION = 32'h00010004;
 
 // Sized copies of CORE_WORDS for the comparisons on the restore path, so a
 // 24-bit counter and a 32-bit header word are each compared against something
@@ -1208,9 +1232,9 @@ always @(posedge clk) begin
 		scan_acks        <= 8'd0;
 		cache_flush      <= 1'b0;
 		flush_wd         <= 24'd0;
-		shadow_rd_addr   <= 8'd0;
+		shadow_rd_addr   <= 9'd0;
 		shadow_ld_we     <= 1'b0;
-		shadow_ld_addr   <= 8'd0;
+		shadow_ld_addr   <= 9'd0;
 		shadow_ld_data   <= 16'd0;
 		replay_start     <= 1'b0;
 		sh_idx           <= 9'd0;
@@ -1634,7 +1658,7 @@ always @(posedge clk) begin
 					// chip RAM. Both are streamed the same way -- CRC and DDR3
 					// write per word, self-paced by the CRC feeder.
 					sh_idx         <= 9'd0;
-					shadow_rd_addr <= 8'd0;
+					shadow_rd_addr <= 9'd0;
 					state          <= S_SHADOW_RD;
 				end
 				else begin
@@ -1656,7 +1680,7 @@ always @(posedge clk) begin
 		// section cannot show that, which is why ss_ctrl_tb now writes real
 		// values into the shadow before the save.
 		S_SHADOW_RD: begin
-			if (sh_idx == SHADOW_ENTRIES) begin
+			if (sh_idx == SHADOW_STREAM) begin
 				if (CHIP_PAIRS == 0) begin
 					saved_crc <= crc_value;
 					word_idx  <= 24'd1;
@@ -1700,7 +1724,7 @@ always @(posedge clk) begin
 		S_SHADOW_LOW: begin
 			if (ss_hold == SS_HOLD_MAX) begin
 				sh_low         <= shadow_rd_data;
-				shadow_rd_addr <= shadow_rd_addr + 8'd1;
+				shadow_rd_addr <= sh_addr(sh_idx + 9'd1);
 				sh_idx         <= sh_idx + 9'd1;
 				ss_hold        <= 3'd0;
 				state          <= S_SHADOW_HI;
@@ -1723,7 +1747,7 @@ always @(posedge clk) begin
 		S_SHADOW_Q: begin
 			if (!word_busy) begin
 				queue_word({shadow_rd_data, sh_low});
-				shadow_rd_addr <= shadow_rd_addr + 8'd1;
+				shadow_rd_addr <= sh_addr(sh_idx + 9'd1);
 				sh_idx         <= sh_idx + 9'd1;
 				ss_hold        <= 3'd0;
 				state          <= S_SHADOW_RD;
@@ -2312,7 +2336,7 @@ always @(posedge clk) begin
 		S_L_SH_FETCH: begin
 			shadow_ld_we <= 1'b0;
 			ss_hold      <= 3'd0;
-			if (sh_idx == SHADOW_ENTRIES) begin
+			if (sh_idx == SHADOW_STREAM) begin
 				clut_idx    <= 9'd0;
 				clut_active <= 1'b1;
 				state       <= S_L_CLUT_FETCH;
@@ -2332,7 +2356,7 @@ always @(posedge clk) begin
 		// See the SS_HOLD_MAX comment for what a one-cycle strobe here did.
 		S_L_SH_LOAD: begin
 			shadow_ld_we   <= 1'b1;
-			shadow_ld_addr <= sh_idx[7:0];
+			shadow_ld_addr <= sh_addr(sh_idx);
 			shadow_ld_data <= sh_half ? pay_word[31:16] : pay_word[15:0];
 			if (ss_hold == SS_HOLD_MAX) begin
 				ss_hold <= 3'd0;
