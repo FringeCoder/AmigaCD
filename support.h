@@ -6,6 +6,7 @@
 #include "support/minimig/minimig_a2065.h"
 #include "support/minimig/fmv.h"
 #include "support/next/next_enet.h"
+#include "support/next/next_scsi.h"
 
 
 // Apple 2 support
