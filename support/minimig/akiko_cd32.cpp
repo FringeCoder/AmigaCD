@@ -202,6 +202,14 @@ static uint8_t  cd_initialized      = 0;
 static uint32_t cd_boot_ready_ms    = 0;   // 0 = no hold pending
 static uint32_t cd_boot_settle_ms   = 0;
 static uint8_t  cd_paused           = 0;
+
+// Debug: what the sector currently being pushed was fetched for. Set by
+// akiko_handle_sec_req() right after it reads the engine's sector counter,
+// read again inside the push below -- the pacing sleep sits between the two,
+// so this measures whether the counter moved while the host was busy.
+static int      dbg_fetch_ctr = -1;
+static int32_t  dbg_fetch_lba = -1;
+static uint32_t dbg_moves = 0;
 static uint8_t  cd_playing          = 0;       // unused in M3, set by 0x04 (audio)
 static uint8_t  cd_led_state        = 0;
 // WinUAE akiko.cpp:500 defaults cdrom_door=1 and never clears it. The
@@ -1157,6 +1165,7 @@ static void cmd_multi(const uint8_t *cmd)
 			// is reset to 0 on CDFLAG_ENABLE rising (akiko.cpp:1973-1976), so
 			// LBA = base + counter holds across the full read pass.
 			cd_data_lba_base = (int32_t)s_lba;
+			dbg_moves = 0;   // debug: per-read, so a second boot still traces
 
 			// Phase 3 item 7: point physical_disc's background prefetch lane
 			// at the LBA the BIOS is about to stream. This is the whole reason
@@ -1825,6 +1834,23 @@ static void akiko_push_sector(const uint8_t *buf)
 	}
 	prev_us = now_us;
 
+	// The measurement. The engine places this sector at addressdata +
+	// (counter & 31) * 4096 using ITS counter at ship time, while the host
+	// chose the DATA from the counter it read before the CHD fetch and the
+	// pacing wait above. If those disagree the sector is correct but lands in
+	// the wrong slot -- and a slot belonging to a read that has just reset the
+	// counter is exactly the corruption the Chuck Rock hang needs.
+	if (dbg_fetch_ctr >= 0) {
+		int now_ctr = (int)akiko_read_sec_counter();
+		if (now_ctr != dbg_fetch_ctr) {
+			dbg_moves++;
+			akiko_diag("[akiko] DBG COUNTER MOVED fetch=%d now=%d lba=%d waited=%lldus (move #%u)",
+			           dbg_fetch_ctr, now_ctr, dbg_fetch_lba,
+			           (long long)(wait_us > 0 ? wait_us : 0), dbg_moves);
+		}
+		dbg_fetch_ctr = -1;
+	}
+
 	akiko_ext_block_write(AKIKO_SECTOR_ADDR, buf, AKIKO_SECTOR_BYTES);
 }
 
@@ -2246,6 +2272,8 @@ static bool akiko_handle_sec_req(void)
 	// first real sector. Per-sector handling silences only the genuinely-
 	// negative LBAs and serves CHD data once we cross zero.
 	int32_t signed_lba = cd_data_lba_base + (int32_t)counter;
+	dbg_fetch_ctr = (int)counter;
+	dbg_fetch_lba = signed_lba;
 	// 2026-06-05 Deep Core counter-drift diagnostic: trace the first sec_reqs
 	// so we can see whether `counter` resets to 0 per READ DATA arm or keeps
 	// climbing across arms (=> base+counter delivers the wrong sector).
