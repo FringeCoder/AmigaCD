@@ -334,6 +334,10 @@ typedef enum {
 
 static cd_media_level_t cd_media_level = CD_MEDIA_UNKNOWN;
 static bool     cd_media_push_pending = false;
+// EXPERIMENT: how long the media-status frame waits after an INFO reply.
+#ifndef AKIKO_INFO_PUSH_HOLD_MS
+#define AKIKO_INFO_PUSH_HOLD_MS 120u
+#endif
 static bool     cd_media_event        = false;
 // Mounting a disc while one is already in swaps it with no removal in between,
 // which no physical drive can do - the tray has to open. A guest is told
@@ -893,6 +897,11 @@ static void cmd_info(const uint8_t *cmd)
 	akiko_send_response(r, 20);
 	cd_initialized = 2;
 	cd_media_push_pending = true;
+	// EXPERIMENT (debug/info-push-delay): hold the media-status frame back
+	// so it cannot land on top of the 20-byte INFO response the BIOS has
+	// not read yet. rx_idle only says the FPGA's RX engine is free.
+	cd_media_swap_ready_ms = GetTimer(AKIKO_INFO_PUSH_HOLD_MS);
+	akiko_diag("[akiko] INFO: media push held %u ms", AKIKO_INFO_PUSH_HOLD_MS);
 	akiko_dbg("INFO -> initialized=2\n");
 	// Build TOC eagerly (cheap), but DON'T start streaming. WinUAE's BIOS
 	// asks for TOC via MULTI in PLAY mode with seekpos<0 — see cmd_multi.
