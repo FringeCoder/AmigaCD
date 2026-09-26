@@ -11237,13 +11237,15 @@ void Info(const char *message, int timeout, int width, int height, int frame, in
 	// it could be read, and the restore's own result likewise.
 	static uint32_t info_priority_until = 0;
 
+	int held_back = 0;
+
 	if (priority)
 	{
 		info_priority_until = GetTimer(timeout);
 	}
 	else if (info_priority_until && !CheckTimer(info_priority_until))
 	{
-		return;
+		held_back = 1;
 	}
 
 	// Diagnostic for the save state toast, which has never once appeared on
@@ -11255,10 +11257,22 @@ void Info(const char *message, int timeout, int width, int height, int frame, in
 	//
 	// Logging menustate here separates "the gate dropped it" from "it was drawn
 	// and not visible", which no amount of reading either file can settle.
+	//
+	// It logs EVERY call, including one the priority window above holds back.
+	// That return used to happen before this line, so a held-back message left
+	// no trace at all, and on 2026-09-26 that cost an hour: a save state was
+	// refused by ss_header_parse(), said so through this function while the
+	// core's own "Save state: captured" still owned the slot, and the only
+	// thing in the log was the twenty-second deadline that follows. A refusal
+	// and a save the host never noticed read identically from here, and they
+	// have entirely different causes.
 	// A no-op off Minimig; see support/minimig/minimig_ssdiag.cpp.
 	minimig_ss_diag_log("host Info(\"%s\") menustate=%u gate=%s",
 	                    message, menustate,
+	                    held_back                ? "HELD (priority)" :
 	                    (menustate <= MENU_INFO) ? "open" : "DROPPED");
+
+	if (held_back) return;
 
 	if (menustate <= MENU_INFO)
 	{
