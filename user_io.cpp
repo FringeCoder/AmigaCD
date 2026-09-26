@@ -2298,7 +2298,15 @@ int process_ss(const char *rom_name, int enable)
 	{
 		ss_save_expected = 0;
 		printf("process_ss: save was announced but no window updated - nothing written\n");
-		Info("Save state NOT written", 3000);
+		// Priority, like every save state result below it: the core's own
+		// "Save state: captured" owns the toast slot for two seconds when
+		// the capture lands, and an ordinary Info() raised inside that
+		// window is held back and never drawn. The user saw "captured"
+		// and then nothing at all, whatever became of the file. Measured
+		// on hardware 2026-09-26, where written, refused and failed were
+		// all three invisible; the log line that shows it says
+		// gate=HELD (priority) -- see Info() in menu.cpp.
+		Info("Save state NOT written", 3000, 0, 0, 0, 1);
 	}
 
 	fileTYPE f = {};
@@ -2332,7 +2340,7 @@ int process_ss(const char *rom_name, int enable)
 						if (!ss_header_parse((const uint32_t *)ss_base_win[i], ss_size / 4, &h))
 						{
 							printf("process_ss: slot %d failed validation, not written\n", i + 1);
-							Info("Save state not written", 2000);
+							Info("Save state not written", 2000, 0, 0, 0, 1);
 							ss_rearm(i);
 							continue;
 						}
@@ -2434,18 +2442,18 @@ int process_ss(const char *rom_name, int enable)
 						{
 							char msg[32];
 							snprintf(msg, sizeof(msg), "Save state %d written", i + 1);
-							Info(msg, 2000);
+							Info(msg, 2000, 0, 0, 0, 1);
 						}
 						else
 						{
 							printf("process_ss: short write, %d of %u bytes\n", ret, size);
-							Info("Save state write FAILED", 3000);
+							Info("Save state write FAILED", 3000, 0, 0, 0, 1);
 						}
 					}
 					else
 					{
 						printf("Unable to create file: %s\n", ss_name);
-						Info("Save state write FAILED", 3000);
+						Info("Save state write FAILED", 3000, 0, 0, 0, 1);
 					}
 				}
 				ss_rearm(i);

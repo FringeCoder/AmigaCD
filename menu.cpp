@@ -701,7 +701,7 @@ static int minimig_ss_request_restore()
 		// The Z3 and 68000 refusals grey the row out so the user is told rather
 		// than left pressing SELECT at nothing; this one cannot be known until
 		// the press, so it toasts instead.
-		Info("No disc or HDF - nothing to restore", 2500);
+		Info("No disc or HDF - nothing to restore", 2500, 0, 0, 0, 1);
 		return 0;
 	}
 
@@ -755,7 +755,7 @@ int amigacd_ss_hotkey(int action)
 	{
 		// The same two conditions that grey the Settings rows out. There they
 		// are visible before the press; here there is nothing to grey.
-		Info("Save states need 020 and no Z3 RAM", 2500);
+		Info("Save states need 020 and no Z3 RAM", 2500, 0, 0, 0, 1);
 		return 1;
 	}
 
