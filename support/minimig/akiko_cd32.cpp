@@ -2927,7 +2927,18 @@ void akiko_cd32_poll(void)
 
 	// 3. Drain the framed command.
 	uint8_t cmd[AKIKO_CMD_MAX];
+	uint16_t st_before = akiko_read_status();
 	int     n = akiko_drain_command(cmd);
+	uint16_t st_after = akiko_read_status();
+	{
+		char hex[3 * AKIKO_CMD_MAX + 1];
+		int off = 0;
+		for (int i = 0; i < n && i < 8; i++)
+			off += snprintf(hex + off, sizeof(hex) - off, "%02x ", cmd[i]);
+		akiko_diag("[akiko] DRAIN req_before=%d req_after=%d n=%d bytes=%s",
+		           (st_before & AKIKO_STATUS_REQ) ? 1 : 0,
+		           (st_after  & AKIKO_STATUS_REQ) ? 1 : 0, n, hex);
+	}
 	if (n < 1) {
 		akiko_dbg("drain returned 0 bytes\n");
 		return;
