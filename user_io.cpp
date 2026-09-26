@@ -2134,8 +2134,11 @@ static uint32_t ss_cnt[4] = {};
 static void ss_rearm(int slot)
 {
 	if (!ss_base_win[slot]) return;
-	*(uint32_t *)ss_base_win[slot] = 0xFFFFFFFF;
+	*(volatile uint32_t *)ss_base_win[slot] = 0xFFFFFFFF;
+	uint32_t back = *(volatile uint32_t *)ss_base_win[slot];
 	ss_cnt[slot] = 0xFFFFFFFF;
+	minimig_ss_diag_log("host ss_rearm slot %d wrote FFFFFFFF, reads back %08X",
+	                    slot + 1, back);
 }
 
 int process_ss(const char *rom_name, int enable)
@@ -2306,8 +2309,21 @@ int process_ss(const char *rom_name, int enable)
 	{
 		if (ss_base_win[i])
 		{
-			uint32_t curcnt = ((uint32_t*)(ss_base_win[i]))[0];
-			uint32_t size = ((uint32_t*)(ss_base_win[i]))[1];
+			uint32_t curcnt = *(volatile uint32_t *)((uint32_t*)(ss_base_win[i]) + 0);
+			uint32_t size   = *(volatile uint32_t *)((uint32_t*)(ss_base_win[i]) + 1);
+			{
+				static uint32_t last_seen[4] = { 1, 1, 1, 1 };
+				static uint32_t last_len[4]  = { 1, 1, 1, 1 };
+				if (curcnt != last_seen[i] || size != last_len[i])
+				{
+					minimig_ss_diag_log("host poll slot %d word0 %08X (was %08X) "
+					                    "word1 %08X (was %08X) ss_cnt %08X",
+					                    i + 1, curcnt, last_seen[i],
+					                    size, last_len[i], ss_cnt[i]);
+					last_seen[i] = curcnt;
+					last_len[i]  = size;
+				}
+			}
 
 			if (curcnt != ss_cnt[i])
 			{
