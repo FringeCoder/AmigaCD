@@ -2203,6 +2203,32 @@ static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 // where the bottleneck actually lives before optimizing.
 static bool akiko_handle_sec_req(void)
 {
+	// PAUSE stops the data stream, exactly as it stops the CDDA pump above.
+	//
+	// Without this the host kept answering sector requests after the BIOS had
+	// paused a read, and the surplus sector landed in the PBX slot the NEXT
+	// read owns: the engine writes each sector to addressdata + (counter & 31)
+	// * 4096 and a push that arrives around the ENABLE 0->1 of the following
+	// read is tagged with the counter that read just reset. The BIOS then
+	// parses one wrong sector at the head of the file it is loading.
+	//
+	// Measured on hardware, 2026-09-26, Chuck Rock, which hung on three boots
+	// in four. Every sector we delivered was byte-correct and in order -- what
+	// differed between a boot that worked and one that hung was one extra
+	// sector after the pause:
+	//
+	//     boots:  read 3 delivered lba 17..37   (21 sectors)
+	//     hangs:  read 3 delivered lba 17..38   (22 sectors, all three runs)
+	//
+	// The game's loader then took a garbage block index out of the mis-parsed
+	// header ($01E30000 >> 9 = block 61824 on a 2 MB machine), ran its copy
+	// loop off the end of chip RAM and over its own code, and the CPU ended up
+	// in an infinite branch through the zeros it had just written.
+	//
+	// The base stays armed so UNPAUSE resumes the same read rather than
+	// restarting it; only the delivery is held.
+	if (cd_paused) return false;
+
 	struct timespec ts0, ts1, ts2, ts3;
 	static int64_t phase_a_us = 0, phase_b_us = 0, phase_c_us = 0;
 	static uint32_t bucket_count = 0;
