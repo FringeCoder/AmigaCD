@@ -2916,12 +2916,48 @@ void akiko_cd32_poll(void)
 
 	if (!(status & AKIKO_STATUS_REQ)) return;
 
+	// Confirm against a FRESH status word. The one above was read at the top
+	// of this poll, before the sector push and the async frames below, and
+	// REQ is a level: by now the command it announced can already have been
+	// drained. Draining on that stale bit pops bytes out of a buffer the
+	// FPGA considers empty, which is what leaves the NEXT real command
+	// misaligned behind a stray byte. Measured on hardware: boots that hang
+	// take two of these, boots that work take one.
+	if (!(akiko_read_status() & AKIKO_STATUS_REQ)) return;
+
 	// 3. Drain the framed command.
 	uint8_t cmd[AKIKO_CMD_MAX];
 	int     n = akiko_drain_command(cmd);
 	if (n < 1) {
 		akiko_dbg("drain returned 0 bytes\n");
 		return;
+	}
+
+	// A frame the FPGA never had. REQ is a level, and the status read that
+	// gated this drain can be one poll stale: the command it announced has
+	// already been drained, the buffer is empty, and every byte reads back
+	// zero. Answering that with CH_ERR_CHECKSUM is worse than useless --
+	// the BIOS gets a reply to a command it never sent, its rx sequence no
+	// longer lines up with ours, and the next real command is read with a
+	// stray leading byte. Measured on hardware, 2026-09-26, Chuck Rock:
+	//
+	//     CHECKSUM FAIL n=2 expected=2 sum=00 bytes=00 00
+	//     CHECKSUM FAIL n=2 expected=2 sum=00 bytes=00 00
+	//     CHECKSUM FAIL n=3 expected=3 sum=e9 bytes=ea 27 d8
+	//
+	// where "27 d8" is the BIOS's INFO command, swallowed by the frame that
+	// stray byte started. The BIOS never gets its INFO answered, stops
+	// talking, and the game runs on without ever loading its data file.
+	//
+	// A real NOP (opcode 0) carries a checksum of 0xff, so it is never all
+	// zeros and is still handled below.
+	{
+		int zeros = 1;
+		for (int i = 0; i < n; i++) if (cmd[i]) { zeros = 0; break; }
+		if (zeros) {
+			akiko_diag("[akiko] phantom command frame (%d zero bytes) -- dropped", n);
+			return;
+		}
 	}
 
 #if AKIKO_CD32_DEBUG
