@@ -2939,6 +2939,14 @@ void akiko_cd32_poll(void)
 		int chk_total = expected_len + 1;    // bytes summed = cmd + chk
 		if (n < chk_total) {
 			akiko_dbg("short frame: n=%d expected=%d\n", n, chk_total);
+			{
+				char hex[3 * AKIKO_CMD_MAX + 1];
+				int off = 0;
+				for (int i = 0; i < n && i < 16; i++)
+					off += snprintf(hex + off, sizeof(hex) - off, "%02x ", cmd[i]);
+				akiko_diag("[akiko] SHORT FRAME n=%d expected=%d bytes=%s",
+				           n, chk_total, hex);
+			}
 			cmd_bad(cmd, CH_ERR_CHECKSUM);
 			return;
 		}
@@ -2946,6 +2954,14 @@ void akiko_cd32_poll(void)
 		for (int i = 0; i < chk_total; i++) sum += cmd[i];
 		if ((sum & 0xff) != 0xff) {
 			akiko_dbg("checksum FAIL sum=%02x\n", sum & 0xff);
+			{
+				char hex[3 * AKIKO_CMD_MAX + 1];
+				int off = 0;
+				for (int i = 0; i < n && i < 16; i++)
+					off += snprintf(hex + off, sizeof(hex) - off, "%02x ", cmd[i]);
+				akiko_diag("[akiko] CHECKSUM FAIL n=%d expected=%d sum=%02x bytes=%s",
+				           n, chk_total, sum & 0xff, hex);
+			}
 			cmd_bad(cmd, CH_ERR_CHECKSUM);
 			return;
 		}
@@ -2954,7 +2970,7 @@ void akiko_cd32_poll(void)
 	// Diagnostic cmd trace (low volume — skip the very chatty LED 0x05).
 	// Helps correlate sec_req with CF's command stream when debugging
 	// stuck-after-game-data-reached state.
-	if (op != 0x05) {
+	if (op != 0x05 || 1) {   // debug: log LED too
 		char hex[3 * AKIKO_CMD_MAX + 1];
 		int  off = 0;
 		for (int i = 0; i < n && i < 16; i++) {
