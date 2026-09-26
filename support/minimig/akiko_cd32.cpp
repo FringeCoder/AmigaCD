@@ -2916,6 +2916,15 @@ void akiko_cd32_poll(void)
 
 	if (!(status & AKIKO_STATUS_REQ)) return;
 
+	// Confirm against a FRESH status word. The one above was read at the top
+	// of this poll, before the sector push and the async frames below, and
+	// REQ is a level: by now the command it announced can already have been
+	// drained. Draining on that stale bit pops bytes out of a buffer the
+	// FPGA considers empty, which is what leaves the NEXT real command
+	// misaligned behind a stray byte. Measured on hardware: boots that hang
+	// take two of these, boots that work take one.
+	if (!(akiko_read_status() & AKIKO_STATUS_REQ)) return;
+
 	// 3. Drain the framed command.
 	uint8_t cmd[AKIKO_CMD_MAX];
 	int     n = akiko_drain_command(cmd);
