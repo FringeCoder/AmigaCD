@@ -760,6 +760,18 @@ static void akiko_send_response(const uint8_t *payload, int len)
 	//
 	akiko_wait_status_bit(AKIKO_STATUS_RX_BUSY, true, 200);
 
+	// Debug: every frame we hand the BIOS, and how long the barrier above
+	// took to see it. A boot that hangs and one that works exchange the
+	// same commands, so the answer is either in these bytes or in when
+	// they land.
+	{
+		char hex[8 * 3 + 8];
+		int n = total < 8 ? total : 8;
+		int o = 0;
+		for (int i = 0; i < n; i++) o += snprintf(hex + o, sizeof(hex) - o, "%02x ", out[i]);
+		akiko_diag("[akiko] TX op=0x%02x len=%d bytes=%s", out[0], total, hex);
+	}
+
 #if AKIKO_CD32_DEBUG
 	akiko_dbg("TX %d bytes:", total);
 	for (int i = 0; i < total; i++) printf(" %02x", out[i]);
