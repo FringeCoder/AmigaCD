@@ -1825,6 +1825,24 @@ static void akiko_push_sector(const uint8_t *buf)
 	}
 	prev_us = now_us;
 
+	// Debug only: a checksum of exactly the bytes handed to the FPGA, with a
+	// running index. Two boots of one disc deliver the same sectors in the
+	// same order, so a diff of these lines between a boot that works and one
+	// that hangs names the sector that arrived wrong -- or proves every byte
+	// was right and moves the search into the FPGA.
+	{
+		static uint32_t push_n = 0;
+		if (push_n < 600) {
+			uint32_t sum = 0;
+			for (int i = 0; i < AKIKO_SECTOR_BYTES; i++)
+				sum = (sum * 33u) ^ (uint32_t)buf[i];
+			akiko_diag("[akiko] DBG push#%u lba=%d sum=%08X head=%02X%02X%02X%02X",
+			           push_n, cd_data_lba_base + (int)akiko_read_sec_counter(),
+			           sum, buf[0], buf[1], buf[2], buf[3]);
+			push_n++;
+		}
+	}
+
 	akiko_ext_block_write(AKIKO_SECTOR_ADDR, buf, AKIKO_SECTOR_BYTES);
 }
 
@@ -2277,7 +2295,7 @@ static bool akiko_handle_sec_req(void)
 	// climbing across arms (=> base+counter delivers the wrong sector).
 	{
 		static uint32_t dbg_n = 0;
-		if (dbg_n < 60) {
+		if (dbg_n < 600) {
 			akiko_diag("[akiko] DBG sec_req#%u base=%d counter=%u -> lba=%d",
 			           dbg_n, cd_data_lba_base, counter, signed_lba);
 			dbg_n++;
