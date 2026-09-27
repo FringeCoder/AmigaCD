@@ -414,3 +414,64 @@ a log of.
 
 Utilisation is not the constraint and has never been: 70% ALM, 50% RAM blocks, 62% DSP,
 46% pins. The cost is routing distance between blocks that must talk.
+
+## 2026-09-27: the address bus is not in the I/O registers, and nothing times it
+
+Two facts, both checked rather than reasoned:
+
+1. `AmigaCD.qsf:271` asks for `FAST_OUTPUT_REGISTER ON -to SDRAM_*`, but
+   `rtl/sdram_ctrl.v:324` drives the address bus from a combinational mux:
+
+   ```verilog
+   assign sd_addr = sd_addr_sel_cpu ? sd_addr_cpu : sd_addr_chip;
+   ```
+
+   A pad fed by a mux has no register to pack, so the request is silently a
+   no-op for `SDRAM_A[*]`. `sd_addr_chip` and `sd_addr_cpu` stay in the core
+   and their outputs reach the pins through ordinary interconnect.
+
+2. Neither `AmigaCD.sdc` nor `sys/sys_top.sdc` contains a single
+   `set_input_delay` or `set_output_delay`. The external SDRAM interface is
+   unconstrained, so that interconnect has no timing requirement on it at all.
+
+Taken together those say the address bus reaches the SDRAM on whatever routing
+the fitter felt like, with STA neither measuring it nor caring. Skew across the
+thirteen lines is then a property of the seed.
+
+### Why this matters now
+
+On 2026-09-26 seed 16 of the CLUT netlist fit with all five worst-case slacks
+positive -- setup +0.152, hold +0.174, recovery +3.452, removal +1.063, minimum
+pulse +1.101, zero critical warnings -- and produced a machine that never
+reached Kickstart. Seed 18 of the same netlist booted. Seed 1 of the next one
+booted. The failure mode fits: the 68020 fetches its reset vectors through this
+bus, so an address line that arrives after the SDRAM has latched gives a dead
+machine and nothing for STA to have caught.
+
+That is the same shape as the three occasions tabulated above, where "a seed
+absorbed it". A seed absorbing a problem and a seed causing one are the same
+mechanism seen from either end.
+
+### The cost of the fix that moved the binding path
+
+The split `sd_addr` was introduced to get the internal path off a heavily
+loaded register, and by the 2026-08-31 measurement it worked: `sdram_ctrl` is
+nowhere in the worst ten paths. But the thing it traded away was IOE packing on
+the address bus -- an internal path that STA measures, exchanged for an
+external one that it does not. That is worth knowing before anyone reaches for
+the same move again.
+
+### What would settle it
+
+- Re-register `sd_addr` immediately before the pad so `FAST_OUTPUT_REGISTER`
+  can take it, and re-measure both the internal path and the boot rate across
+  several seeds.
+- Constrain the interface: `create_generated_clock` on `SDRAM_CLK`, then
+  `set_output_delay` against the SDRAM's t_IS/t_IH and `set_input_delay`
+  against t_AC/t_OH, so a seed that skews the bus fails the fit instead of the
+  machine. Expect this to fail loudly at first, which is the point.
+
+Neither has been attempted. Stock MiSTer cores are reportedly unconstrained
+here too, so this may be a framework-wide property rather than ours alone --
+that claim has not been verified in this repository and should be before it is
+relied on.

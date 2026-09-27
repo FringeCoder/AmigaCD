@@ -39,6 +39,7 @@ SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
 CORE_PATH = "/media/fat/_Test/amigacd.rbf"
 BIN_PATH = "/media/fat/MiSTer_AmigaCD"
 LOG = "/tmp/akiko_dbg.log"
+CDTV_LOG = "/tmp/cdtv_dbg.log"
 
 
 def ssh(host, cmd, timeout=60):
@@ -91,12 +92,33 @@ def mount_and_wait(host, wait):
     a slow boot rather than a hang.
     """
     ssh(host, "cp /dev/null %s" % LOG)
-    key(host, "F12"); time.sleep(1.0)
-    # Nudge the cursor so the mirror repaints, then land on the CD row.
-    key(host, "DOWN"); key(host, "UP")
-    key(host, "ENTER"); time.sleep(1.4)      # open the picker
-    key(host, "ENTER"); time.sleep(2.0)      # take the highlighted disc
-    key(host, "F12")                         # close the OSD
+    # How far the mount log had got before this round, so a mount from an
+    # earlier round is never mistaken for this one's.
+    before = int(ssh(host, "grep -c 'set_cd_path: /media' %s" % CDTV_LOG) or 0)
+
+    mounted = False
+    for attempt in (1, 2):
+        key(host, "F12"); time.sleep(1.0)
+        # Nudge the cursor so the mirror repaints, then land on the CD row.
+        key(host, "DOWN"); key(host, "UP")
+        key(host, "ENTER"); time.sleep(1.4)      # open the picker
+        key(host, "ENTER"); time.sleep(2.0)      # take the highlighted disc
+        key(host, "F12")                         # close the OSD
+        time.sleep(2.0)
+        now = int(ssh(host, "grep -c 'set_cd_path: /media' %s" % CDTV_LOG) or 0)
+        if now > before:
+            mounted = True
+            break
+        # The OSD key sequence drifts out of step now and then -- when it does,
+        # nothing is mounted and nothing can boot. Scoring that as a failed
+        # boot is how a whole run of both builds came back 0 on 2026-09-26
+        # with an empty Akiko log. Close whatever is open and try once more.
+        print("      (mount did not take, retrying)", flush=True)
+        key(host, "ESC"); time.sleep(0.6)
+        key(host, "F12"); time.sleep(1.0)
+
+    if not mounted:
+        return None, False
 
     # Success is the game's own loader reading (start_lba=12), but only when
     # THIS boot put it there: a reset that did not take leaves the previous
@@ -112,9 +134,9 @@ def mount_and_wait(host, wait):
             if "start_lba=14 " in line:
                 seen_bios = True
             elif "start_lba=12 " in line and seen_bios:
-                return time.time() - t0
+                return time.time() - t0, True
         time.sleep(4)
-    return None
+    return None, True
 
 
 def reset_machine(host):
@@ -192,7 +214,15 @@ def main():
         for rnd in range(1, args.rounds + 1):
             for label, path in variants:
                 install(args.host, path, args.settle)
-                took = mount_and_wait(args.host, args.wait)
+                took, mounted = mount_and_wait(args.host, args.wait)
+                if not mounted:
+                    # Not a result: the disc never went in. Leave it out of the
+                    # tally rather than scoring a boot that was never attempted.
+                    print("round %2d  %-8s SKIPPED (no mount)" % (rnd, label), flush=True)
+                    w.writerow([rnd, label, "", "", "", "", "", int(time.time())])
+                    fh.flush()
+                    reset_machine(args.host)
+                    continue
                 phantoms, checksum, resyncs = measure(args.host)
                 booted = 0 if took is None else 1
                 tally[label][0] += booted
