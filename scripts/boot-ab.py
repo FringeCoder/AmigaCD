@@ -39,19 +39,56 @@ SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
 CORE_PATH = "/media/fat/_Test/amigacd.rbf"
 BIN_PATH = "/media/fat/MiSTer_AmigaCD"
 LOG = "/tmp/akiko_dbg.log"
+
+# A cold boot of this title takes five seconds at the very fastest; anything
+# quicker is the previous round still resident. The freshness check (a BIOS read
+# before the loader's read) catches most of that, but not the case where
+# remounting makes the BIOS rescan while the old title is still running -- so
+# treat a very fast "boot" as unscoreable rather than as a success.
+MIN_BOOT_S = 4.0
+
+# Rounds turned up on 2026-09-27 with 128 phantom drains against the one or two
+# every other round shows. Whether that is a real desync storm or a log that was
+# never cleared is unresolved; either way the round is not comparable to the
+# rest, so it is recorded and left out of the tally.
+MAX_PLAUSIBLE_PHANTOMS = 10
 CDTV_LOG = "/tmp/cdtv_dbg.log"
 
 
+# The link to the machine drops occasionally -- "scp: Connection closed" in the
+# middle of a copy, or an ssh that times out while the core is reloading. An
+# hour-long run should not die of one: the first version of this did exactly
+# that, four rounds in, and the traceback was the only thing left of it.
+# Only a transport failure is worth retrying. ssh exits 255 when it cannot
+# reach the machine; anything else is the remote command's own status, and
+# "grep found nothing" (exit 1) is an answer, not an error -- retrying it four
+# times just burns twelve seconds per measurement.
+def _run(argv, timeout, tries=4):
+    last = None
+    for attempt in range(tries):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            if r.returncode != 255:
+                return r
+            last = "exit 255: %s" % r.stderr.strip()
+        except subprocess.TimeoutExpired as exc:
+            last = exc
+        if attempt + 1 < tries:
+            time.sleep(3 * (attempt + 1))
+    print("      (giving up on %s after %d tries: %s)"
+          % (argv[0], tries, last), flush=True)
+    return None
+
+
 def ssh(host, cmd, timeout=60):
-    r = subprocess.run(
-        ["ssh", "-o", "ConnectTimeout=10", "-i", SSH_KEY, "root@" + host, cmd],
-        capture_output=True, text=True, timeout=timeout)
-    return r.stdout.strip()
+    r = _run(["ssh", "-o", "ConnectTimeout=10", "-i", SSH_KEY, "root@" + host, cmd],
+             timeout)
+    return r.stdout.strip() if r else ""
 
 
 def scp(host, local, remote, timeout=300):
-    subprocess.run(["scp", "-q", "-i", SSH_KEY, local, "root@%s:%s" % (host, remote)],
-                   check=True, timeout=timeout)
+    r = _run(["scp", "-q", "-i", SSH_KEY, local, "root@%s:%s" % (host, remote)], timeout)
+    return r is not None and r.returncode == 0
 
 
 def key(host, name, repeat=1, gap=0.35):
@@ -63,10 +100,12 @@ def key(host, name, repeat=1, gap=0.35):
 
 def flash(host, rbf, settle):
     """Put a bitstream on the machine and load it."""
-    scp(host, rbf, CORE_PATH + ".new")
+    if not scp(host, rbf, CORE_PATH + ".new"):
+        return False
     ssh(host, "mv %s.new %s && sync; echo load_core %s > /dev/MiSTer_cmd"
         % (CORE_PATH, CORE_PATH, CORE_PATH))
     time.sleep(settle)
+    return True
 
 
 def install_binary(host, elf, settle):
@@ -75,10 +114,25 @@ def install_binary(host, elf, settle):
     Temp name then mv, because the live binary is the file being replaced --
     writing it in place is what makes app_restart come back as "(deleted)".
     """
-    scp(host, elf, BIN_PATH + ".new")
-    ssh(host, "mv %s.new %s && chmod +x %s && sync; echo load_core %s > /dev/MiSTer_cmd"
-        % (BIN_PATH, BIN_PATH, BIN_PATH, CORE_PATH))
+    if not scp(host, elf, BIN_PATH + ".new"):
+        return False
+
+    # Put it in place and let the card settle BEFORE asking for a reload.
+    #
+    # app_restart() execl()s the binary it is replacing, and fpga_io.cpp's
+    # grandchild falls straight through to reboot(1) when that execl fails --
+    # so a file the FAT driver has not finished committing costs a hardware
+    # reboot, not a failed round. The board did exactly that twice on
+    # 2026-09-27 during a run that swapped binaries every ninety seconds.
+    ssh(host, "mv %s.new %s && chmod +x %s && sync" % (BIN_PATH, BIN_PATH, BIN_PATH))
+    time.sleep(3)
+    size = ssh(host, "stat -c %%s %s 2>/dev/null" % BIN_PATH)
+    if not size or size == "0":
+        print("      (binary did not land, skipping round)", flush=True)
+        return False
+    ssh(host, "echo load_core %s > /dev/MiSTer_cmd" % CORE_PATH)
     time.sleep(settle)
+    return True
 
 
 def mount_and_wait(host, wait):
@@ -91,7 +145,14 @@ def mount_and_wait(host, wait):
     title took, or None if it never got there, so a slow boot is visible as
     a slow boot rather than a hang.
     """
+    # Clear the Akiko log and check the clear took. A round scored against a log
+    # left from the previous round is not a measurement, and the ssh that clears
+    # it can fail silently -- ssh() returns "" on a transport failure.
     ssh(host, "cp /dev/null %s" % LOG)
+    left = ssh(host, "wc -l < %s 2>/dev/null || echo -1" % LOG).strip()
+    if left != "0":
+        print("      (log did not clear: %r, skipping round)" % left, flush=True)
+        return None, False
     # How far the mount log had got before this round, so a mount from an
     # earlier round is never mistaken for this one's.
     before = int(ssh(host, "grep -c 'set_cd_path: /media' %s" % CDTV_LOG) or 0)
@@ -159,7 +220,10 @@ def measure(host):
     phantoms = int(ssh(host, "grep -c 'phantom command frame' %s" % LOG) or 0)
     checksum = int(ssh(host, "grep -c 'CHECKSUM FAIL' %s" % LOG) or 0)
     resyncs = int(ssh(host, "grep -c 'frame resync' %s" % LOG) or 0)
-    return phantoms, checksum, resyncs
+    # Carried into the CSV because it is the cheapest way to see, after the
+    # fact, that a round was scored against a log that was not this round's.
+    lines = int(ssh(host, "wc -l < %s" % LOG) or 0)
+    return phantoms, checksum, resyncs, lines
 
 
 def main():
@@ -204,44 +268,70 @@ def main():
     install = flash if cores else install_binary
 
     tally = {label: [0, 0] for label, _ in variants}   # [good, total]
+    suspect_count = {label: 0 for label, _ in variants}
 
     with open(args.out, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["round", "variant", "booted", "seconds", "phantoms",
-                    "checksum_fails", "resyncs", "unix_time"])
+                    "checksum_fails", "resyncs", "log_lines", "suspect",
+                    "unix_time"])
         fh.flush()
 
         for rnd in range(1, args.rounds + 1):
             for label, path in variants:
-                install(args.host, path, args.settle)
+                if not install(args.host, path, args.settle):
+                    print("round %2d  %-8s SKIPPED (install failed)" % (rnd, label),
+                          flush=True)
+                    continue
                 took, mounted = mount_and_wait(args.host, args.wait)
                 if not mounted:
                     # Not a result: the disc never went in. Leave it out of the
                     # tally rather than scoring a boot that was never attempted.
                     print("round %2d  %-8s SKIPPED (no mount)" % (rnd, label), flush=True)
-                    w.writerow([rnd, label, "", "", "", "", "", int(time.time())])
+                    w.writerow([rnd, label, "", "", "", "", "", "",
+                                "no-mount", int(time.time())])
                     fh.flush()
                     reset_machine(args.host)
                     continue
-                phantoms, checksum, resyncs = measure(args.host)
+                phantoms, checksum, resyncs, lines = measure(args.host)
                 booted = 0 if took is None else 1
-                tally[label][0] += booted
-                tally[label][1] += 1
+
+                # A round can come back with a number that is not a measurement
+                # of this build. Record it, name why, and leave it out of the
+                # tally: averaging it in is how a rate stops being evidence.
+                # Only a success can be implausibly fast -- a failure waited out
+                # the whole window either way.
+                suspect = ""
+                if booted and took is not None and took < MIN_BOOT_S:
+                    suspect = "boot-too-fast"
+                elif phantoms > MAX_PLAUSIBLE_PHANTOMS:
+                    suspect = "phantom-flood"
+
+                if suspect:
+                    suspect_count[label] += 1
+                else:
+                    tally[label][0] += booted
+                    tally[label][1] += 1
+
                 w.writerow([rnd, label, booted, "" if took is None else round(took, 1),
-                            phantoms, checksum, resyncs, int(time.time())])
+                            phantoms, checksum, resyncs, lines, suspect,
+                            int(time.time())])
                 fh.flush()
-                print("round %2d  %-8s booted=%d in %-5s phantoms=%d resync=%d   (%d/%d)"
+                print("round %2d  %-8s booted=%d in %-5s phantoms=%d resync=%d lines=%d   (%d/%d)%s"
                       % (rnd, label, booted,
                          "-" if took is None else "%.0fs" % took,
-                         phantoms, resyncs,
-                         tally[label][0], tally[label][1]), flush=True)
+                         phantoms, resyncs, lines,
+                         tally[label][0], tally[label][1],
+                         "  SUSPECT: " + suspect if suspect else ""), flush=True)
                 reset_machine(args.host)
 
-    print("\n--- totals ---")
+    print("\n--- totals (scoreable rounds only) ---")
     for label, _ in variants:
         good, total = tally[label]
         pct = (100.0 * good / total) if total else 0.0
-        print("%-6s %d/%d  (%.0f%%)" % (label, good, total, pct))
+        note = ("   [%d discarded as suspect]" % suspect_count[label]
+                if suspect_count[label] else "")
+        print("%-6s %d/%d  (%.0f%%)%s" % (label, good, total, pct, note))
     print("\ncsv: %s" % args.out)
 
 
