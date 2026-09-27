@@ -47,11 +47,17 @@ LOG = "/tmp/akiko_dbg.log"
 # treat a very fast "boot" as unscoreable rather than as a success.
 MIN_BOOT_S = 4.0
 
-# Rounds turned up on 2026-09-27 with 128 phantom drains against the one or two
-# every other round shows. Whether that is a real desync storm or a log that was
-# never cleared is unresolved; either way the round is not comparable to the
-# rest, so it is recorded and left out of the tally.
-MAX_PLAUSIBLE_PHANTOMS = 10
+# There is no plausibility test on the phantom count, and the first attempt at
+# one was wrong in a way worth writing down. Rounds with 128 phantom drains
+# against the one or two others show looked pathological, so they were discarded
+# -- until the log line count went into the CSV and showed 128 phantoms landing
+# on exactly the rounds that BOOTED (293 lines) while single-phantom rounds were
+# the ones that hung (112 lines). The count scales with how long the machine kept
+# running, so a high one is a symptom of success, not of a broken measurement.
+# Discarding it threw away the successes.
+#
+# The lesson generalised: flag a round, never silently drop it. Everything is
+# counted, the totals are reported both ways, and the analysis decides.
 CDTV_LOG = "/tmp/cdtv_dbg.log"
 
 
@@ -267,7 +273,8 @@ def main():
     variants = cores if cores else binaries
     install = flash if cores else install_binary
 
-    tally = {label: [0, 0] for label, _ in variants}   # [good, total]
+    tally = {label: [0, 0] for label, _ in variants}    # [good, total]
+    flagged = {label: [0, 0] for label, _ in variants}  # the flagged subset
     suspect_count = {label: 0 for label, _ in variants}
 
     with open(args.out, "w", newline="") as fh:
@@ -296,22 +303,18 @@ def main():
                 phantoms, checksum, resyncs, lines = measure(args.host)
                 booted = 0 if took is None else 1
 
-                # A round can come back with a number that is not a measurement
-                # of this build. Record it, name why, and leave it out of the
-                # tally: averaging it in is how a rate stops being evidence.
-                # Only a success can be implausibly fast -- a failure waited out
-                # the whole window either way.
+                # Flag, do not drop. Only a success can be implausibly fast; a
+                # failure waited out the whole window either way.
                 suspect = ""
                 if booted and took is not None and took < MIN_BOOT_S:
                     suspect = "boot-too-fast"
-                elif phantoms > MAX_PLAUSIBLE_PHANTOMS:
-                    suspect = "phantom-flood"
 
+                tally[label][0] += booted
+                tally[label][1] += 1
                 if suspect:
                     suspect_count[label] += 1
-                else:
-                    tally[label][0] += booted
-                    tally[label][1] += 1
+                    flagged[label][0] += booted
+                    flagged[label][1] += 1
 
                 w.writerow([rnd, label, booted, "" if took is None else round(took, 1),
                             phantoms, checksum, resyncs, lines, suspect,
@@ -325,13 +328,24 @@ def main():
                          "  SUSPECT: " + suspect if suspect else ""), flush=True)
                 reset_machine(args.host)
 
-    print("\n--- totals (scoreable rounds only) ---")
+    print("")
+    print("--- totals ---")
     for label, _ in variants:
         good, total = tally[label]
         pct = (100.0 * good / total) if total else 0.0
-        note = ("   [%d discarded as suspect]" % suspect_count[label]
-                if suspect_count[label] else "")
-        print("%-6s %d/%d  (%.0f%%)%s" % (label, good, total, pct, note))
+        print("%-6s %d/%d  (%.0f%%)" % (label, good, total, pct))
+
+    # Same numbers with the flagged rounds taken out, so a reader can see
+    # whether the flags carry the result rather than being told they do not.
+    if any(suspect_count.values()):
+        print("")
+        print("--- totals excluding flagged rounds ---")
+        for label, _ in variants:
+            good = tally[label][0] - flagged[label][0]
+            total = tally[label][1] - flagged[label][1]
+            pct = (100.0 * good / total) if total else 0.0
+            print("%-6s %d/%d  (%.0f%%)   [%d flagged]"
+                  % (label, good, total, pct, suspect_count[label]))
     print("\ncsv: %s" % args.out)
 
 
