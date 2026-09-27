@@ -475,3 +475,58 @@ Neither has been attempted. Stock MiSTer cores are reportedly unconstrained
 here too, so this may be a framework-wide property rather than ours alone --
 that claim has not been verified in this repository and should be before it is
 relied on.
+
+## 2026-09-27: both of those have now been attempted. One worked, one did not.
+
+The two items above are no longer untried. Taking them in the order they were
+written:
+
+**Constraining the interface worked, and it was needed.** `AmigaCD.sdc` now
+declares a generated clock for `SDRAM_CLK`, sourced from the `q` pin of the
+register that actually produces it (`sd_clk <= sdram_state[0]`) rather than from
+the PLL output, so the model carries the real clock-to-out; it forwards that
+clock to the port and applies `set_output_delay` / `set_input_delay` against
+worst-case part figures (tIS 1.5 ns, tIH 0.8 ns, tAC 6.0 ns, tOH 2.0 ns) plus
+0.2-0.4 ns of board trace, with setup 2 / hold 2 multicycles both directions.
+It did not fail loudly: seed 1 closes at **setup +0.337, hold +0.243**. So the
+interface has been meeting a constraint it was never given, and now a seed that
+skews the bus will fail the fit instead of the machine.
+
+One correction to the note above: `SDRAM_CLK` is **sysclk/2 = 56.75 MHz**, not
+113.5. `sd_clk <= sdram_state[0]` divides it. Parts of this document were
+written as though the interface ran at the full sysclk rate.
+
+**Re-registering `sd_addr` for `FAST_OUTPUT_REGISTER` does not work here, and
+the reason is worth keeping.** The two halves `sd_addr_chip` / `sd_addr_cpu`
+with a mux in front of the pad (`assign sd_addr = sd_addr_sel_cpu ? ... : ...`)
+were merged back into a single `output reg [12:0] sd_addr` across all seven
+assignment sites, so nothing stood between the register and the pin.
+
+The packing happened. The fit report lists `sd_addr[0]` through `sd_addr[12]`
+as `Packed Register / Fast Output Register assignment` into `SDRAM_A[*]~output`.
+That was the entire objective and it was met.
+
+And the build fails timing by a mile: **setup -1.625 ns**, TNS -8.647, against
++0.337 for the same seed with the split halves. The three worst paths all end
+at `sd_addr` bits and all carry one enormous segment:
+
+```
+    26.971      4.640 FF    IC  emu|ram1|sd_addr[8]|d
+```
+
+4.640 ns of interconnect in a single hop, from the last logic cell in the fabric
+out to the register now sitting in the I/O ring. Packing did not remove the
+4.175 ns of unmanaged interconnect measured earlier on this path -- it moved it
+from *after* the register, where it is clock-to-out and the new constraints
+model it, to *before* the register, where it is setup and the core has to pay it
+inside one 8.8 ns clk_114 cycle. It cannot.
+
+The launching register is `minimig|ciab:CIAB1|ddrportb[6]`, reaching `sd_addr`
+via `chipdma_arb|chip_out_addr[18]`. The chip address arrives at the SDRAM
+controller through a long combinational chain whatever happens at the pad end,
+which is why there is no slack to spend on an extra 4.6 ns.
+
+So the mux in front of the pad is load-bearing: it keeps `sd_addr` in the fabric
+beside the logic that feeds it. Approach abandoned. If the clock-to-out at the
+pin ever becomes the binding constraint, the way to buy it is to shorten the
+chip-address chain first, not to move the register.
