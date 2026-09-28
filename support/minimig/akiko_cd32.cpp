@@ -685,6 +685,23 @@ static bool akiko_wait_status_bit(uint16_t mask, bool want_set, int max_iters)
 // read. The first byte (opcode) tells us how many bytes the rest of the frame
 // is — we read exactly cmd_length+1 (incl. checksum). For unknown opcodes we
 // fall back to reading the maximum to drain whatever the FPGA has buffered.
+// Is this a complete, correctly summed frame for the opcode it starts with?
+// Unknown opcodes have no length to check against, so they are never claimed
+// as a resync target -- draining one is already a "take whatever is there"
+// path.
+static bool akiko_frame_valid(const uint8_t *buf, int n)
+{
+	if (n < 1) return false;
+	int len = command_lengths[buf[0] & 0x0f];
+	if (len <= 0) return false;
+	int total = len + 1;
+	if (n < total) return false;
+	uint32_t sum = 0;
+	for (int i = 0; i < total; i++) sum += buf[i];
+	return (sum & 0xff) == 0xff;
+}
+
+
 static int akiko_drain_command(uint8_t *buf)
 {
 	EnableIO();
@@ -2957,6 +2974,35 @@ void akiko_cd32_poll(void)
 		if (zeros) {
 			akiko_diag("[akiko] phantom command frame (%d zero bytes) -- dropped", n);
 			return;
+		}
+	}
+
+	// Resync a frame that arrived behind debris.
+	//
+	// The command stream is fetched from chip RAM by the TX engine, which
+	// runs ahead of what the BIOS has written: a drain can consume bytes
+	// that are not there yet, and what lands afterwards is the tail of one
+	// frame in front of the next. On hardware that reads
+	//
+	//     CHECKSUM FAIL n=3 bytes=ea 27 d8
+	//
+	// where ea is the orphaned checksum byte of a LED frame (15 00 ea) and
+	// 27 d8 is the BIOS's INFO command, whole and correctly summed, sitting
+	// behind it. Answering CH_ERR_CHECKSUM there loses the INFO and the
+	// BIOS stops talking to us, which is the Chuck Rock boot hang.
+	//
+	// So when the frame as it stands is not valid, slide forward a byte at
+	// a time and take the first offset that is a complete, correctly summed
+	// frame for its own opcode. A byte skipped this way was never a command
+	// of its own -- it is the remains of one already answered.
+	if (!akiko_frame_valid(cmd, n)) {
+		for (int skip = 1; skip < n; skip++) {
+			if (!akiko_frame_valid(&cmd[skip], n - skip)) continue;
+			akiko_diag("[akiko] frame resync: dropped %d stray byte(s), op=0x%02x",
+			           skip, cmd[skip] & 0x0f);
+			memmove(cmd, &cmd[skip], (size_t)(n - skip));
+			n -= skip;
+			break;
 		}
 	}
 
