@@ -38,6 +38,7 @@
 #include "../physical_disc/physical_disc.h" // physical CD-ROM drive media
 #include "akiko_pace.h"                    // sector delivery floor
 #include "akiko_framing.h"                 // command frame validity + resync
+#include "akiko_discfmt.h"                 // MSF/LBA, BCD, ISO9660 descriptors
 #include "minimig_config.h"   // minimig_reset() — used to unblock BIOS stuck
                               // on no-CD splash after a boot-with-no-CD-then-mount.
 #include "akiko_cd32.h"
@@ -487,21 +488,16 @@ static void migrate_physdisc_save_name(const char *cd_path, const char *new_path
 	}
 }
 
+// These live in akiko_discfmt.cpp now, with unit tests in
+// tests/test_akiko_discfmt.cpp. Wrapped rather than renamed so the call sites
+// throughout this file are untouched.
 static inline uint32_t msf_to_lba(uint8_t m, uint8_t s, uint8_t f)
 {
-	// Standard CDDA MSF → LBA conversion with 2-second pre-gap.
-	return (((uint32_t)m * 60u + s) * 75u + f) - 150u;
+	return akiko_msf_to_lba(m, s, f);
 }
 
-static inline uint8_t bcd_to_bin(uint8_t b)
-{
-	return (uint8_t)(((b >> 4) * 10u) + (b & 0x0fu));
-}
-
-static inline uint8_t bin_to_bcd(uint8_t v)
-{
-	return (uint8_t)(((v / 10u) << 4) | (v % 10u));
-}
+static inline uint8_t bcd_to_bin(uint8_t b) { return akiko_bcd_to_bin(b); }
+static inline uint8_t bin_to_bcd(uint8_t v) { return akiko_bin_to_bcd(v); }
 
 // "Is real CD media inserted?" -- matches WinUAE's `cdrom_disk != NULL` semantic.
 // A placeholder drive (cfg=2, no filename) has present=0/cd=1 with chd_f=NULL,
@@ -574,13 +570,7 @@ static void cd_label_forget(void)
 // then reports no label instead of 32 bytes of whatever was lying there.
 static int pvd_user_offset(const uint8_t *raw)
 {
-	static const int cand[2] = { 16, 24 };
-	for (int i = 0; i < 2; i++) {
-		const uint8_t *u = raw + cand[i];
-		// Type 1 (primary), the standard identifier, version 1.
-		if (u[0] == 1 && !memcmp(u + 1, "CD001", 5) && u[6] == 1) return cand[i];
-	}
-	return -1;
+	return akiko_pvd_user_offset(raw);
 }
 
 // Copy an ISO9660 volume identifier out of a descriptor: 32 bytes at offset 40,
@@ -588,19 +578,7 @@ static int pvd_user_offset(const uint8_t *raw)
 // a mangled label still lines up with what other tools show for the same disc.
 static void cd_label_from_pvd(const uint8_t *pvd)
 {
-	char lbl[33];
-	memcpy(lbl, pvd + 40, 32);
-	lbl[32] = 0;
-
-	int end = 32;
-	while (end > 0 && (lbl[end - 1] == ' ' || lbl[end - 1] == 0)) end--;
-	lbl[end] = 0;
-
-	for (int i = 0; i < end; i++) {
-		if ((uint8_t)lbl[i] < 0x20 || (uint8_t)lbl[i] > 0x7E) lbl[i] = ' ';
-	}
-
-	snprintf(cd_label, sizeof(cd_label), "%s", lbl);
+	akiko_pvd_label(pvd, cd_label, sizeof(cd_label));
 }
 
 int akiko_cd32_disc_info(char *label, int labelsz, int *tracks, int *audio)
