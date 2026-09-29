@@ -1,0 +1,5 @@
+set_global_assignment -name FAMILY "Cyclone V"
+set_global_assignment -name DEVICE AUTO
+set_global_assignment -name TOP_LEVEL_ENTITY Minimig
+
+set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"
