@@ -27,6 +27,7 @@ behind. Reads nothing back from the machine except the log counters.
 import argparse
 import csv
 import os
+import re
 import subprocess
 import sys
 import time
@@ -102,6 +103,116 @@ def key(host, name, repeat=1, gap=0.35):
         subprocess.run([sys.executable, REMOTE, "--host", host, "key", name],
                        capture_output=True, text=True, timeout=30)
         time.sleep(gap)
+
+
+# ---------------------------------------------------------------- the OSD
+#
+# Everything below replaces navigating by counting key presses. The binary
+# mirrors every OSD paint to /tmp/osd.txt while /tmp/osd_mirror exists
+# (osd.cpp, osd_mirror_flush), marking the selected row `>` and a greyed one
+# `~`. So the menu can be READ, and there is no reason to guess where the
+# cursor is.
+#
+# Blind navigation cost real measurements. `DOWN` nine times to reach Reset
+# assumes a page layout; when it drifted, one run scored every round of both
+# builds as a failed boot with an empty Akiko log, and on another occasion an
+# ENTER landed on the System row, switched the machine to CDTV and wedged the
+# core. Three separate guards were added to DETECT that damage afterwards --
+# retry on no-mount, check set_cd_path, check the disc name. Reading the cursor
+# removes the cause instead.
+OSD_MIRROR = "/tmp/osd_mirror"
+OSD_TEXT = "/tmp/osd.txt"
+
+
+def osd_enable(host):
+    """Turn the mirror on. Harmless if it is already on."""
+    ssh(host, "touch %s" % OSD_MIRROR)
+
+
+# The real format, read off the machine rather than assumed:
+#
+#     [AmigaCD]
+#      0
+#      1 >  CD       : * no disc *
+#      2    Real CD  : mount drive
+#      3 ~  Floppy 0 : * no disk *
+#     ...
+#     14    Reset
+#     15               exit
+#
+# A leading row NUMBER, then the marker column -- `>` selected, `~` greyed,
+# space otherwise -- then the text. The first line is a title, not a row.
+OSD_ROW = re.compile(r"^\s*(\d+)\s(.)\s*(.*?)\s*$")
+
+
+def osd_rows(host):
+    """[(row_number, text, selected)], or [] if nothing has been painted yet.
+
+    The file is only written on a paint, so a freshly created marker leaves it
+    empty until the next one -- callers provoke a paint and retry rather than
+    treating empty as a real page.
+    """
+    raw = ssh(host, "cat %s 2>/dev/null" % OSD_TEXT)
+    rows = []
+    for line in raw.splitlines():
+        m = OSD_ROW.match(line)
+        if m:
+            rows.append((int(m.group(1)), m.group(3), m.group(2) == ">"))
+    return rows
+
+
+def osd_find(rows, want):
+    """Row number of the first row containing `want`, or -1.
+
+    Matches on the text only, so a page title cannot be mistaken for a row --
+    which matters here, because the title is literally "[AmigaCD]" and a naive
+    search for "CD" would find it first.
+    """
+    for num, text, _ in rows:
+        if want.lower() in text.lower():
+            return num
+    return -1
+
+
+def osd_selected(rows):
+    for num, _, sel in rows:
+        if sel:
+            return num
+    return -1
+
+
+def osd_goto(host, want, max_steps=24):
+    """Move the cursor onto the row named `want`. True when it is there.
+
+    One step at a time, re-reading after each. That is deliberate and it is the
+    whole point of this function: the cursor SKIPS greyed and blank rows, and
+    which rows are greyed depends on machine state. On this page rows 3 to 6 are
+    greyed because no floppy or hard disk is attached -- attach one and they
+    become selectable, so any fixed number of presses lands somewhere different.
+    The old code pressed DOWN nine times from the CD row to reach Reset; Reset is
+    row 14, and how many presses that actually takes depends on what is greyed
+    at the time. That is the drift that voided one whole run and, on another
+    occasion, put an ENTER on the System row and switched the machine to CDTV.
+    """
+    for _ in range(max_steps):
+        rows = osd_rows(host)
+        if not rows:
+            key(host, "DOWN"); key(host, "UP")   # provoke a paint
+            time.sleep(0.3)
+            continue
+        target = osd_find(rows, want)
+        if target < 0:
+            return False                          # not on this page at all
+        cur = osd_selected(rows)
+        if cur == target:
+            return True
+        if cur < 0:
+            key(host, "DOWN"); key(host, "UP")
+            time.sleep(0.3)
+            continue
+        key(host, "DOWN" if target > cur else "UP")
+        time.sleep(0.25)
+    return False
 
 
 def flash(host, rbf, settle):
@@ -231,13 +342,26 @@ def reset_machine(host):
     Reset always ejects, so the disc has to be re-picked for the next round;
     doing it explicitly keeps every round starting from the same place.
     """
-    key(host, "F12"); time.sleep(1.0)
-    key(host, "DOWN"); key(host, "UP")       # cursor onto the CD row
-    key(host, "BACKSPACE"); time.sleep(2.0)  # eject
-    key(host, "DOWN", repeat=9)              # down to Reset
-    key(host, "ENTER"); time.sleep(1.2)
-    key(host, "DOWN")                        # No -> Yes
-    key(host, "ENTER")
+    key(host, "F12"); time.sleep(1.2)
+    osd_enable(host)
+
+    # Eject, by name rather than by position.
+    if osd_goto(host, "CD"):
+        key(host, "BACKSPACE"); time.sleep(2.0)
+    else:
+        print("      (no CD row on the OSD; skipping the eject)", flush=True)
+
+    # Reset. The old code pressed DOWN nine times to get here.
+    if osd_goto(host, "Reset"):
+        key(host, "ENTER"); time.sleep(1.2)
+        # The confirmation defaults to No. Move to Yes by name if the page
+        # names it, and fall back to one DOWN if it does not.
+        if not osd_goto(host, "Yes"):
+            key(host, "DOWN")
+        key(host, "ENTER")
+    else:
+        print("      (no Reset row found; the machine may not be reset)", flush=True)
+
     time.sleep(24)                           # splash
 
 
