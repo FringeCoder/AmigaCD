@@ -53,6 +53,16 @@ static void akiko_diag(const char *fmt, ...);
 // tmpfs, and once gameplay starts CF generates 200+ of these per second.
 // Off in production. (The poll-loop throttle in akiko_cd32_poll is what
 // was historically masked by this logging — see comment there.)
+//
+// Which side a log line belongs on, because getting this wrong cost days:
+// akiko_dbg is for HIGH-RATE traces -- per command, per sector, per poll --
+// and akiko_diag, which is always on, is for RARE events, above all
+// failures. cmd_bad() used to be an akiko_dbg, so in production the core
+// could answer the BIOS with CH_ERR_CHECKSUM and leave no trace at all;
+// that is precisely why the Chuck Rock command-channel desync stayed
+// invisible while it was being hunted through sector data and the PBX
+// engine. A rejection is by construction rare, and it is the single thing
+// you most want in the log.
 #define AKIKO_CD32_DEBUG 0
 #if AKIKO_CD32_DEBUG
 	// Route through akiko_diag so output reaches /tmp/akiko_dbg.log instead
@@ -748,7 +758,7 @@ static int akiko_drain_command(uint8_t *buf)
 static void akiko_send_response(const uint8_t *payload, int len)
 {
 	if (len < 1 || len > AKIKO_CMD_MAX) {
-		akiko_dbg("send_response: bad len %d\n", len);
+		akiko_diag("[akiko] send_response: bad len %d", len);
 		return;
 	}
 
@@ -1062,7 +1072,7 @@ static void cmd_multi(const uint8_t *cmd)
 	if (!cd_media_present()) {
 		r[1] = 0x01;
 		akiko_send_response(r, 2);
-		akiko_dbg("PLAY: no disk\n");
+		akiko_diag("[akiko] PLAY: no disk");
 		return;
 	}
 
@@ -1446,7 +1456,7 @@ static void cmd_bad(const uint8_t *cmd, uint8_t err_code)
 	r[0] = (uint8_t)((cmd[0] & 0xf0) | 5);   // top nibble preserved, low = 5
 	r[1] = err_code | cd_door;
 	akiko_send_response(r, 2);
-	akiko_dbg("BAD cmd=%02x err=%02x\n", cmd[0], err_code);
+	akiko_diag("[akiko] BAD cmd=%02x err=%02x", cmd[0], err_code);
 }
 
 // -----------------------------------------------------------------------------
@@ -2245,13 +2255,13 @@ static bool akiko_handle_sec_req(void)
 	uint8_t buf[AKIKO_SECTOR_BYTES];
 
 	if (cd_data_lba_base == -1) {
-		akiko_dbg("sec_req but no data read armed (counter=%u)\n", counter);
+		akiko_diag("[akiko] sec_req but no data read armed (counter=%u)", counter);
 		return false;
 	}
 
 	drive_t *drv = cd_find_drive();
 	if (!drv) {
-		akiko_dbg("sec_req but no CD drive (counter=%u)\n", counter);
+		akiko_diag("[akiko] sec_req but no CD drive (counter=%u)", counter);
 		return false;
 	}
 
@@ -2946,7 +2956,7 @@ void akiko_cd32_poll(void)
 	uint8_t cmd[AKIKO_CMD_MAX];
 	int     n = akiko_drain_command(cmd);
 	if (n < 1) {
-		akiko_dbg("drain returned 0 bytes\n");
+		akiko_diag("[akiko] drain returned 0 bytes");
 		return;
 	}
 
@@ -3020,14 +3030,14 @@ void akiko_cd32_poll(void)
 	if (expected_len > 0) {
 		int chk_total = expected_len + 1;    // bytes summed = cmd + chk
 		if (n < chk_total) {
-			akiko_dbg("short frame: n=%d expected=%d\n", n, chk_total);
+			akiko_diag("[akiko] short frame: n=%d expected=%d", n, chk_total);
 			cmd_bad(cmd, CH_ERR_CHECKSUM);
 			return;
 		}
 		uint32_t sum = 0;
 		for (int i = 0; i < chk_total; i++) sum += cmd[i];
 		if ((sum & 0xff) != 0xff) {
-			akiko_dbg("checksum FAIL sum=%02x\n", sum & 0xff);
+			akiko_diag("[akiko] checksum FAIL sum=%02x", sum & 0xff);
 			cmd_bad(cmd, CH_ERR_CHECKSUM);
 			return;
 		}
