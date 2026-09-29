@@ -143,6 +143,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # This repository has a second bench tree, rtl/tb/, with its own naming
+      # convention -- so the gate in the core repo neither scans it nor would
+      # match these names. It covers the save-state controller, DMA, CRC,
+      # quiesce, serialiser, register shadow and state fanout: the most
+      # bug-prone code here. All ten are wired; this keeps them that way,
+      # because the failure mode is silent. A bench nobody runs reads as
+      # coverage.
+      - name: Every bench in rtl/tb is run
+        run: python3 rtl/tb/check-benches-wired.py
+
       - name: Install Icarus Verilog
         run: sudo apt-get update && sudo apt-get install -y iverilog
 
