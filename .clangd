@@ -1,0 +1,73 @@
+# clangd configuration: index this tree as what it actually is, an ARM Linux
+# binary, rather than as whatever the host happens to be.
+#
+# Why this file exists. On Windows, most translation units here fail to parse:
+# they include linux/cdrom.h, linux/fb.h and about two hundred other headers that
+# do not exist outside Linux. clangd then has no whole-project index, and the
+# failure is silent in the worst way -- a cross-file "find references" returns an
+# EMPTY result rather than an error, so it reads as "nothing uses this symbol".
+# That has cost real time and is why every reference search in this project had to
+# be double-checked with a text search.
+#
+# The fix needs no header harvesting. setup_default_toolchain.sh already puts a
+# complete ARM sysroot on disk -- gcc-arm-10.2-2020.11-.../arm-none-linux-gnueabihf
+# carries libc/usr/include (with linux/cdrom.h) and include/c++ -- so pointing
+# clangd at it resolves everything exactly as the real build does.
+#
+# Run ./setup_default_toolchain.sh (or scripts/wsl-build.sh, which sources it)
+# before expecting this to work: without the toolchain the sysroot is absent and
+# clangd falls back to host headers, which is the situation this replaces.
+#
+# --target and the sysroot together matter for more than headers. Plain char is
+# UNSIGNED on the ARM ABI and signed on x86, and support/minimig/minimig_boot.cpp
+# relies on it: its font table is declared char and holds 0xFE. Indexed as x86
+# that file reports a wall of narrowing errors and drops out of the index, while
+# being perfectly correct for its target. -funsigned-char is kept as well as the
+# triple so the intent survives if the triple is ever changed.
+CompileFlags:
+  Add:
+    - --target=arm-none-linux-gnueabihf
+    - --sysroot=gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf/arm-none-linux-gnueabihf/libc
+    - -isystem
+    - gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf/arm-none-linux-gnueabihf/include/c++/10.2.1
+    - -isystem
+    - gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf/arm-none-linux-gnueabihf/include/c++/10.2.1/arm-none-linux-gnueabihf
+    - -funsigned-char
+    - -std=gnu++14
+    # The defines the Makefile passes (DFLAGS, Makefile:52). Without VDATE,
+    # main.cpp:38 fails on `const char *version = "$VER:" VDATE;` -- the
+    # Makefile substitutes a date there, and a string concatenation against
+    # an undefined macro does not parse. It was the only file in the tree
+    # that still failed once the sysroot was in place. The value is a
+    # placeholder: nothing indexed depends on what the date is.
+    - -DVDATE="000000"
+    - -D_7ZIP_ST
+    - -DPACKAGE_VERSION="1.3.3"
+    - -DHAVE_LROUND
+    - -DHAVE_STDINT_H
+    - -DHAVE_STDLIB_H
+    - -DHAVE_SYS_PARAM_H
+    - -DENABLE_64_BIT_WORDS=0
+    - -D_FILE_OFFSET_BITS=64
+    - -D_LARGEFILE64_SOURCE
+    # The include paths the Makefile uses (INCLUDE, Makefile:19-26).
+    - -I.
+    - -Ilib/libco
+    - -Ilib/miniz
+    - -Ilib/md5
+    - -Ilib/lzma
+    - -Ilib/zstd/lib
+    - -Ilib/libchdr/include
+    - -Ilib/bluetooth
+  # clangd would otherwise try to honour flags meant for the cross-compiler that
+  # its own driver does not know.
+  Remove:
+    - -mcpu=*
+    - -mfpu=*
+    - -mfloat-abi=*
+
+Diagnostics:
+  # The kernel headers in the sysroot are not ours and produce noise we cannot
+  # act on.
+  Suppress:
+    - unused-includes
