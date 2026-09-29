@@ -105,6 +105,16 @@ jobs:
             bin/MiSTer
             bin/MiSTer.elf
           if-no-files-found: error
+          # Without this these keep the repository default and never expire. 493
+          # of them accumulated from 2026-07-30 onward, 0.83 GB, which is over
+          # the 500 MB cap for a private repo -- and once the cap is hit every
+          # build fails at this step, including on a docs-only PR. 483 were
+          # deleted by hand on 2026-09-28; this stops it happening again.
+          #
+          # 14 days is chosen against how these are used: scripts/deploy-from-ci.sh
+          # pulls a run's binary onto the MiSTer, and that is always a recent run.
+          # Anything older is rebuilt faster than it would be retrieved.
+          retention-days: 14
 
   # RTL simulation. Icarus rather than ModelSim: ModelSim is not installed on the
   # dev machine (C:\intelFPGA_lite\17.0 carries quartus only), and the testbench is
