@@ -40,8 +40,18 @@ CHANGED=(
 need_toolchain() {
     if ! command -v arm-none-linux-gnueabihf-gcc >/dev/null 2>&1; then
         echo "== toolchain not on PATH, sourcing setup_default_toolchain.sh"
+        # setup_default_toolchain.sh is upstream's and tests its three
+        # override variables with [ -z "${VAR}" ] rather than "${VAR:-}", so
+        # under the set -u above it dies on the first one with
+        # "MISTER_GCC_INSTALL_DIR: unbound variable" -- before downloading
+        # anything. That made this script unusable on exactly the machines it
+        # exists for: any checkout without the toolchain already on PATH.
+        # Relaxed around the source rather than patched upstream, so a sync
+        # does not silently undo the fix.
+        set +u
         # shellcheck disable=SC1091
         source ./setup_default_toolchain.sh
+        set -u
     fi
     if ! command -v arm-none-linux-gnueabihf-gcc >/dev/null 2>&1; then
         echo "!! arm-none-linux-gnueabihf-gcc still not found." >&2
