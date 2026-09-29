@@ -232,6 +232,68 @@ def measure(host):
     return phantoms, checksum, resyncs, lines
 
 
+# Fisher's exact test, two sided, on the 2x2 of booted against not booted.
+#
+# Here because the alternative is computing it by hand afterwards, which happened
+# four times in three days -- and three of the boot rates quoted in this project
+# had to be retracted. Two of those retractions were not arithmetic errors: a
+# difference was called real when the sample could not support it. A harness that
+# reports a rate and leaves significance to the reader invites exactly that.
+#
+# Exact rather than chi-square because the counts are tiny: fourteen rounds an arm
+# at best, and cells of zero are normal.
+def _fisher_two_sided(a, b, c, d):
+    """a,b = first arm booted/failed; c,d = second arm booted/failed."""
+    from math import comb
+
+    def p_table(w, x, y, z):
+        n = w + x + y + z
+        if n == 0:
+            return 1.0
+        return (comb(w + x, w) * comb(y + z, y)) / comb(n, w + y)
+
+    observed = p_table(a, b, c, d)
+    row1, row2, col1 = a + b, c + d, a + c
+    total = 0.0
+    for w in range(row1 + 1):
+        x = row1 - w
+        y = col1 - w
+        z = row2 - y
+        if y < 0 or z < 0:
+            continue
+        pt = p_table(w, x, y, z)
+        # Everything at least as extreme as what was seen.
+        if pt <= observed * (1 + 1e-9):
+            total += pt
+    return min(1.0, total)
+
+
+def report_significance(variants, tally):
+    """Only meaningful for a two-arm comparison, which is what this tool is for."""
+    if len(variants) != 2:
+        return
+    la = variants[0][0]
+    lb = variants[1][0]
+    ga, ta = tally[la]
+    gb, tb = tally[lb]
+    if ta == 0 or tb == 0:
+        return
+    p = _fisher_two_sided(ga, ta - ga, gb, tb - gb)
+    print("")
+    print("Fisher exact, two sided: p = %.6f" % p)
+    if p < 0.01:
+        print("  a difference this large is unlikely to be chance")
+    elif p < 0.05:
+        print("  suggestive, and thin -- another run before quoting it")
+    else:
+        print("  NOT significant: this sample does not support calling the arms "
+              "different")
+    # The thing that actually went wrong before: a rate quoted off too few rounds.
+    if min(ta, tb) < 10:
+        print("  note: %d and %d scoreable rounds. Under ten an arm, even a clear "
+              "p is worth repeating." % (ta, tb))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=DEFAULT_HOST)
@@ -346,7 +408,9 @@ def main():
             pct = (100.0 * good / total) if total else 0.0
             print("%-6s %d/%d  (%.0f%%)   [%d flagged]"
                   % (label, good, total, pct, suspect_count[label]))
-    print("\ncsv: %s" % args.out)
+    report_significance(variants, tally)
+    print("")
+    print("csv: %s" % args.out)
 
 
 if __name__ == "__main__":
