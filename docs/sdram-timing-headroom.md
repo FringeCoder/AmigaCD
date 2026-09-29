@@ -530,3 +530,56 @@ So the mux in front of the pad is load-bearing: it keeps `sd_addr` in the fabric
 beside the logic that feeds it. Approach abandoned. If the clock-to-out at the
 pin ever becomes the binding constraint, the way to buy it is to shorten the
 chip-address chain first, not to move the register.
+
+## 2026-09-29: once constrained, the interface is not where this design is tight
+
+Everything above is about the SDRAM interface, on the premise that it is the
+risky part of this design. With the constraints in place that premise can
+finally be tested, and it does not hold. Per-clock worst slacks from a seed 7
+fit of the scanline-inhibit netlist:
+
+```
+setup                                                   hold
+  -0.069  emu|pll ... counter[0]|divclk   (113.5 MHz)     -0.468  same domain
+  +0.277  pll_hdmi                                        +0.204  pll_hdmi
+  +0.570  emu|pll ... counter[1]|divclk                    +0.261  counter[1]
+  +3.508  FPGA_CLK2_50                                     +0.271  FPGA_CLK2_50
+  +5.698  SDRAM_CLK_out                                   (not in the worst 8,
+  +7.934  FPGA_CLK1_50                                     so above +0.403)
+```
+
+**The external SDRAM interface has 5.7 ns of setup margin and over 0.4 ns of
+hold margin.** The binding path in both directions is the internal 113.5 MHz
+core clock. So the four part figures in `AmigaCD.sdc` could be loosened by
+nanoseconds without changing a single fit result, and tightening them -- by
+reading the actual part number off the chip -- buys accuracy rather than
+headroom.
+
+Two corrections to earlier notes in this file and in the PR threads follow from
+that measurement.
+
+**The constraints did not make fits harder.** After #30 merged, a run of pairs
+on a rebased branch came back tighter than the same seeds had on the old branch
+point, and I attributed that to five newly constrained path groups. A domain
+with 5.7 ns spare is not constraining anything. The tighter numbers came from
+the other thing the rebase brought in -- the baseline arm became mainline
+*including* #27's command phantom gate, so it is a larger design than the old
+baseline was -- plus ordinary seed scatter. #30 added visibility, not
+difficulty.
+
+**`SDRAM_CLK` being 56.75 MHz does not mean the bus has spare cycle time to
+trade.** It has spare cycle time and the constraints already account for it via
+the 17.616 ns period. What it does not do is shrink `tAC`: 6.0 ns is a
+propagation delay from the clock edge to valid data, identical whether the part
+is clocked at 56 MHz or at the 167 MHz its speed grade is rated for. A board
+measured stable at 167 MHz confirms the part is healthy and consistent with the
+-6 grade the SDC already assumes; it is not a licence to reduce tAC. Note also
+that the 167 MHz rating on these parts is at CL3, while this controller programs
+CL=2 (`sdram_ctrl.v:378`), where tAC is the larger figure.
+
+**Where the work actually is**, if core timing ever needs buying back: the
+113.5 MHz domain, and specifically the chip-address chain. The worst paths seen
+across this week's fits launch from `minimig|ciab:CIAB1|ddrportb[6]` and from
+`ss_ctrl:savestate|ddr_read`, reaching `sd_addr` through
+`chipdma_arb|chip_out_addr[18]` and the DDR3 arbiter respectively. Neither is an
+interface path.
