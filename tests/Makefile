@@ -16,6 +16,7 @@ SRC = ../support/minimig/minimig_savestate.cpp \
       ../support/minimig/minimig_a2065_crc32.cpp \
       ../support/minimig/minimig_profile.cpp \
       ../support/minimig/akiko_pace.cpp \
+      ../support/minimig/akiko_framing.cpp \
       ../support/minimig/rom_crypt.cpp \
       ../support/minimig/mgl_rbf.cpp \
       ../support/minimig/cd_savename.cpp \
@@ -23,6 +24,7 @@ SRC = ../support/minimig/minimig_savestate.cpp \
       ../osd_rowguard.cpp
 
 TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_crypt \
+        test_akiko_framing \
         test_mgl_rbf test_cd_savename test_vadjust_info \
         test_osd_rowguard
 

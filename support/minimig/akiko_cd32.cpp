@@ -37,6 +37,7 @@
 #include "../chd/mister_chd.h" // mister_chd_read_sector for CDDA pump
 #include "../physical_disc/physical_disc.h" // physical CD-ROM drive media
 #include "akiko_pace.h"                    // sector delivery floor
+#include "akiko_framing.h"                 // command frame validity + resync
 #include "minimig_config.h"   // minimig_reset() — used to unblock BIOS stuck
                               // on no-CD splash after a boot-with-no-CD-then-mount.
 #include "akiko_cd32.h"
@@ -163,9 +164,10 @@ static void akiko_diag(const char *fmt, ...);
 
 // Per-opcode command lengths *excluding* the trailing checksum byte.
 // akiko.cpp:1136 — entries < 0 are "reserved/unsupported".
-static const int command_lengths[16] = {
-	1, 2, 1, 1, 12, 2, 1, 1, 4, 1, 2, -1, -1, -1, -1, -1
-};
+// Lives in akiko_framing.cpp now, so that akiko_frame_valid() can be unit
+// tested without this file's MiSTer includes. Aliased rather than renamed at the
+// two other use sites below, which are about command length and not framing.
+static const int *const command_lengths = akiko_command_lengths;
 
 // Status / error nibbles. Values are byte-exact mirrors of WinUAE
 // akiko.cpp:433-449 — getting these wrong is what kept the no-CD splash
@@ -685,21 +687,8 @@ static bool akiko_wait_status_bit(uint16_t mask, bool want_set, int max_iters)
 // read. The first byte (opcode) tells us how many bytes the rest of the frame
 // is — we read exactly cmd_length+1 (incl. checksum). For unknown opcodes we
 // fall back to reading the maximum to drain whatever the FPGA has buffered.
-// Is this a complete, correctly summed frame for the opcode it starts with?
-// Unknown opcodes have no length to check against, so they are never claimed
-// as a resync target -- draining one is already a "take whatever is there"
-// path.
-static bool akiko_frame_valid(const uint8_t *buf, int n)
-{
-	if (n < 1) return false;
-	int len = command_lengths[buf[0] & 0x0f];
-	if (len <= 0) return false;
-	int total = len + 1;
-	if (n < total) return false;
-	uint32_t sum = 0;
-	for (int i = 0; i < total; i++) sum += buf[i];
-	return (sum & 0xff) == 0xff;
-}
+// akiko_frame_valid() and akiko_frame_resync() are in akiko_framing.cpp, with
+// unit tests in tests/test_akiko_framing.cpp.
 
 
 static int akiko_drain_command(uint8_t *buf)
@@ -2995,15 +2984,12 @@ void akiko_cd32_poll(void)
 	// a time and take the first offset that is a complete, correctly summed
 	// frame for its own opcode. A byte skipped this way was never a command
 	// of its own -- it is the remains of one already answered.
-	if (!akiko_frame_valid(cmd, n)) {
-		for (int skip = 1; skip < n; skip++) {
-			if (!akiko_frame_valid(&cmd[skip], n - skip)) continue;
-			akiko_diag("[akiko] frame resync: dropped %d stray byte(s), op=0x%02x",
-			           skip, cmd[skip] & 0x0f);
-			memmove(cmd, &cmd[skip], (size_t)(n - skip));
-			n -= skip;
-			break;
-		}
+	int skip = akiko_frame_resync(cmd, n);
+	if (skip > 0) {
+		akiko_diag("[akiko] frame resync: dropped %d stray byte(s), op=0x%02x",
+		           skip, cmd[skip] & 0x0f);
+		memmove(cmd, &cmd[skip], (size_t)(n - skip));
+		n -= skip;
 	}
 
 #if AKIKO_CD32_DEBUG
