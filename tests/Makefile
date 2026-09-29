@@ -25,6 +25,7 @@ SRC = ../support/minimig/minimig_savestate.cpp \
 
 TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_crypt \
         test_akiko_framing \
+        replay_akiko_log \
         test_mgl_rbf test_cd_savename test_vadjust_info \
         test_osd_rowguard
 

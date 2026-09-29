@@ -700,6 +700,25 @@ static bool akiko_wait_status_bit(uint16_t mask, bool want_set, int max_iters)
 // akiko_frame_valid() and akiko_frame_resync() are in akiko_framing.cpp, with
 // unit tests in tests/test_akiko_framing.cpp.
 
+// "de ad be ef" into a caller-owned buffer, for the log.
+//
+// Every line that reports a framing decision carries the bytes it decided on.
+// Without them a failure line cannot be diagnosed after the fact and cannot be
+// replayed: tests/replay_akiko_log.cpp re-runs the framing over exactly these
+// lines, so a captured hang can be re-examined against changed code without the
+// hardware. The 2026-09-26 captures had this and a later rework of the logging
+// dropped it.
+static const char *akiko_hexbuf(const uint8_t *buf, int n, char *out, size_t cap)
+{
+	int off = 0;
+	for (int i = 0; i < n && i < 16 && (size_t)off + 3 < cap; i++) {
+		off += snprintf(out + off, cap - (size_t)off, "%02x ", buf[i]);
+	}
+	if (off > 0) out[off - 1] = '\0';
+	else if (cap) out[0] = '\0';
+	return out;
+}
+
 
 static int akiko_drain_command(uint8_t *buf)
 {
@@ -2971,7 +2990,9 @@ void akiko_cd32_poll(void)
 		int zeros = 1;
 		for (int i = 0; i < n; i++) if (cmd[i]) { zeros = 0; break; }
 		if (zeros) {
-			akiko_diag("[akiko] phantom command frame (%d zero bytes) -- dropped", n);
+			char hx3[3 * AKIKO_CMD_MAX + 1];
+			akiko_diag("[akiko] PHANTOM n=%d bytes=%s -- dropped",
+					           n, akiko_hexbuf(cmd, n, hx3, sizeof(hx3)));
 			return;
 		}
 	}
@@ -2996,8 +3017,10 @@ void akiko_cd32_poll(void)
 	// of its own -- it is the remains of one already answered.
 	int skip = akiko_frame_resync(cmd, n);
 	if (skip > 0) {
-		akiko_diag("[akiko] frame resync: dropped %d stray byte(s), op=0x%02x",
-		           skip, cmd[skip] & 0x0f);
+		char hx4[3 * AKIKO_CMD_MAX + 1];
+		akiko_diag("[akiko] RESYNC skip=%d op=0x%02x n=%d bytes=%s",
+		           skip, cmd[skip] & 0x0f, n,
+		           akiko_hexbuf(cmd, n, hx4, sizeof(hx4)));
 		memmove(cmd, &cmd[skip], (size_t)(n - skip));
 		n -= skip;
 	}
@@ -3016,14 +3039,19 @@ void akiko_cd32_poll(void)
 	if (expected_len > 0) {
 		int chk_total = expected_len + 1;    // bytes summed = cmd + chk
 		if (n < chk_total) {
-			akiko_diag("[akiko] short frame: n=%d expected=%d", n, chk_total);
+			char hx[3 * AKIKO_CMD_MAX + 1];
+			akiko_diag("[akiko] SHORT FRAME n=%d expected=%d bytes=%s",
+					           n, chk_total, akiko_hexbuf(cmd, n, hx, sizeof(hx)));
 			cmd_bad(cmd, CH_ERR_CHECKSUM);
 			return;
 		}
 		uint32_t sum = 0;
 		for (int i = 0; i < chk_total; i++) sum += cmd[i];
 		if ((sum & 0xff) != 0xff) {
-			akiko_diag("[akiko] checksum FAIL sum=%02x", sum & 0xff);
+			char hx2[3 * AKIKO_CMD_MAX + 1];
+			akiko_diag("[akiko] CHECKSUM FAIL n=%d expected=%d sum=%02x bytes=%s",
+					           n, chk_total, sum & 0xff,
+					           akiko_hexbuf(cmd, n, hx2, sizeof(hx2)));
 			cmd_bad(cmd, CH_ERR_CHECKSUM);
 			return;
 		}
@@ -3034,12 +3062,8 @@ void akiko_cd32_poll(void)
 	// stuck-after-game-data-reached state.
 	if (op != 0x05) {
 		char hex[3 * AKIKO_CMD_MAX + 1];
-		int  off = 0;
-		for (int i = 0; i < n && i < 16; i++) {
-			off += snprintf(hex + off, sizeof(hex) - off, "%02x ", cmd[i]);
-		}
-		if (off > 0) hex[off - 1] = '\0';
-		akiko_diag("[akiko] CMD op=0x%02x n=%d bytes=%s", op, n, hex);
+		akiko_diag("[akiko] CMD op=0x%02x n=%d bytes=%s", op, n,
+		           akiko_hexbuf(cmd, n, hex, sizeof(hex)));
 	}
 
 	// 5. Dispatch.
