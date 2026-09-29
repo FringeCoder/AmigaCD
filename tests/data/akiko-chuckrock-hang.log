@@ -1,0 +1,16 @@
+# Excerpt from /tmp/akiko_dbg.log on the Retro Remake SuperStation,
+# 2026-09-26, Chuck Rock (1994).chd, captured while the title hung on the
+# CD32 splash. Copied verbatim from the capture (cf1.log lines 133-142) --
+# not reconstructed. It is the run that identified the command-channel
+# desync: two phantom all-zero frames, then the BIOS's INFO command
+# arriving behind a stray LED checksum byte.
+#
+# tests/replay_akiko_log.cpp re-runs the framing over the bytes= fields.
+# Lines beginning with # are comments and are ignored by the parser.
+
+[  4212.243885] [akiko] PLAY DATA arm: start_lba=25622 (cmd7=0x80) fpga_ctr@arm=6
+[  4212.382738] [akiko] CMD op=0x05 n=3 bytes=e5 00 1a
+[  4212.383039] [akiko] CMD op=0x02 n=2 bytes=f2 0d
+[  4215.038881] [akiko] CHECKSUM FAIL n=2 expected=2 sum=00 bytes=00 00
+[  4215.039194] [akiko] CHECKSUM FAIL n=2 expected=2 sum=00 bytes=00 00
+[  4215.039452] [akiko] CHECKSUM FAIL n=3 expected=3 sum=e9 bytes=ea 27 d8

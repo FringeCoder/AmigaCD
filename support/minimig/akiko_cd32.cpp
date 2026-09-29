@@ -38,6 +38,7 @@
 #include "../physical_disc/physical_disc.h" // physical CD-ROM drive media
 #include "akiko_pace.h"                    // sector delivery floor
 #include "akiko_framing.h"                 // command frame validity + resync
+#include "akiko_discfmt.h"                 // MSF/LBA, BCD, ISO9660 descriptors
 #include "minimig_config.h"   // minimig_reset() — used to unblock BIOS stuck
                               // on no-CD splash after a boot-with-no-CD-then-mount.
 #include "akiko_cd32.h"
@@ -487,21 +488,16 @@ static void migrate_physdisc_save_name(const char *cd_path, const char *new_path
 	}
 }
 
+// These live in akiko_discfmt.cpp now, with unit tests in
+// tests/test_akiko_discfmt.cpp. Wrapped rather than renamed so the call sites
+// throughout this file are untouched.
 static inline uint32_t msf_to_lba(uint8_t m, uint8_t s, uint8_t f)
 {
-	// Standard CDDA MSF → LBA conversion with 2-second pre-gap.
-	return (((uint32_t)m * 60u + s) * 75u + f) - 150u;
+	return akiko_msf_to_lba(m, s, f);
 }
 
-static inline uint8_t bcd_to_bin(uint8_t b)
-{
-	return (uint8_t)(((b >> 4) * 10u) + (b & 0x0fu));
-}
-
-static inline uint8_t bin_to_bcd(uint8_t v)
-{
-	return (uint8_t)(((v / 10u) << 4) | (v % 10u));
-}
+static inline uint8_t bcd_to_bin(uint8_t b) { return akiko_bcd_to_bin(b); }
+static inline uint8_t bin_to_bcd(uint8_t v) { return akiko_bin_to_bcd(v); }
 
 // "Is real CD media inserted?" -- matches WinUAE's `cdrom_disk != NULL` semantic.
 // A placeholder drive (cfg=2, no filename) has present=0/cd=1 with chd_f=NULL,
@@ -574,13 +570,7 @@ static void cd_label_forget(void)
 // then reports no label instead of 32 bytes of whatever was lying there.
 static int pvd_user_offset(const uint8_t *raw)
 {
-	static const int cand[2] = { 16, 24 };
-	for (int i = 0; i < 2; i++) {
-		const uint8_t *u = raw + cand[i];
-		// Type 1 (primary), the standard identifier, version 1.
-		if (u[0] == 1 && !memcmp(u + 1, "CD001", 5) && u[6] == 1) return cand[i];
-	}
-	return -1;
+	return akiko_pvd_user_offset(raw);
 }
 
 // Copy an ISO9660 volume identifier out of a descriptor: 32 bytes at offset 40,
@@ -588,19 +578,7 @@ static int pvd_user_offset(const uint8_t *raw)
 // a mangled label still lines up with what other tools show for the same disc.
 static void cd_label_from_pvd(const uint8_t *pvd)
 {
-	char lbl[33];
-	memcpy(lbl, pvd + 40, 32);
-	lbl[32] = 0;
-
-	int end = 32;
-	while (end > 0 && (lbl[end - 1] == ' ' || lbl[end - 1] == 0)) end--;
-	lbl[end] = 0;
-
-	for (int i = 0; i < end; i++) {
-		if ((uint8_t)lbl[i] < 0x20 || (uint8_t)lbl[i] > 0x7E) lbl[i] = ' ';
-	}
-
-	snprintf(cd_label, sizeof(cd_label), "%s", lbl);
+	akiko_pvd_label(pvd, cd_label, sizeof(cd_label));
 }
 
 int akiko_cd32_disc_info(char *label, int labelsz, int *tracks, int *audio)
@@ -699,6 +677,25 @@ static bool akiko_wait_status_bit(uint16_t mask, bool want_set, int max_iters)
 // fall back to reading the maximum to drain whatever the FPGA has buffered.
 // akiko_frame_valid() and akiko_frame_resync() are in akiko_framing.cpp, with
 // unit tests in tests/test_akiko_framing.cpp.
+
+// "de ad be ef" into a caller-owned buffer, for the log.
+//
+// Every line that reports a framing decision carries the bytes it decided on.
+// Without them a failure line cannot be diagnosed after the fact and cannot be
+// replayed: tests/replay_akiko_log.cpp re-runs the framing over exactly these
+// lines, so a captured hang can be re-examined against changed code without the
+// hardware. The 2026-09-26 captures had this and a later rework of the logging
+// dropped it.
+static const char *akiko_hexbuf(const uint8_t *buf, int n, char *out, size_t cap)
+{
+	int off = 0;
+	for (int i = 0; i < n && i < 16 && (size_t)off + 3 < cap; i++) {
+		off += snprintf(out + off, cap - (size_t)off, "%02x ", buf[i]);
+	}
+	if (off > 0) out[off - 1] = '\0';
+	else if (cap) out[0] = '\0';
+	return out;
+}
 
 
 static int akiko_drain_command(uint8_t *buf)
@@ -2971,7 +2968,9 @@ void akiko_cd32_poll(void)
 		int zeros = 1;
 		for (int i = 0; i < n; i++) if (cmd[i]) { zeros = 0; break; }
 		if (zeros) {
-			akiko_diag("[akiko] phantom command frame (%d zero bytes) -- dropped", n);
+			char hx3[3 * AKIKO_CMD_MAX + 1];
+			akiko_diag("[akiko] PHANTOM n=%d bytes=%s -- dropped",
+					           n, akiko_hexbuf(cmd, n, hx3, sizeof(hx3)));
 			return;
 		}
 	}
@@ -2996,8 +2995,10 @@ void akiko_cd32_poll(void)
 	// of its own -- it is the remains of one already answered.
 	int skip = akiko_frame_resync(cmd, n);
 	if (skip > 0) {
-		akiko_diag("[akiko] frame resync: dropped %d stray byte(s), op=0x%02x",
-		           skip, cmd[skip] & 0x0f);
+		char hx4[3 * AKIKO_CMD_MAX + 1];
+		akiko_diag("[akiko] RESYNC skip=%d op=0x%02x n=%d bytes=%s",
+		           skip, cmd[skip] & 0x0f, n,
+		           akiko_hexbuf(cmd, n, hx4, sizeof(hx4)));
 		memmove(cmd, &cmd[skip], (size_t)(n - skip));
 		n -= skip;
 	}
@@ -3016,14 +3017,19 @@ void akiko_cd32_poll(void)
 	if (expected_len > 0) {
 		int chk_total = expected_len + 1;    // bytes summed = cmd + chk
 		if (n < chk_total) {
-			akiko_diag("[akiko] short frame: n=%d expected=%d", n, chk_total);
+			char hx[3 * AKIKO_CMD_MAX + 1];
+			akiko_diag("[akiko] SHORT FRAME n=%d expected=%d bytes=%s",
+					           n, chk_total, akiko_hexbuf(cmd, n, hx, sizeof(hx)));
 			cmd_bad(cmd, CH_ERR_CHECKSUM);
 			return;
 		}
 		uint32_t sum = 0;
 		for (int i = 0; i < chk_total; i++) sum += cmd[i];
 		if ((sum & 0xff) != 0xff) {
-			akiko_diag("[akiko] checksum FAIL sum=%02x", sum & 0xff);
+			char hx2[3 * AKIKO_CMD_MAX + 1];
+			akiko_diag("[akiko] CHECKSUM FAIL n=%d expected=%d sum=%02x bytes=%s",
+					           n, chk_total, sum & 0xff,
+					           akiko_hexbuf(cmd, n, hx2, sizeof(hx2)));
 			cmd_bad(cmd, CH_ERR_CHECKSUM);
 			return;
 		}
@@ -3034,12 +3040,8 @@ void akiko_cd32_poll(void)
 	// stuck-after-game-data-reached state.
 	if (op != 0x05) {
 		char hex[3 * AKIKO_CMD_MAX + 1];
-		int  off = 0;
-		for (int i = 0; i < n && i < 16; i++) {
-			off += snprintf(hex + off, sizeof(hex) - off, "%02x ", cmd[i]);
-		}
-		if (off > 0) hex[off - 1] = '\0';
-		akiko_diag("[akiko] CMD op=0x%02x n=%d bytes=%s", op, n, hex);
+		akiko_diag("[akiko] CMD op=0x%02x n=%d bytes=%s", op, n,
+		           akiko_hexbuf(cmd, n, hex, sizeof(hex)));
 	}
 
 	// 5. Dispatch.
