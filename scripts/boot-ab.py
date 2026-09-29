@@ -141,7 +141,7 @@ def install_binary(host, elf, settle):
     return True
 
 
-def mount_and_wait(host, wait):
+def mount_and_wait(host, wait, expect_disc=None):
     """Mount the disc from the OSD picker and wait for the title to load.
 
     Polls rather than sampling once at a fixed time. A fixed window looked
@@ -163,7 +163,13 @@ def mount_and_wait(host, wait):
     # earlier round is never mistaken for this one's.
     before = int(ssh(host, "grep -c 'set_cd_path: /media' %s" % CDTV_LOG) or 0)
 
+    # The OSD picker takes "the highlighted disc", and the highlight drifts.
+    # Counting set_cd_path lines proves SOMETHING mounted, not that it was the
+    # title under test -- and a different game boots happily, satisfying the
+    # freshness check and scoring as a success for whichever build was loaded.
+    # Nothing in this harness would have noticed. Checking the path closes it.
     mounted = False
+    wrong_disc = None
     for attempt in (1, 2):
         key(host, "F12"); time.sleep(1.0)
         # Nudge the cursor so the mirror repaints, then land on the CD row.
@@ -174,6 +180,15 @@ def mount_and_wait(host, wait):
         time.sleep(2.0)
         now = int(ssh(host, "grep -c 'set_cd_path: /media' %s" % CDTV_LOG) or 0)
         if now > before:
+            if expect_disc:
+                # The last path the core actually mounted.
+                got = ssh(host, "grep -o 'set_cd_path: /media.*' %s | tail -1"
+                          % CDTV_LOG)
+                if expect_disc.lower() not in got.lower():
+                    wrong_disc = got
+                    print("      (mounted the wrong disc: %r, wanted %r)"
+                          % (got, expect_disc), flush=True)
+                    break
             mounted = True
             break
         # The OSD key sequence drifts out of step now and then -- when it does,
@@ -185,6 +200,10 @@ def mount_and_wait(host, wait):
         key(host, "F12"); time.sleep(1.0)
 
     if not mounted:
+        # A wrong disc is not a failed boot and not a flaky mount: it is a round
+        # that measured the wrong thing, so it is skipped either way.
+        return None, False
+    if wrong_disc:
         return None, False
 
     # Success is the game's own loader reading (start_lba=12), but only when
@@ -242,6 +261,9 @@ def main():
                     metavar="LABEL=PATH", help="core binaries to compare")
     ap.add_argument("--fixed-core", metavar="PATH",
                     help="bitstream to install once, when comparing binaries")
+    ap.add_argument("--expect-disc", metavar="SUBSTRING",
+                    help="require the mounted path to contain this, so a drifted "
+                         "OSD picking another title is skipped rather than scored")
     ap.add_argument("--wait", type=int, default=90,
                     help="seconds to wait for the title to load before calling it a hang")
     ap.add_argument("--settle", type=int, default=24,
@@ -290,7 +312,8 @@ def main():
                     print("round %2d  %-8s SKIPPED (install failed)" % (rnd, label),
                           flush=True)
                     continue
-                took, mounted = mount_and_wait(args.host, args.wait)
+                took, mounted = mount_and_wait(args.host, args.wait,
+                                               args.expect_disc)
                 if not mounted:
                     # Not a result: the disc never went in. Leave it out of the
                     # tally rather than scoring a boot that was never attempted.
