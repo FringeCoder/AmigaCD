@@ -75,3 +75,4 @@ build/
 # tracked file ignores .gitignore -- so every `make -C tests` dirtied the tree
 # and one of them rode along in an unrelated commit.
 tests/build/
+compile_commands.json
