@@ -80,3 +80,6 @@
 
 // 3DO  support
 #include "support/3do/3do.h"
+
+// FM Towns Marty support
+#include "support/marty/marty.h"

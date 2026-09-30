@@ -1501,6 +1501,11 @@ void StoreIdx_S(int idx, const char *path)
 	strcpy(Selected_S[idx], path);
 }
 
+const char *GetIdx_S(int idx)
+{
+	return Selected_S[idx];
+}
+
 static char selPath[1024] = {};
 
 static void ResolveExistingCorePath(char *path)
@@ -3853,8 +3858,9 @@ void HandleUI(void)
 						if (is_x86() || is_pcxt() || is_pcat286()) strcpy(Selected_tmp, x86_get_image_path(ioctl_index));
 						if (is_psx() && (ioctl_index == 2 || ioctl_index == 3)) fs_Options |= SCANO_SAVES;
 						if (is_saturn() && (ioctl_index == 1)) fs_Options |= SCANO_SAVES;
+						if (is_marty() && (ioctl_index == MARTY_SLOT_CARD)) fs_Options |= SCANO_SAVES;
 
-						if ((is_saturn() && !(fs_Options & SCANO_SAVES)) || is_pce() || is_megacd() || is_3do() || is_x86() || is_pcat286() || is_cdi() || (is_psx() && !(fs_Options & SCANO_SAVES)) || is_neogeo())
+						if ((is_saturn() && !(fs_Options & SCANO_SAVES)) || is_pce() || is_megacd() || is_3do() || is_x86() || is_pcat286() || is_cdi() || (is_psx() && !(fs_Options & SCANO_SAVES)) || is_neogeo() || (is_marty() && ioctl_index == MARTY_SLOT_CD))
 						{
 							//look for CHD too
 							if (!strcasestr(ext, "CHD"))
@@ -4224,6 +4230,10 @@ void HandleUI(void)
 			else if (is_3do())
 			{
 				p3do_set_image(ioctl_index, selPath);
+			}
+			else if (is_marty())
+			{
+				marty_set_image(ioctl_index, selPath);
 			}
 			else
 			{
@@ -7253,7 +7263,7 @@ void HandleUI(void)
 				char type = flist_SelectedItem()->de.d_type;
 				memcpy(name, flist_SelectedItem()->de.d_name, sizeof(name));
 
-				if ((fs_Options & SCANO_UMOUNT) && (is_megacd() || is_pce() || is_cdi() || is_neogeo() || (is_psx() && !(fs_Options & SCANO_SAVES)) || is_saturn() || is_3do()) && type == DT_DIR && strcmp(flist_SelectedItem()->de.d_name, ".."))
+				if ((fs_Options & SCANO_UMOUNT) && (is_megacd() || is_pce() || is_cdi() || is_neogeo() || (is_psx() && !(fs_Options & SCANO_SAVES)) || is_saturn() || is_3do() || (is_marty() && ioctl_index == MARTY_SLOT_CD)) && type == DT_DIR && strcmp(flist_SelectedItem()->de.d_name, ".."))
 				{
 					int len = strlen(selPath);
 					strcat(selPath, "/");
