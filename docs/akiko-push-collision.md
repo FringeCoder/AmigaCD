@@ -1,4 +1,47 @@
-# The remaining boot failure: a host push collides with a guest command write
+# WITHDRAWN: the first boot after a flash is not a push collision
+
+> **This file's conclusion is wrong and is withdrawn.** Everything below about
+> the deterministic repro stands; the diagnosis built on it does not.
+>
+> The argument rested on `CHECKSUM FAIL` counts of 5 and 8 in failing captures.
+> Those came from an **uncleaned 75-second window** that spanned the flash,
+> several OSD interactions and more than one boot attempt -- not from the boot
+> that failed. Scored per round, with the log cleared at the round's start, a
+> failing first boot has `CHECKSUM FAIL`=1 and `PHANTOM`=0: **identical to a
+> successful round.** There is no frame corruption in the failure at all, so a
+> host push cannot be its cause.
+>
+> **The real signature**, from six failing trials with per-round logs: the BIOS
+> issues one read at lba 14, our side then streams 60 sequential sectors
+> (`DBG sec_req#N base=14 counter=N -> lba=14,15,16...`), and the loader never
+> starts. A successful round has **zero** `DBG sec_req` lines and one
+> `start_lba=12`. 60 versus 0 is the cleanest discriminator found so far, and it
+> is where the next investigation should start.
+>
+> | | failed first boot | success |
+> |---|---|---|
+> | `DBG sec_req#N base=14` | 60 | 0 |
+> | `start_lba=12` (loader) | 0 | 1 |
+> | `CHECKSUM FAIL` | 1 | 1 |
+> | `PHANTOM` | 0 | 0 |
+>
+> The RTL fix this file pointed to was merged anyway, on its own merits and not
+> as a boot fix (FringeCoder/AmigaCD_MiSTer#37): `rx_can_start` genuinely lacked
+> a `!tx_busy` term while TX refuses to start under RX in two places, and
+> `tb_akiko_push_vs_tx` proves the corruption is reachable with a 3-cycle window.
+> Interleaved first-boot trials gave base 0/3 and fix 0/3, identical in every
+> column -- no fix and no regression.
+>
+> The method lesson is the same one this file already records, applied to itself:
+> a log-derived difference has to be re-measured with the window scoped to one
+> round before anything is concluded from it. The uncleaned trace was the right
+> tool for finding what the earlier clearing had hidden, and the wrong tool for
+> counting events per boot.
+
+---
+
+## The original write-up follows, for its evidence and its repro
+
 
 Measured 2026-10-01 on the superstation, core `initdone_on_mainline.rbf` (#32 at
 seed 2, setup +0.316 / hold +0.246), binary `040cb131df18`.
