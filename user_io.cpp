@@ -2309,7 +2309,10 @@ int process_ss(const char *rom_name, int enable)
 		Info("Save state NOT written", 3000, 0, 0, 0, 1);
 	}
 
+	// Still needed: upstream dropped this when it collapsed the save to one
+	// FileSave() call, and our chunked writer below still opens f itself.
 	fileTYPE f = {};
+
 	for (int i = 0; i < 4; i++)
 	{
 		if (ss_base_win[i])
