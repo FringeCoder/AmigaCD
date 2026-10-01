@@ -9,13 +9,15 @@ against. Re-verify line numbers after moving off these.
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
-| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `bcdb16f` "Fix for NGCD identification" | 2026-09-18 |
+| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `e6c7abd1` "Merge PR #17, stock LibCrypt" | 2026-10-01 |
+| ^ previous pin, superseded 2026-10-01 | | `bcdb16f` "Fix for NGCD identification" | 2026-09-18 |
 | ^ previous pin, superseded 2026-09-18 | | `f2963eb` "dvd fpga core support" | 2026-09-12 |
 | ^ previous pin, superseded 2026-09-14 | | `de40622` "Merge PR #9, remount on savestate" | 2026-08-23 |
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `5b3ae64` "N64: Improved CIC detection (#1318)" -- **partial take, see below** | 2026-09-18 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `57276f0c` "Change user_io_status_set value in video.cpp (#1335)" -- **partial take, see below** | 2026-10-01 |
+| ^ previous merge base, superseded 2026-10-01 | | `5b3ae64` "N64: Improved CIC detection (#1318)" | 2026-09-18 |
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
@@ -88,6 +90,84 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-01: three of thirteen taken, and why the other ten are not
+
+Thirteen commits landed on `MiSTer-devel/Main_MiSTer` between `5b3ae64` and
+`57276f0c`. Three are taken.
+
+### Taken
+
+- **`57276f0c` "Change user_io_status_set value in video.cpp (#1335)"** -- a real
+  one-line bug: `user_io_status_set("[8:5]", 0x160)` shifts left by the field's
+  start bit before masking, so `(0x160 << 5) & 0x1E0` is 0 and bits 5-8 were
+  always cleared. The right-aligned value is `0xB`. Guarded by `is_menu()`, so it
+  changes nothing for this core; taken to keep the file identical to upstream.
+- **`aa271e41` "minimig: Update CD32 and CDTV MGL file handling logic (#1323)"** --
+  ours by subject. It lets an `.mgl` launch mount a CD32 or CDTV image, which this
+  tree could not do: only the ADF arms of the MGL dispatch existed, so items 4 and
+  5 fell through. Applied without conflict, which given a `menu.cpp` that diverges
+  by ~3200 lines means only that git found matching context. What makes it correct
+  here is checked and written in the commit message: this fork kept upstream's row
+  numbering and mask bits (`menusub` 4 / `menumask` 0x10 is "Start CD32 Game", 5 /
+  0x20 is CDTV), so `index == 4` and `index == 5` select the rows upstream means.
+  **The CD mount delay is not bypassed** -- it lives in the Akiko disc-announce
+  path, downstream of `minimig_cd_drive_open()`, not in the menu, so an MGL launch
+  gets the same delayed announce a hand mount does.
+- **`a34a5e8b` "FileSave: write to a temp file and rename it over the target
+  (#1331)"** -- `file_io.cpp` verbatim, which is where the value is: every caller
+  (the minimig config, NVRAM, the Akiko settings, the recent lists) becomes
+  crash-safe for free. **Its `user_io.cpp` half is deliberately not taken**: it
+  replaces the save-state write with a single `FileSave()` call, and ours writes in
+  chunks with `ProgressMessage()` between them because a state is up to ~11.5 MB on
+  an O_SYNC fd and one write freezes the OSD for seconds. The atomic rename was
+  added to our chunked writer instead, so both paths end up crash-safe and nothing
+  regresses. Upstream also deletes the `fileTYPE f` our writer still opens; that
+  line is restored, with a comment, because losing it is a compile error and not an
+  obvious one to attribute later.
+
+### Not taken, and why
+
+- `dee9fabd` "minimig: some refactoring in floppy control" and `3994f052`
+  "Minimig: expose zero floppy drive support, add floppy amount to presets" -- the
+  userspace half of the floppy line this document already declines (see the next
+  section). `3994f052` also touches the `minimig_config` struct, which is the
+  permanent divergence described under `5b3ae64`.
+- `ce432dca` FM Towns Marty, `6e14ab22` Apple-III, `f6a3caa6` Mac ethernet/SCSI --
+  cores we do not build. No conflict with anything here; left out only because a
+  take has to be verified and these have no reader.
+- `7875437b`, `7f344862`, `3116e7f4`, `5fb9bd10`, `5a3a0866` -- the NeXT series,
+  same reasoning.
+
+So the pin moves to `57276f0c` and stays a **partial take** for the same reason as
+before: the floppy userspace and the `minimig_config` struct.
+
+### `Anime0t4ku/Main_MiSTer_Physical_Disc` -> `e6c7abd1`
+
+Twenty commits, sixteen of them binary "Add files via upload" and workflow churn.
+Re-extracted verbatim per the procedure below; additive in both files, and the
+disc-type enum -- the check this document insists on at every sync -- is unmoved.
+
+It brings `physical_disc_tray_status()`: `CDROM_DRIVE_STATUS` on a separate
+`O_NONBLOCK` handle, no spin-up and no data read, and it answers while no disc
+session is open. Upstream uses it to notice a disc inserted after launch. **This is
+the piece a CD32 tray-close would need**, which the core cannot do at all today --
+once the mount at startup fails nothing looks at the drive again. Not wired up,
+noted here so the next person does not go looking for a way to poll the tray.
+
+### `MiSTer-devel/Minimig-AGA_MiSTer`: pin unchanged, one commit owed to the core repo
+
+Five commits since `da7632e`. Three (`c1134ac`, `e6d9262`, `a527fbb`) are the
+floppy line, declined below. The fourth is a merge.
+
+The fifth matters and is **not** a userspace change:
+`5fea457` "chipdma_arb: take minimig_idle off the address and drive-select cones"
+restructures the module this fork's RTL owns, splitting `arm_now` into
+`start_candidate` (without `minimig_idle`) and the qualified arm so the late
+`minimig_idle` stays out of the `sd_addr` cone. Our `chipdma_arb.v` carries extra
+terms upstream does not have (`~cpu_chip_slot_req`, `~dma_hold`, `chip_slot_window`)
+and RTL #32 adds `sdram_ready_sync`, so taking it is a design merge -- our terms fold
+into `start_candidate` -- and not a textual one. Tracked in the core repo.
 
 ## Minimig-AGA upstream has merged real floppy support, and we already have some
 
