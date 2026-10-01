@@ -366,9 +366,17 @@ def reset_machine(host):
 
 
 def measure(host):
-    phantoms = int(ssh(host, "grep -c 'phantom command frame' %s" % LOG) or 0)
+    # Both spellings, old and new, because the binary's log lines were
+    # renamed when they gained their byte dumps: "phantom command frame"
+    # became "PHANTOM n=.. bytes=.." and "frame resync" became
+    # "RESYNC skip=..". Counting only the old names made a whole 12-round run
+    # report phantoms=0 and resync=0 for every round -- numbers that looked
+    # like findings and were artifacts of grepping for strings the binary no
+    # longer prints. A harness that reads a log has to be updated with the
+    # log, and matching both spellings means an older binary still measures.
+    phantoms = int(ssh(host, "grep -cE 'phantom command frame|\\[akiko\\] PHANTOM' %s" % LOG) or 0)
     checksum = int(ssh(host, "grep -c 'CHECKSUM FAIL' %s" % LOG) or 0)
-    resyncs = int(ssh(host, "grep -c 'frame resync' %s" % LOG) or 0)
+    resyncs = int(ssh(host, "grep -cE 'frame resync|\\[akiko\\] RESYNC' %s" % LOG) or 0)
     # Carried into the CSV because it is the cheapest way to see, after the
     # fact, that a round was scored against a log that was not this round's.
     lines = int(ssh(host, "wc -l < %s" % LOG) or 0)
