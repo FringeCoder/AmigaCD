@@ -554,10 +554,24 @@ static drive_t *cd_find_drive(void)
 static char cd_label[64] = {};
 static bool cd_label_known = false;
 
+// Whether this disc carries CD32 boot code, checked once per disc.
+//
+// The CD32 BIOS boots out of the ISO9660 SYSTEM AREA -- the first 16 sectors,
+// which ISO9660 reserves and which an Amiga CD32 master uses for its bootblock.
+// Its first reads on any disc land in that range (measured: lba 14, then 12 on a
+// disc that boots). A disc whose system area is entirely zero therefore has
+// nothing to execute, and today the machine sits on the splash forever with no
+// clue why -- which is indistinguishable from the core being broken.
+static bool     cd_boot_checked  = false;
+static uint32_t cd_boot_check_ms = 0;
+
 static void cd_label_forget(void)
 {
 	cd_label[0] = 0;
 	cd_label_known = false;
+	// Same lifetime as the label: one verdict per disc, re-armed on a change.
+	cd_boot_checked  = false;
+	cd_boot_check_ms = 0;
 }
 
 // Where an ISO9660 volume descriptor's user data starts inside a RAW frame.
@@ -579,6 +593,115 @@ static int pvd_user_offset(const uint8_t *raw)
 static void cd_label_from_pvd(const uint8_t *pvd)
 {
 	akiko_pvd_label(pvd, cd_label, sizeof(cd_label));
+}
+
+// What is in the disc's root directory, and is this disc bootable at all?
+//
+// Reports the root listing to the log. It does NOT decide bootability: see the
+// note at the end of the function for the two theories that have already been
+// falsified by a title that boots.
+//
+// Worth having anyway. A disc that mounts with a correct TOC, is read once by
+// the BIOS and then leaves the splash up forever is indistinguishable from a
+// broken core, and the root listing is the cheapest thing that tells the two
+// apart -- it turned around two wrong diagnoses in minutes.
+//
+// An earlier version of this check counted non-zero bytes in sectors 0-15, on
+// the theory that the bootblock lives in the ISO9660 system area. It does not:
+// that area is all zero on Chuck Rock, which boots, so the test flagged every
+// disc. Kept here as a warning that the obvious place is the wrong one.
+//
+// Reads raw, because cdrom_read_raw_sector is the one call that serves a CHD, a
+// cue+bin, a bare ISO and a physical drive alike. The user-data offset comes
+// from the volume descriptor rather than being assumed, and the same offset is
+// then used for the directory sectors -- same track, same mode.
+#define AKIKO_ROOT_MAX_SECTORS 8
+
+static void cd_check_boot_area(void)
+{
+	drive_t *drv = cd_find_drive();
+	if (!drv) return;
+
+	cd_boot_checked = true;
+
+	uint8_t raw[2352];
+	if (cdrom_read_raw_sector(drv, 16, raw)) {
+		akiko_diag("[akiko] root dir: LBA 16 unreadable; no verdict on this disc");
+		return;
+	}
+
+	const int uoff = akiko_pvd_user_offset(raw);
+	if (uoff < 0) {
+		akiko_diag("[akiko] root dir: LBA 16 is not a volume descriptor; "
+		           "not an ISO9660 disc, no verdict");
+		return;
+	}
+
+	uint32_t root_lba = 0, root_len = 0;
+	if (!akiko_pvd_root_extent(raw + uoff, &root_lba, &root_len)) {
+		akiko_diag("[akiko] root dir: no usable root record in the descriptor");
+		return;
+	}
+
+	uint32_t sectors = root_len / 2048u;
+	if (sectors > AKIKO_ROOT_MAX_SECTORS) sectors = AKIKO_ROOT_MAX_SECTORS;
+
+	// The 2048-byte user areas, concatenated, which is what the walker expects.
+	static uint8_t root[AKIKO_ROOT_MAX_SECTORS * 2048];
+	uint32_t got = 0;
+	for (uint32_t i = 0; i < sectors; i++) {
+		if (cdrom_read_raw_sector(drv, root_lba + i, raw)) break;
+		memcpy(root + (size_t)i * 2048u, raw + uoff, 2048);
+		got++;
+	}
+	if (!got) {
+		akiko_diag("[akiko] root dir: extent at LBA %u unreadable", root_lba);
+		return;
+	}
+
+	// Names, and the one that decides bootability. Logged either way: a verdict
+	// with no evidence behind it is the thing that wasted a day on this bug.
+	char  names[256] = {0};
+	size_t used = 0;
+	int   entries = 0, listed = 0, found_tm = 0, found_cdtv = 0;
+	char  name[64];
+	size_t off = 0;
+	int   is_dir = 0;
+
+	while (akiko_iso_dir_next(root, (size_t)got * 2048u, &off,
+	                          name, sizeof(name), &is_dir)) {
+		entries++;
+		if (!strcasecmp(name, "CD32.TM"))  found_tm = 1;
+		if (!strcasecmp(name, "CDTV.TM"))  found_cdtv = 1;
+
+		if (name[0] == '.') continue;                 // "." and ".."
+		if (used + strlen(name) + 2 < sizeof(names)) {
+			if (used) { names[used++] = ' '; }
+			used += (size_t)snprintf(names + used, sizeof(names) - used,
+			                         "%s%s", name, is_dir ? "/" : "");
+			listed++;
+		}
+	}
+
+	akiko_diag("[akiko] root dir: LBA %u, %u of %u sectors, %d entries, "
+	           "CD32.TM=%d CDTV.TM=%d", root_lba, got, root_len / 2048u,
+	           entries, found_tm, found_cdtv);
+	akiko_diag("[akiko] root dir: %d shown: %s", listed, names);
+
+	// NO VERDICT, deliberately. Two theories of what makes a disc bootable are
+	// dead, both killed by the same control:
+	//
+	//   - boot code in the ISO9660 system area: sectors 0-15 are all zero on
+	//     Chuck Rock, which boots, exactly as on a disc that does not;
+	//   - the CD32.TM trademark file: Chuck Rock has no CD32.TM either. Its
+	//     root is CHUCK, CHUCK.A, CHUCK.B and S/.
+	//
+	// A warning that fires on a title which boots is worse than none, so this
+	// only reports what it found. The next hypothesis is the S/ directory --
+	// Amiga startup-sequence -- which Chuck Rock has and the data CD does not,
+	// and it needs a second bootable title to test rather than another guess.
+	(void)found_tm;
+	(void)found_cdtv;
 }
 
 int akiko_cd32_disc_info(char *label, int labelsz, int *tracks, int *audio)
@@ -2637,6 +2760,17 @@ void akiko_cd32_poll(void)
 	// selected by hand.
 	const bool boot_held = cd_boot_ready_ms && !CheckTimer(cd_boot_ready_ms);
 	const bool mounted = cd32_active() && cd_is_mounted() && !boot_held;
+
+	// The boot-area verdict, once per disc, and deliberately NOT in the mount
+	// path: 16 sectors of I/O while the ROM is allocating is exactly the kind of
+	// thing the CD mount delay exists to keep away from that moment. Three
+	// seconds after the disc is genuinely present the ROM has either started
+	// loading or is stuck, the page cache is warm from the mount-time fadvise,
+	// and 32 KB costs nothing.
+	if (mounted && !cd_boot_checked) {
+		if (!cd_boot_check_ms) cd_boot_check_ms = (uint32_t)GetTimer(3000);
+		else if (CheckTimer(cd_boot_check_ms)) cd_check_boot_area();
+	}
 	const cd_media_level_t level = mounted ? CD_MEDIA_PRESENT : CD_MEDIA_ABSENT;
 
 	if (level != cd_media_level || cd_media_event) {
