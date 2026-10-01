@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <errno.h>
 
 #include "hardware.h"
 #include "osd.h"
@@ -2131,6 +2132,25 @@ static uint32_t ss_cnt[4] = {};
 // wrote, the same as every file before this existed; the core never reads
 // word 0 on restore (ss_ctrl.v, S_L_RELEASE) so the window's value does not
 // matter to it.
+// Rename the finished temp file over the save. A power cut or a reset part way
+// through a save then leaves the previous .ss intact instead of a truncated one
+// where a restore would find it -- the guarantee FileSave() gained upstream in
+// #1331. This path cannot simply call FileSave(): a state is up to ~11.5 MB on an
+// O_SYNC fd, so it is written in chunks with ProgressMessage() between them, and
+// one FileSave() call would freeze the OSD for the whole write.
+static int ss_commit(const char *tmp, const char *name)
+{
+	// getFullPath() hands back its own static buffer, so the source has to be
+	// copied out before the second call overwrites it.
+	char from[1024];
+	snprintf(from, sizeof(from), "%s", getFullPath(tmp));
+
+	if (!rename(from, getFullPath(name))) return 1;
+
+	printf("process_ss: cannot rename %s over %s (%s)\n", from, name, strerror(errno));
+	return 0;
+}
+
 static void ss_rearm(int slot)
 {
 	if (!ss_base_win[slot]) return;
@@ -2388,6 +2408,15 @@ int process_ss(const char *rom_name, int enable)
 					// find a truncated one.
 					*ss_sufx = i + '1';
 
+					// Written beside the save and renamed over it once it is whole.
+					char ss_tmp[sizeof(ss_name) + 4];
+					snprintf(ss_tmp, sizeof(ss_tmp), "%s.tmp", ss_name);
+
+					// What the progress bar is labelled with. f.name held the basename,
+					// and f now opens the temp file, so the name is taken from the save.
+					const char *ss_shown = strrchr(ss_name, '/');
+					if (ss_shown) ss_shown++; else ss_shown = ss_name;
+
 					// A picture of the moment, taken before the write rather
 					// than after it: the machine is a few frames past the
 					// freeze by the time the host notices a save, and every
@@ -2405,7 +2434,7 @@ int process_ss(const char *rom_name, int enable)
 							printf("process_ss: no thumbnail for %s\n", thumb);
 					}
 
-					if (FileOpenEx(&f, ss_name, O_CREAT | O_TRUNC | O_RDWR | O_SYNC))
+					if (FileOpenEx(&f, ss_tmp, O_CREAT | O_TRUNC | O_RDWR | O_SYNC))
 					{
 						// Written in chunks so there is something to watch.
 						//
@@ -2436,12 +2465,12 @@ int process_ss(const char *rom_name, int enable)
 							if (n != (int)chunk) break;
 
 							off += chunk;
-							ProgressMessage("Save state", f.name, off, size);
+							ProgressMessage("Save state", ss_shown, off, size);
 						}
 						ProgressMessage(0, 0, 0, 0);
 						FileClose(&f);
 						printf("Wrote %d bytes to file: %s\n", ret, ss_name);
-						if (ret == (int)size)
+						if (ret == (int)size && ss_commit(ss_tmp, ss_name))
 						{
 							char msg[32];
 							snprintf(msg, sizeof(msg), "Save state %d written", i + 1);
@@ -2449,13 +2478,15 @@ int process_ss(const char *rom_name, int enable)
 						}
 						else
 						{
-							printf("process_ss: short write, %d of %u bytes\n", ret, size);
+							if (ret != (int)size) printf("process_ss: short write, %d of %u bytes\n", ret, size);
+							// Nothing half written is left where a restore could find it.
+							FileDelete(ss_tmp);
 							Info("Save state write FAILED", 3000, 0, 0, 0, 1);
 						}
 					}
 					else
 					{
-						printf("Unable to create file: %s\n", ss_name);
+						printf("Unable to create file: %s\n", ss_tmp);
 						Info("Save state write FAILED", 3000, 0, 0, 0, 1);
 					}
 				}
