@@ -11,11 +11,15 @@ round 1**, and its log was ~10 lines longer than every successful round
 (110, 110, 111 lines). A flash followed by one round reproduced the failure
 first time.
 
-The failing round is not a machine that never starts. It reaches
-`PLAY DATA arm: start_lba=25622` -- the title's own data, deep in the disc, the
-same region a successful round reads -- and then stops. So the loader runs and
-dies, which matches the reported Chuck Rock symptom and rules out "the disc never
-mounted".
+The failing round reaches the BIOS's own first read and then dies on a corrupted
+command frame, which matches the reported Chuck Rock symptom: the loader runs and
+gives up rather than the disc never mounting.
+
+**Correction.** An earlier version of this file argued the failing round "reaches
+`PLAY DATA arm: start_lba=25622` -- the title's own data, deep in the disc". That
+was wrong and the argument built on it is withdrawn: the highest
+`PLAY DATA arm: start_lba=` in a log is 26505 in *every* capture, successes and
+failures alike, because that is the lead-out. It is not evidence of anything.
 
 ## What ends it
 
@@ -47,6 +51,24 @@ correctly elsewhere in the same trace as
 so the guest wrote the same command, and what arrived had its first byte
 `0x84 -> 0x44` and its checksum byte `0x78 -> 0x00`. Bits were lost from a frame
 that was in flight while the host wrote a response into the channel.
+
+## Which fields actually discriminate
+
+Across seven captured rounds, a booted round and a failed round differ like this,
+consistently:
+
+| field | booted | failed |
+|---|---|---|
+| `start_lba=12 ` | 1 | 0 |
+| `start_lba=14 ` | 2 | 1 |
+| log lines | ~110 | 120-400 |
+| `CHECKSUM FAIL` | 1 | 5-8 |
+
+So `start_lba=12` -- `boot-ab.py`'s success criterion -- is sound, and a claim
+elsewhere that it gave a false negative is withdrawn. `CHECKSUM FAIL` discriminates
+with a **baseline of 1**: one per boot is normal and five or more marks the failure,
+so reading it as "any at all is the bug" is wrong in the other direction. A log of
+about 37 lines means nothing mounted -- a void round, not a failure.
 
 ## Why the existing guard does not prevent it
 
@@ -89,6 +111,27 @@ real interlock, and that belongs in the FPGA, not in a flag the host polls.
 - **Not stale host state across a reflash.** Also checked and also wrong:
   `fpga_load_rbf()` ends in `app_restart()`, and the app's PID changes across a
   `load_core` (2569 -> 6716, measured), so every static starts fresh.
+
+## The fix for this, and why it is not the boot fix
+
+`rx_can_start` checked `CDFLAG_RXD`, `receive_length`, the index pair and the
+post-write inhibit -- but not `tx_busy`, while TX refuses to start under RX in two
+separate places. A `hps_result_done` arriving mid-fetch therefore raised `rx_busy`
+under an outstanding TX byte, RX won the DMA address mux and took the ack the fetch
+was waiting for, and the command buffer stored RX's byte at the fetch's index with
+one byte of the frame never read.
+
+`tb_akiko_push_vs_tx` reproduces exactly that -- first byte `0x84 -> 0x78` (the
+displaced byte, carrying another offset's value), last byte `0x78 -> 0x00`, `txinx`
+6 -> 5 -- and the one-line gate closes it: 19 checks, 0 errors, including an
+every-cycle invariant that `tx_busy` and `rx_busy` are never both high. Reverting
+the gate fails the bytes AND the invariant, at a 3-cycle window.
+
+**On hardware it does not fix the first boot.** Fitted at seed 4 and flashed, round
+1 still failed with `start_lba=12`=0 and `CHECKSUM FAIL`=8. So the collision is real
+and worth closing on its own merits, but it is not what dominates here. The change
+is FringeCoder/AmigaCD_MiSTer#37, held rather than merged as a boot fix, with a
+matched-seed interleaved A/B outstanding to say whether it moves the rate at all.
 
 ## Where to look next
 
