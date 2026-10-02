@@ -215,6 +215,13 @@ static uint8_t  cd_initialized      = 0;
 // Sector-request trace budget for the CURRENT data read. Reset at each arm;
 // see the note at its use.
 static uint32_t cd_sec_dbg_n        = 0;
+// Sectors pushed since the current data read was armed, and the stall probe.
+// cdrom_sector_counter increments in the same cycle CDINT_PBX is raised, so
+// comparing the two says whether the guest was handed a completion for a
+// sector that was never shipped.
+static uint32_t cd_sec_pushed       = 0;
+static uint32_t cd_sec_last_ms      = 0;
+static bool     cd_stall_reported   = false;
 static uint32_t cd_boot_ready_ms    = 0;   // 0 = no hold pending
 static uint32_t cd_boot_settle_ms   = 0;
 static uint8_t  cd_paused           = 0;
@@ -1338,6 +1345,9 @@ static void cmd_multi(const uint8_t *cmd)
 			// reset between reads, so LBA=base+counter delivers base+leftover
 			// (wrong sector) — deterministic, matches the read-#3 divergence.
 			cd_sec_dbg_n = 0;   // reopen the trace window for this read
+			cd_sec_pushed     = 0;
+			cd_sec_last_ms    = (uint32_t)GetTimer(0);
+			cd_stall_reported = false;
 			akiko_diag("[akiko] PLAY DATA arm: start_lba=%d (cmd7=0x%02x) fpga_ctr@arm=%u",
 			           (int32_t)s_lba, cmd[7], akiko_read_sec_counter());
 		}
@@ -2435,6 +2445,10 @@ static bool akiko_handle_sec_req(void)
 		           cd_sec_dbg_n, cd_data_lba_base, counter, signed_lba);
 		cd_sec_dbg_n++;
 	}
+
+	cd_sec_pushed++;
+	cd_sec_last_ms    = (uint32_t)GetTimer(0);
+	cd_stall_reported = false;
 	if (signed_lba < 0) {
 		return false;
 	}
@@ -2803,6 +2817,25 @@ void akiko_cd32_poll(void)
 	const bool boot_held = cd_boot_ready_ms && !CheckTimer(cd_boot_ready_ms);
 	const bool mounted = cd32_active() && cd_is_mounted() && !boot_held;
 
+	// A data read that has gone quiet. The BIOS stops asking for sectors when
+	// it is waiting for a completion, and the existing GAP line cannot report
+	// that because it only prints on the next request -- which is exactly what
+	// never arrives. Reported once per stall so a wedged machine does not
+	// flood the log the way the no-armed-read refusal did.
+	if (!cd_stall_reported && cd_data_lba_base != -1 && cd_sec_last_ms
+	    && cd32_active() && cd_is_mounted()) {
+		uint32_t idle = (uint32_t)GetTimer(0) - cd_sec_last_ms;
+		if (idle >= 1500) {
+			cd_stall_reported = true;
+			uint8_t ctr = akiko_read_sec_counter();
+			akiko_diag("[akiko] STALL %u ms: base=%d pushed=%u fpga_ctr=%u%s",
+			           idle, cd_data_lba_base, cd_sec_pushed, ctr,
+			           (ctr > cd_sec_pushed)
+			             ? "  <-- COUNTER AHEAD OF SECTORS PUSHED"
+			             : "");
+		}
+	}
+
 	// The boot-area verdict, once per disc, and deliberately NOT in the mount
 	// path: 16 sectors of I/O while the ROM is allocating is exactly the kind of
 	// thing the CD mount delay exists to keep away from that moment. Three
@@ -2816,7 +2849,19 @@ void akiko_cd32_poll(void)
 	const cd_media_level_t level = mounted ? CD_MEDIA_PRESENT : CD_MEDIA_ABSENT;
 
 	if (level != cd_media_level || cd_media_event) {
+		// A swap is present -> present: a disc replaced while one was in the
+		// drive. That is the case the removal edge exists for, and the only one.
+		//
+		// cd_initialized >= 2 alone is not that test. It is true within a second
+		// or two of the ROM starting, disc or no disc, so a disc put into an
+		// EMPTY drive was announced as removed and then arrived -- the guest told
+		// that a disc it never had had been taken out. No physical drive does
+		// that, and it was the first thing the BIOS heard about the only disc it
+		// had been given.
+		//
+		// cd_media_level is still the PREVIOUS level here; it is assigned below.
 		const bool swap = cd_media_event && (level == CD_MEDIA_PRESENT)
+		                  && (cd_media_level == CD_MEDIA_PRESENT)
 		                  && (cd_initialized >= 2);
 		cd_media_event   = false;
 		cd_data_lba_base = -1;
