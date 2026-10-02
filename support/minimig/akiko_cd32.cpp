@@ -2386,7 +2386,22 @@ static bool akiko_handle_sec_req(void)
 	uint8_t buf[AKIKO_SECTOR_BYTES];
 
 	if (cd_data_lba_base == -1) {
-		akiko_diag("[akiko] sec_req but no data read armed (counter=%u)", counter);
+		// Throttled, and counted. The core holds sec_req up while we decline, so
+		// this fires as fast as the loop runs: 17,049 times in one 90 s round,
+		// which was 17,049 of that log's 17,275 lines. akiko_diag is a
+		// synchronous fopen/fwrite/fclose and this is the sector path, so the
+		// diagnostic cost more than the condition -- and it buried the rest of
+		// the log, in a round that turned out to have BOOTED.
+		//
+		// The running total is the useful part: a handful at a disc change is
+		// normal, tens of thousands is the arbiter and the host disagreeing
+		// about whether a read is armed.
+		static uint32_t noarm = 0;
+		noarm++;
+		if (noarm <= 4 || (noarm & 0xfff) == 0) {
+			akiko_diag("[akiko] sec_req but no data read armed (counter=%u, %u so far)",
+			           counter, noarm);
+		}
 		return false;
 	}
 
