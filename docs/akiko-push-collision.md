@@ -11,19 +11,34 @@
 > successful round.** There is no frame corruption in the failure at all, so a
 > host push cannot be its cause.
 >
-> **The real signature**, from six failing trials with per-round logs: the BIOS
-> issues one read at lba 14, our side then streams 60 sequential sectors
-> (`DBG sec_req#N base=14 counter=N -> lba=14,15,16...`), and the loader never
-> starts. A successful round has **zero** `DBG sec_req` lines and one
-> `start_lba=12`. 60 versus 0 is the cleanest discriminator found so far, and it
-> is where the next investigation should start.
+> **The sector walk was an artifact too, corrected 2026-10-02.** An earlier
+> version of this note offered "60 sequential sectors from lba 14, against zero
+> in a successful round" as the real signature. It is not a signature of
+> anything. `DBG sec_req#` was gated by `static uint32_t dbg_n` capped at 60 for
+> the life of the PROCESS, and `load_core` re-execs the binary -- so the first
+> boot after a flash printed 60 of those lines and every later boot in that
+> process printed none. A working boot reads those sectors too; it had no budget
+> left to say so. The trace is now reset per `PLAY DATA arm`.
+>
+> **With that fixed, a failing first boot and a working later boot are
+> Akiko-identical**: the same six `PLAY DATA arm` bases in the same order (14,
+> 19, 17, 25621, 26505, 25622) and identical counts of INFO (1), TOC rebuilds
+> (4), media-status pushes (3), `CHECKSUM FAIL` (1) and `BAD cmd` (1). The
+> failing round simply stops after the 25622 burst where a working one continues
+> with six more arms from lba 12. The drive is the same object in both, too:
+> `serving: CD32 slot drive, tracks=2 track0_len=26914 chd=yes f=yes`.
+>
+> So nothing Akiko can see distinguishes them, and the one structural difference
+> left is that a working boot is preceded by a reset. That is where the next
+> investigation goes.
 >
 > | | failed first boot | success |
 > |---|---|---|
-> | `DBG sec_req#N base=14` | 60 | 0 |
+> | `PLAY DATA arm` bases | 6, last 25622 | 13, continues from lba 12 |
 > | `start_lba=12` (loader) | 0 | 1 |
 > | `CHECKSUM FAIL` | 1 | 1 |
 > | `PHANTOM` | 0 | 0 |
+> | `DBG sec_req#` | *counter artifact, see above* | |
 >
 > The RTL fix this file pointed to was merged anyway, on its own merits and not
 > as a boot fix (FringeCoder/AmigaCD_MiSTer#37): `rx_can_start` genuinely lacked
