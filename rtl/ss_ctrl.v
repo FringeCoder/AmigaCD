@@ -1197,6 +1197,41 @@ always @(posedge clk) begin
 	end
 end
 
+// DDR3 read acceptance, registered locally. The same move as the read return
+// above, for the other direction of the same boundary.
+//
+// ddr_waitrequest still has to be sampled in the cycle the command is offered
+// -- that is Avalon, and the strobe drop below obeys it. What it must NOT do
+// is gate a state transition, because the state register's next-state logic is
+// four LUT levels deep and `state` is one register bank: a waitrequest term on
+// ANY transition puts the f2sdram cmd_ready pin in the cone of the whole bank.
+// report_timing on the seed 4 netlist of 2026-10-01 showed exactly that, with
+// the worst two setup paths in the design ending at state.S_PEEK_FREEZE and
+// the third at state.S_WAIT -- states that have nothing to do with DDR3,
+// reached through the shared decode of the two that did:
+//
+//     -0.169  f2sdram~FF_3780 -> ss_ctrl|state.S_PEEK_FREEZE
+//     -0.141  f2sdram~FF_3777 -> ss_ctrl|state.S_PEEK_FREEZE
+//     +0.069  f2sdram~FF_3780 -> ss_ctrl|state.S_WAIT
+//
+// So S_FAST_WAIT and S_L_RD_WAIT wait on this flop instead. waitrequest now
+// reaches five flops in this module and no combinational cone worth the name:
+// ddr_read, ddr_write, pending_valid, pending_abs and this one.
+//
+// The cycle it costs is free for the same reason the read return's is: both
+// waiters sit doing nothing until the beat comes back, and the beat is tens of
+// cycles of DDR3 latency away.
+//
+// It cannot fire spuriously on entry to either waiter. ddr_rd_acked is high
+// for exactly the cycle after an accepted read, and both waiters are entered
+// from a state that had ddr_read low, with the previous read's beat -- many
+// cycles of it -- in between.
+reg ddr_rd_acked;
+always @(posedge clk) begin
+	if (!rst_n) ddr_rd_acked <= 1'b0;
+	else        ddr_rd_acked <= ddr_read & ~ddr_waitrequest;
+end
+
 always @(posedge clk) begin
 	if (!rst_n) begin
 		state            <= S_IDLE;
@@ -1294,6 +1329,14 @@ always @(posedge clk) begin
 			crc_shift      <= {8'd0, crc_shift[31:8]};
 			crc_bytes_left <= crc_bytes_left - 3'd1;
 		end
+
+		// DDR3 read handshake. Hoisted out of S_FAST_WAIT / S_L_RD_WAIT so
+		// that neither state mentions ddr_waitrequest any more; the drop
+		// itself stays combinational on it, because Avalon requires the
+		// command to be released in the cycle it is accepted. The two states
+		// that raise ddr_read do so from a cycle in which it was low, and the
+		// case below is written after this, so their assignment wins.
+		if (ddr_read && !ddr_waitrequest) ddr_read <= 1'b0;
 
 		// DDR3 write handshake: hold until the arbiter accepts. Safe as a
 		// single-entry buffer because word_busy gates every producer of
@@ -1998,10 +2041,7 @@ always @(posedge clk) begin
 		end
 
 		S_FAST_WAIT: begin
-			if (!ddr_waitrequest) begin
-				ddr_read <= 1'b0;
-				state    <= S_FAST_DATA;
-			end
+			if (ddr_rd_acked) state <= S_FAST_DATA;
 		end
 
 		S_FAST_DATA: begin
@@ -2087,12 +2127,11 @@ always @(posedge clk) begin
 
 		// Avalon: the request is accepted on the first cycle waitrequest is
 		// low, and the data arrives later on its own readdatavalid beat.
-		// Dropping ddr_read on acceptance is what keeps that to one beat.
+		// Dropping ddr_read on acceptance is what keeps that to one beat; the
+		// drop lives in the hoisted read handshake above, and this waits on
+		// the registered acknowledgement of it.
 		S_L_RD_WAIT: begin
-			if (!ddr_waitrequest) begin
-				ddr_read <= 1'b0;
-				state    <= S_L_RD_DATA;
-			end
+			if (ddr_rd_acked) state <= S_L_RD_DATA;
 		end
 
 		// DELIBERATELY UNBOUNDED, and this is the one place in the module where
