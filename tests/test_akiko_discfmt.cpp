@@ -60,6 +60,48 @@ static void make_pvd(uint8_t *raw, int user_off, const char *ident, int identlen
 	memcpy(u + 40, ident, identlen);
 }
 
+// One ISO9660 directory record at `rec`. Returns its length, so a caller can
+// lay several out back to back the way a real extent does.
+// The id bytes take an explicit length because the two special entries are a
+// single 0x00 or 0x01 byte, and strlen() of those is 0 -- which built a
+// nameless record and failed the first run of these tests.
+static uint8_t make_dirrec_id(uint8_t *rec, const void *id, size_t nlen,
+                              int is_dir, uint32_t lba)
+{
+	uint8_t rlen = (uint8_t)(33 + nlen);
+	if (rlen & 1) rlen++;                 // records are padded to even lengths
+
+	memset(rec, 0, rlen);
+	rec[0] = rlen;
+	rec[2] = (uint8_t)(lba & 0xff);
+	rec[3] = (uint8_t)((lba >> 8) & 0xff);
+	rec[25] = is_dir ? 0x02 : 0x00;
+	rec[32] = (uint8_t)nlen;
+	memcpy(rec + 33, id, nlen);
+	return rlen;
+}
+
+static uint8_t make_dirrec(uint8_t *rec, const char *name, int is_dir, uint32_t lba)
+{
+	return make_dirrec_id(rec, name, strlen(name), is_dir, lba);
+}
+
+// A primary volume descriptor whose root record points at `lba` for `len` bytes.
+static void make_pvd_root(uint8_t *pvd, uint32_t lba, uint32_t len)
+{
+	memset(pvd, 0, 2048);
+	pvd[0] = 1;
+	memcpy(pvd + 1, "CD001", 5);
+	pvd[6] = 1;
+	uint8_t *rec = pvd + 156;
+	rec[0] = 34;
+	rec[2] = (uint8_t)(lba & 0xff);
+	rec[3] = (uint8_t)((lba >> 8) & 0xff);
+	rec[10] = (uint8_t)(len & 0xff);
+	rec[11] = (uint8_t)((len >> 8) & 0xff);
+	rec[12] = (uint8_t)((len >> 16) & 0xff);
+}
+
 int main(void)
 {
 	// ------------------------------------------------------------ MSF -> LBA
@@ -197,6 +239,93 @@ int main(void)
 		char small[5];
 		akiko_pvd_label(raw + 16, small, sizeof(small));
 		eq_str("truncates to the buffer", small, "0123");
+	}
+
+	// ------------------------------------------------- ISO9660 root extent
+	{
+		uint8_t pvd[2048];
+		uint32_t lba = 0, len = 0;
+
+		make_pvd_root(pvd, 23, 2048);
+		eq_int("root extent found", akiko_pvd_root_extent(pvd, &lba, &len), 1);
+		eq_u32("root lba", lba, 23);
+		eq_u32("root len", len, 2048);
+
+		// A zero extent, a zero length, or a length that is not whole sectors is
+		// not a root directory. Reported absent rather than walked, because
+		// walking it reads whatever is at sector 0.
+		make_pvd_root(pvd, 0, 2048);
+		eq_int("zero extent rejected", akiko_pvd_root_extent(pvd, &lba, &len), 0);
+		make_pvd_root(pvd, 23, 0);
+		eq_int("zero length rejected", akiko_pvd_root_extent(pvd, &lba, &len), 0);
+		make_pvd_root(pvd, 23, 1000);
+		eq_int("partial sector rejected", akiko_pvd_root_extent(pvd, &lba, &len), 0);
+
+		// A root record shorter than its own fixed part.
+		make_pvd_root(pvd, 23, 2048);
+		pvd[156] = 20;
+		eq_int("short record rejected", akiko_pvd_root_extent(pvd, &lba, &len), 0);
+	}
+
+	// --------------------------------------------------- ISO9660 dir walk
+	{
+		uint8_t dir[4096];
+		memset(dir, 0, sizeof(dir));
+		size_t w = 0;
+		static const uint8_t self_id = 0x00, parent_id = 0x01;
+		w += make_dirrec_id(dir + w, &self_id,   1, 1, 23);   // "." (self)
+		w += make_dirrec_id(dir + w, &parent_id, 1, 1, 23);   // ".." (parent)
+		w += make_dirrec(dir + w, "CD32.TM;1", 0, 30);
+		w += make_dirrec(dir + w, "DATA", 1, 31);
+
+		char name[64];
+		size_t off = 0;
+		int is_dir = -1;
+
+		eq_int("entry 1 present", akiko_iso_dir_next(dir, sizeof(dir), &off, name, sizeof(name), &is_dir), 1);
+		eq_str("entry 1 is self", name, ".");
+		eq_int("entry 1 is a dir", is_dir, 1);
+
+		eq_int("entry 2 present", akiko_iso_dir_next(dir, sizeof(dir), &off, name, sizeof(name), &is_dir), 1);
+		eq_str("entry 2 is parent", name, "..");
+
+		eq_int("entry 3 present", akiko_iso_dir_next(dir, sizeof(dir), &off, name, sizeof(name), &is_dir), 1);
+		// The version suffix is stripped: a caller looking for CD32.TM must not
+		// have to know whether the master wrote ";1".
+		eq_str("version suffix stripped", name, "CD32.TM");
+		eq_int("entry 3 is a file", is_dir, 0);
+
+		eq_int("entry 4 present", akiko_iso_dir_next(dir, sizeof(dir), &off, name, sizeof(name), &is_dir), 1);
+		eq_str("entry 4 name", name, "DATA");
+		eq_int("entry 4 is a dir", is_dir, 1);
+
+		// A zero record length ends the records in THIS 2048-byte block only.
+		// Treating it as the end of the directory is how every entry past the
+		// first block of a large directory gets missed, so the walk has to cross
+		// the boundary and find what is there.
+		make_dirrec(dir + 2048, "SECOND.BLK;1", 0, 40);
+		eq_int("crosses the block boundary", akiko_iso_dir_next(dir, sizeof(dir), &off, name, sizeof(name), &is_dir), 1);
+		eq_str("entry in the second block", name, "SECOND.BLK");
+
+		eq_int("walk ends", akiko_iso_dir_next(dir, sizeof(dir), &off, name, sizeof(name), &is_dir), 0);
+
+		// A record claiming to run past the buffer stops the walk instead of
+		// reading off the end.
+		uint8_t trunc[64];
+		memset(trunc, 0, sizeof(trunc));
+		make_dirrec(trunc, "TOOLONG.BIN;1", 0, 50);
+		trunc[0] = 200;
+		off = 0;
+		eq_int("overlong record rejected", akiko_iso_dir_next(trunc, sizeof(trunc), &off, name, sizeof(name), &is_dir), 0);
+
+		// A name longer than the output buffer truncates rather than overruns.
+		uint8_t one[128];
+		memset(one, 0, sizeof(one));
+		make_dirrec(one, "ABCDEFGHIJ;1", 0, 60);
+		char small[5];
+		off = 0;
+		eq_int("long name entry present", akiko_iso_dir_next(one, sizeof(one), &off, small, sizeof(small), &is_dir), 1);
+		eq_str("long name truncated", small, "ABCD");
 	}
 
 	if (failures) {

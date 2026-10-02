@@ -48,4 +48,28 @@ int akiko_pvd_user_offset(const uint8_t *raw);
 // other tools show for the same disc.
 void akiko_pvd_label(const uint8_t *pvd, char *out, size_t cap);
 
+// The root directory record inside a primary volume descriptor: its extent
+// LBA and its length in bytes. The record sits at offset 156 and ISO9660 stores
+// both fields little-endian (there is a big-endian copy too; this reads the LE
+// one, which is what every other tool does).
+//
+// Returns 0 and leaves the outputs alone when the record is unusable: a zero
+// extent, a zero length, or a length that is not a whole number of sectors is
+// not a root directory and is better reported as absent than walked.
+int akiko_pvd_root_extent(const uint8_t *pvd, uint32_t *out_lba, uint32_t *out_len);
+
+// Step over the directory records in `buf`, which holds `len` bytes read from a
+// directory extent. `*off` is the cursor and must start at 0.
+//
+// Writes the entry name into `name` with the ISO9660 ";1" version suffix
+// stripped, and sets `*is_dir` from the file-flags directory bit. Returns 1 for
+// an entry, 0 at the end.
+//
+// A zero record length means "no more records in this 2048-byte block" rather
+// than end of directory, so the walk advances to the next block boundary and
+// keeps going. Treating it as the end is the classic way to miss every entry
+// past the first block of a large directory.
+int akiko_iso_dir_next(const uint8_t *buf, size_t len, size_t *off,
+                       char *name, size_t namecap, int *is_dir);
+
 #endif // AKIKO_DISCFMT_H

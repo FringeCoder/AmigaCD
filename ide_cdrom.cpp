@@ -658,6 +658,11 @@ static const char* load_cue_file(drive_t *drv, const char *cuefile)
 			strcpy(track.filename, pathname.c_str());
 			strcat(track.filename, filename.c_str());
 
+			{
+				FILE *_f = fopen("/tmp/akiko_dbg.log", "a");
+				if (_f) { fprintf(_f, "[ide_cdrom] cue: FILE -> %s\n",
+				                  track.filename); fclose(_f); }
+			}
 			printf("cue: got new file name: %s\n", track.filename);
 		}
 		else if (command == "PREGAP") success = get_timecode(currPregap, line);
@@ -676,6 +681,11 @@ static const char* load_cue_file(drive_t *drv, const char *cuefile)
 
 		if (!success)
 		{
+			{
+				FILE *_f = fopen("/tmp/akiko_dbg.log", "a");
+				if (_f) { fprintf(_f, "[ide_cdrom] cue: REJECTED command '%s'\n",
+				                  command.c_str()); fclose(_f); }
+			}
 			return 0;
 		}
 	}
@@ -2208,7 +2218,11 @@ const char* cdrom_parse(uint32_t num, const char *filename)
 		// Caller (ide_open) passes our return value to ide_img_mount, which
 		// expects an absolute path — match the cold-load path's getFullPath
 		// behaviour rather than returning the relative input filename.
-		const char *full = getFullPath(filename);
+		// Copied out for the same reason: the caller keeps this pointer, and
+		// anything that opens a file rewrites the shared buffer underneath it.
+		static char full_buf1[1024];
+		snprintf(full_buf1, sizeof(full_buf1), "%s", getFullPath(filename));
+		const char *full = full_buf1;
 		FILE *_f = fopen("/tmp/akiko_dbg.log", "a");
 		if (_f) { fprintf(_f, "[ide_cdrom] cdrom_parse: idempotent re-mount of %s (full=%s) — keeping CHD open\n", filename, full); fclose(_f); }
 		ide_inst[num].drive[drv].mcr_flag = true;
@@ -2233,10 +2247,29 @@ const char* cdrom_parse(uint32_t num, const char *filename)
 	ide_inst[num].drive[drv].paused = 0;
 	ide_inst[num].drive[drv].play_start_lba = 0;
 	ide_inst[num].drive[drv].play_end_lba = 0;
+	// Our OWN copy of the resolved path, not getFullPath()'s static buffer.
+	//
+	// The loaders below open files, FileOpen() calls make_fullpath(), and that
+	// rewrites the buffer getFullPath() hands back. `path` therefore changed
+	// between the load and its later use: a .cue mount reported
+	// cd=/media/fat/ to akiko_cd32_set_cd_path() and hashed the per-game NVRAM
+	// slot from that. CHDs escaped it because mister_load_chd does not go
+	// through FileOpen.
+	//
+	// static, not automatic: this function RETURNS this pointer and
+	// load_chd_file returns the pointer it is given, so an automatic array
+	// would trade a clobbered path for a dangling one.
+	static char path_buf[1024];
 	const char *path = NULL;
 	if (strlen(filename))
 	{
-		path = getFullPath(filename);
+		snprintf(path_buf, sizeof(path_buf), "%s", getFullPath(filename));
+		path = path_buf;
+		{
+			FILE *_f = fopen("/tmp/akiko_dbg.log", "a");
+			if (_f) { fprintf(_f, "[ide_cdrom] cdrom_parse: path=%s\n", path);
+			          fclose(_f); }
+		}
 		res = load_chd_file(&ide_inst[num].drive[drv], path);
 		if (!res) res = load_cue_file(&ide_inst[num].drive[drv], path);
 		if (!res) res = load_iso_file(&ide_inst[num].drive[drv], path);
@@ -2275,7 +2308,11 @@ const char* cd_drive_parse(drive_t *drv, int slot, const char *filename)
 	                 && drv->chd_f != NULL;
 
 	if (same_path) {
-		const char *full = getFullPath(filename);
+		// Copied out for the same reason: the caller keeps this pointer, and
+		// anything that opens a file rewrites the shared buffer underneath it.
+		static char full_buf2[1024];
+		snprintf(full_buf2, sizeof(full_buf2), "%s", getFullPath(filename));
+		const char *full = full_buf2;
 		drv->mcr_flag = true;
 		drv->playing = 0;
 		drv->paused = 0;
@@ -2298,13 +2335,36 @@ const char* cd_drive_parse(drive_t *drv, int slot, const char *filename)
 	drv->paused = 0;
 	drv->play_start_lba = 0;
 	drv->play_end_lba = 0;
+	// Same hazard as cdrom_parse, same reason for the static buffer.
+	static char path_buf2[1024];
 	const char *path = NULL;
 	if (strlen(filename))
 	{
-		path = getFullPath(filename);
+		snprintf(path_buf2, sizeof(path_buf2), "%s", getFullPath(filename));
+		path = path_buf2;
+		{
+			FILE *_f = fopen("/tmp/akiko_dbg.log", "a");
+			if (_f) { fprintf(_f, "[ide_cdrom] cd_drive_parse: path=%s\n", path);
+			          fclose(_f); }
+		}
 		res = load_chd_file(drv, path);
+		{
+			FILE *_f = fopen("/tmp/akiko_dbg.log", "a");
+			if (_f) { fprintf(_f, "[ide_cdrom] parse: after chd res=%s path=%s\n",
+			                  res ? res : "(null)", path); fclose(_f); }
+		}
 		if (!res) res = load_cue_file(drv, path);
+		{
+			FILE *_f = fopen("/tmp/akiko_dbg.log", "a");
+			if (_f) { fprintf(_f, "[ide_cdrom] parse: after cue res=%s path=%s\n",
+			                  res ? res : "(null)", path); fclose(_f); }
+		}
 		if (!res) res = load_iso_file(drv, path);
+		{
+			FILE *_f = fopen("/tmp/akiko_dbg.log", "a");
+			if (_f) { fprintf(_f, "[ide_cdrom] parse: after iso res=%s path=%s\n",
+			                  res ? res : "(null)", path); fclose(_f); }
+		}
 	}
 
 	if (filename && filename[0] && res) {
