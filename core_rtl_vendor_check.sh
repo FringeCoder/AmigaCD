@@ -92,7 +92,16 @@ if [ "$STAMP" = 1 ]; then
 	tmp=$(mktemp)
 	while read -r path _sha _commit; do
 		[ -f "$CANON/$path" ] || { echo "error: $CANON/$path not found" >&2; rm -f "$tmp"; exit 1; }
-		cp "$CANON/$path" "$path"
+		# Strip CR on the way in, rather than a plain cp.
+		#
+		# .gitattributes here pins *.v / *.sv / *.vh to eol=lf, so every checkout
+		# of THIS repo -- Windows, Linux, CI -- holds these files with LF, and the
+		# hashes below have to be LF hashes or the verify mode can never match.
+		# The core pins only *.sh, so a Windows checkout of it hands us CRLF.
+		# A plain cp therefore recorded CRLF hashes that CI could not reproduce,
+		# and the failure arrives as "the copy here was edited", which is the one
+		# thing it was not. Found on 2026-10-02 re-vendoring ss_ctrl.v.
+		tr -d '\r' < "$CANON/$path" > "$path"
 		sha=$(sha256sum "$path" | cut -d' ' -f1)
 		# The commit that last touched THE FILE, not the checkout's HEAD: HEAD is
 		# usually a commit that did not touch this module at all, and the question
