@@ -627,6 +627,24 @@ static void cd_check_boot_area(void)
 
 	cd_boot_checked = true;
 
+	// WHICH drive is being served, and what it thinks the disc is.
+	//
+	// There are two candidates and cd_find_drive() prefers the CD32 slot:
+	// ApplyConfiguration fills that slot on a reset, while the OSD's CD row
+	// calls ide_open() and fills an ide_inst drive. They can therefore hold
+	// DIFFERENT discs, opened at different times -- and the first boot after a
+	// flash is served by the slot while a boot after a reset-and-pick is served
+	// by the IDE drive. Worth printing, because a disc identity that disagrees
+	// with the OSD row is otherwise invisible.
+	{
+		drive_t *slot = minimig_cd_drive_get(0);
+		const char *which = (drv == slot) ? "CD32 slot" : "IDE";
+		uint32_t len0 = (drv->track_cnt > 0) ? drv->track[0].length : 0;
+		akiko_diag("[akiko] serving: %s drive, tracks=%u track0_len=%u chd=%s f=%s",
+		           which, drv->track_cnt, len0,
+		           drv->chd_f ? "yes" : "no", drv->f ? "yes" : "no");
+	}
+
 	uint8_t raw[2352];
 	if (cdrom_read_raw_sector(drv, 16, raw)) {
 		akiko_diag("[akiko] root dir: LBA 16 unreadable; no verdict on this disc");

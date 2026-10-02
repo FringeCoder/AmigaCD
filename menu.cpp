@@ -9461,6 +9461,19 @@ void HandleUI(void)
 		}
 		minimig_config.hardfile[0].cfg = 2;
 		ide_open(0, minimig_config.hardfile[0].filename);
+		// And the CD32 slot, which is the drive akiko actually reads.
+		//
+		// cd_find_drive() prefers minimig_cd_drive_get(0) over the IDE drives,
+		// and ApplyConfiguration fills that slot from this same hardfile[0]
+		// entry -- but only on a reset. Without this line the row text and the
+		// per-game save slot changed while the Amiga kept reading the previous
+		// disc: picking Simon the Sorcerer II with Chuck Rock loaded showed
+		// "CD : simon2-lf.cue" above "CHUCKROCK 1 trk no CDDA" and served Chuck
+		// Rock's TOC and root directory for it.
+		//
+		// Same shape as the asymmetry that keeps biting here: applied on the
+		// interactive path and not the load path, or the reverse.
+		minimig_cd_drive_open(0, minimig_config.hardfile[0].filename);
 		menusub = 0;
 		menustate = MENU_AMIGACD_MAIN1;
 		if (!mgl->done)
