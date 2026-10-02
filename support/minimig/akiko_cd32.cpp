@@ -212,6 +212,9 @@ static const int *const command_lengths = akiko_command_lengths;
 //   1 = we sent the {0x0a, present} media-status response.
 //   2 = host sent INFO (0x07); fully initialised.
 static uint8_t  cd_initialized      = 0;
+// Sector-request trace budget for the CURRENT data read. Reset at each arm;
+// see the note at its use.
+static uint32_t cd_sec_dbg_n        = 0;
 static uint32_t cd_boot_ready_ms    = 0;   // 0 = no hold pending
 static uint32_t cd_boot_settle_ms   = 0;
 static uint8_t  cd_paused           = 0;
@@ -1316,6 +1319,7 @@ static void cmd_multi(const uint8_t *cmd)
 			// READ DATA without re-pulsing CDFLAG_ENABLE, the counter is NOT
 			// reset between reads, so LBA=base+counter delivers base+leftover
 			// (wrong sector) — deterministic, matches the read-#3 divergence.
+			cd_sec_dbg_n = 0;   // reopen the trace window for this read
 			akiko_diag("[akiko] PLAY DATA arm: start_lba=%d (cmd7=0x%02x) fpga_ctr@arm=%u",
 			           (int32_t)s_lba, cmd[7], akiko_read_sec_counter());
 		}
@@ -2385,13 +2389,18 @@ static bool akiko_handle_sec_req(void)
 	// 2026-06-05 Deep Core counter-drift diagnostic: trace the first sec_reqs
 	// so we can see whether `counter` resets to 0 per READ DATA arm or keeps
 	// climbing across arms (=> base+counter delivers the wrong sector).
-	{
-		static uint32_t dbg_n = 0;
-		if (dbg_n < 60) {
-			akiko_diag("[akiko] DBG sec_req#%u base=%d counter=%u -> lba=%d",
-			           dbg_n, cd_data_lba_base, counter, signed_lba);
-			dbg_n++;
-		}
+	// Per ARM, not per process. This counter used to be a plain static capped
+	// at 60 for the life of the binary, and load_core re-execs the binary -- so
+	// the first boot after a flash printed 60 of these lines and every later
+	// boot in the same process printed none. That difference reads exactly like
+	// a failure signature and is nothing but the counter.
+	//
+	// cd_sec_dbg_n is reset where cd_data_lba_base is armed, so a failing boot
+	// and a working one produce comparable traces.
+	if (cd_sec_dbg_n < 24) {
+		akiko_diag("[akiko] sec_req#%u base=%d counter=%u -> lba=%d",
+		           cd_sec_dbg_n, cd_data_lba_base, counter, signed_lba);
+		cd_sec_dbg_n++;
 	}
 	if (signed_lba < 0) {
 		return false;
