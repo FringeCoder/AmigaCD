@@ -2756,8 +2756,34 @@ void akiko_cd32_set_cd_path(const char *path)
 
 // Milliseconds to hold the first media announcement, from the user's setting on
 // the Advanced page. 0 means no hold, which restores the immediate announce.
+//
+// /tmp/akiko_boot_delay overrides it, in milliseconds. Two documents and the
+// comment on the setting itself have promised this override since the hold was
+// introduced, and it was implemented in none of them -- so the one escape hatch
+// offered to anyone hitting either failure did nothing, silently. It is also the
+// only way to reproduce the 8 s failure on demand now that the default is 14:
+// the alternative is rewriting a config file on the card between rounds, which
+// is what this investigation spent a day doing.
+//
+// Milliseconds and not seconds, because that is what the documents promised and
+// because the interesting region is a few seconds wide. Bounded at 60 s: a typo
+// of 140000 should not look like a hang.
 static uint32_t akiko_boot_settle_ms(void)
 {
+	FILE *f = fopen("/tmp/akiko_boot_delay", "r");
+	if (f) {
+		unsigned long ms = 0;
+		int got = fscanf(f, "%lu", &ms);
+		fclose(f);
+		if (got == 1 && ms <= 60000) {
+			akiko_diag("[akiko] boot settle: /tmp/akiko_boot_delay overrides "
+			           "the setting (%lu ms)", ms);
+			return (uint32_t)ms;
+		}
+		akiko_diag("[akiko] boot settle: /tmp/akiko_boot_delay ignored "
+		           "(unreadable, or over 60000 ms)");
+	}
+
 	unsigned d = minimig_config.cd_mount_delay;
 	if (d > AMIGACD_CD_DELAY_MAX) d = AMIGACD_CD_DELAY_DEFAULT;   // corrupt config
 	return (uint32_t)d * 1000u;
