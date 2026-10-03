@@ -1329,6 +1329,28 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		// OSD offers no row for it. Re-assert it from the system the config
 		// itself names, leaving FastRAM and HRTmon untouched. SlowRAM is
 		// part of the profile for an A500 and the user's elsewhere.
+		// The announce hold, for the same reason in the same shape. Raising
+		// AMIGACD_CD_DELAY_DEFAULT only reaches a card with NO config: every
+		// machine that has booted this core once carries a stored 8, which is
+		// the value measured on 2026-10-03 to lose the boot read -- 1 of 8
+		// against 11 of 11 at 12 s and above. Leaving it stored would ship the
+		// fix to nobody, which is the third time this asymmetry has bitten:
+		// chip RAM and the floppy count below are the other two.
+		//
+		// This DOES overwrite a deliberate 8. There is nothing in the file to
+		// tell a user who chose 8 from a user who was given it, and shipping
+		// the known-bad value to everyone is worse than overriding the handful
+		// who picked it on purpose -- who can set 0..15 again, and for whom
+		// /tmp/akiko_boot_delay overrides without a rebuild. Any OTHER stored
+		// value is the user's and is left alone.
+		if (minimig_config.cd_mount_delay == AMIGACD_CD_DELAY_LEGACY)
+		{
+			printf("AmigaCD: raising the CD announce hold %us -> %us "
+			       "(8s loses the boot read; see minimig_config.h)\n",
+			       AMIGACD_CD_DELAY_LEGACY, AMIGACD_CD_DELAY_DEFAULT);
+			minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
+		}
+
 		int sys = amigacd_system();
 		uint8_t fixed = amigacd_profile_memory(minimig_config.memory, sys);
 		if (fixed != minimig_config.memory)
