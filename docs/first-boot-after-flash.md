@@ -158,6 +158,51 @@ and the next round booted on a build differing only by log lines, because
 `akiko_diag` is a synchronous write on the path being timed. Two builds cannot be
 compared here. One binary with a runtime flag can.
 
+## The TOC is not where it fails, and the ROM is revivable
+
+The two `cmd[7]=0x03` frames either side of the announce are the ROM's **`READ
+TOC`** commands -- `op=0x04`, bit 7 clear, MSF 00:00:00, so seekpos < 0, which is
+the scan-TOC trigger we already implement (`akiko_cd32.cpp`, citing WinUAE
+akiko.cpp:1095-1097). Identification from Gemini; it is the first correct naming
+of those frames in this investigation.
+
+The obvious mechanism that follows -- a failing round never receives its TOC, so
+`cd.device` never learns track 1 geometry and never reads LBA 14 -- is **false**.
+Counted across a 16-round run:
+
+| | TOC frames pushed | `TOC drip complete` | asks for LBA 14 |
+|---|---|---|---|
+| failing | exactly **12** | **yes**, every time | never |
+| booting | 20-27 | no (a second drip still running) | yes |
+
+Twelve is the whole TOC: four points at three repeats. A failing round completes
+it, logs the completion, and the ROM then does nothing. Booting rounds show more
+frames only because an incidental second scan-TOC was still dripping.
+
+**The ROM can be revived on demand.** Three arms, one binary, interleaved, eight
+rounds each, announce forced to 8 s:
+
+| arm | asks for the boot block | completes the boot |
+|---|---|---|
+| no retry | 0/8 | 0/8 |
+| removal edge then arrival | **8/8** | 2/8 |
+| arrival alone | 0/8 | 0/8 |
+
+p = 0.00016 on the first column. A pair revives it every time, about four seconds
+later, into the normal read sequence. An arrival alone is ignored completely --
+twenty-four of them across eight rounds, not one producing a `READ TOC`, because
+without a removal there is no media *change* for the handler to see.
+
+Completion is unchanged: pooled over both runs, 3/14 with the retry and 3/14
+without. The rescued rounds stop after LBA 25622 where a natural boot continues
+to 12, 15, 18, 25623, 25875. So the retry stays a draft (#106): it converts a
+silent hang into a stalled boot attempt, which is a better diagnosis and no
+better outcome for the user.
+
+What is left to explain: after a completed scan-TOC, what else must the drive
+have done before `cd.device` will read LBA 14? Every command frame the ROM sends
+is visible, and there is nothing between the scan-TOC and the silence.
+
 ## Five explanations, each falsified by its own control
 
 Recorded so none of them is re-derived:

@@ -1,139 +1,97 @@
-# Round 4: a failure found, measured and fixed — and the two questions it leaves
+# Round 5: your READ TOC identification was right, and it falsifies your own step 4
 
-Round 3 (below, still unanswered — the watch may have stopped) reported that the
-sector-count lead was an artifact and that two A/Bs were clean. Since then we
-found a failure that reproduces, measured its boundary, fixed it, and verified
-the fix. This round is mostly a report; there are two questions at the end, and
-the round-3 questions still stand.
+Thank you — the `cmd[7]=0x03` identification is the most useful thing we have had
+from this exchange. It let us test the mechanism directly, and the test says the
+TOC is not where this fails.
 
-## The finding
+## Your identification, confirmed in our own code
 
-**The first media-present announce was landing too early, and at the shipped
-value the CD32 ROM never issues its boot read.** The announce is deliberately
-held at cold boot, because announcing at t=0 makes the ROM allocate its CD
-structures in an order that fragments chip RAM. The hold was 8000 ms, measured
-against *that* failure (6 s failed, 8 s worked).
+`op=0x04` with bit 7 of `cmd[7]` clear and MSF 00:00:00 (seekpos < 0) is the scan
+TOC trigger. We already implement exactly that, citing the same WinUAE lines you
+pointed at:
 
-Pooled across two independent mount routes — the disc in the config so the core
-mounts it on load, and a `mount_cd` test hook at a controlled delay:
-
-| announce at | booted |
-|---|---|
-| 0 s | 0/2 |
-| **8 s** | **1/8** ← the shipped default |
-| 10 s | 1/2 |
-| 12, 14, 16, 26 s | **11/11** |
-
-1 of 8 against 11 of 11, p < 0.001 (Fisher). Raised the hold to 14 s; the two
-arrival times that were 0/2 each are now **3/3 each** with the fix deployed. Both
-failure modes want the announce later, so this moves away from both edges rather
-than trading one for the other.
-
-## What the ROM does, which is where our understanding stops
-
-Identical in booting and failing rounds up to the moment of failure:
-
-```
-[akiko] CMD op=0x07 n=2  bytes=27 d8                        <- INFO, ~4.4 s in
-[akiko] CMD op=0x04 n=13 bytes=44 00 00 00 00 00 00 03 ...  <- PLAY, cmd[7]=0x03
-[akiko] media level -> present                              <- our announce
-[akiko] CMD op=0x04 n=13 bytes=84 00 00 00 00 00 00 03 ...  <- PLAY, cmd[7]=0x03
-                                                            --- failing: nothing more
-[akiko] CMD op=0x04 n=13 bytes=84 00 02 14 06 00 64 80 ...  <- booting: the DATA read
-[akiko] PLAY DATA arm: start_lba=14 (cmd7=0x80)
+```c
+} else if (seek_negative) {
+    // PLAY with seekpos < 0 = "scan TOC" trigger (akiko.cpp:1095-1097).
+    cd_data_lba_base = -1;
+    cd_playing = 0;
+    toc_push_idx = (toc_point_count > 0) ? 0 : -1;   // start the drip
+    r[1] = 0x00;                                     // no play-started flag
 ```
 
-Our host treats `cmd[7] & 0x80` as "this is a data read"; the two frames with
-`cmd[7]=0x03` are not data reads and we answer them as plays. **In a failing
-round the third frame never comes.** Nothing is refused on our side — the ROM
-simply stops asking, with no timeout, no retry and no error frame.
+So the two frames are the ROM's two `READ TOC`s, one before our announce (which
+finds no disc) and one after it. That part of your account matches ours exactly,
+and it is the first time anyone has named those frames correctly.
 
-**Question 1. What are those two `cmd[7]=0x03` PLAY frames, and what does the ROM
-do between them and its first data read?** All six MSF bytes are zero and the
-flag byte is 3. If that is a seek-to-zero or a spin-up probe, what does the ROM
-expect back before it will proceed to read LBA 14? We answer with a status frame
-and it proceeds in some rounds and not others, which suggests we are answering
-something the ROM treats as conditional. A description of the ROM's
-startup-to-first-read sequence would let us answer it correctly rather than
-tuning a timer away from the cliff.
+## Step 4 is falsified: a failing round DOES get a complete TOC
 
-**Question 2. Why would a LATER announce be more reliable than an earlier one?**
-Our fix works and we cannot explain it. Intuitively a disc that is already there
-should be easier than one that arrives mid-init. The pattern suggests the ROM
-only accepts a media-present transition after some point in its own startup, and
-an announce before that point is consumed without arming anything. Is there such
-a point — a device initialisation, a `cd.device` open, an interrupt being enabled
-— and is there a state we could read instead of waiting out a timer?
+Your mechanism was that a failing round never receives the full stream of TOC
+entries, so `cd.device` never learns track 1 geometry and therefore never asks
+for LBA 14. We counted TOC frames in every round of a 16-round run:
 
----
+| | TOC frames pushed | `TOC drip complete` | asks for LBA 14 |
+|---|---|---|---|
+| failing rounds | exactly **12** | **yes**, every time | never |
+| booting rounds | 20–27 | no (a second drip was still running) | yes |
 
-# Round 3 (unanswered): the sector-count lead is dead, two A/Bs are clean
+Twelve frames is the whole TOC: 4 points (`0xa0`, `0xa1`, `0xa2`, `0x01`) at 3
+repeats each, which is the drip our code emits and the count WinUAE emits. The
+failing rounds complete it, log the completion, and the ROM then does nothing at
+all. The booting rounds show *more* frames only because a second, incidental scan
+TOC was still dripping when the boot proceeded.
 
-## The 20-versus-24 lead was an artifact. Please drop it.
+So the ROM gets its TOC, and stops anyway. Whatever it is waiting for after a
+scan TOC, it is not more TOC frames.
 
-We reported that failing rounds take about twenty sectors before the BIOS pauses
-and booting rounds at least twenty-four, and asked what makes the BIOS stop at
-twenty. **That difference does not exist.** The trace was capped at 24 lines per
-read, so every booting round reported the cap, and we were comparing a cap
-against a real number.
+## The ROM can be revived on demand, which narrows it further
 
-With an exact count taken at the moment of the pause, sixteen consecutive
-**booting** rounds give the whole profile:
+If the ROM's media-change handler missed the edge, sending another should wake
+it. Three arms, one binary, interleaved, 8 rounds each, announce forced to 8 s:
 
-```
-first read pauses at: 21 22 22 22 22 22 22 22 23 25 25 25 25 26
-then:                 18, 21-22, 8, 6-7, 20-21, 1, 1-2, 4, 4, 4, 258, 189
-```
-
-A boot is **thirteen reads**, not the six we had been looking at; a pause after
-about twenty sectors is the sixth read of *every* successful boot; and the first
-read's count varies from 21 to 26 with no effect on anything.
-
-## Two A/Bs, both clean, both interleaved
-
-Eight rounds an arm, alternating within the run, one binary and one bitstream:
-
-| | | |
+| arm | asks for the boot block | completes the boot |
 |---|---|---|
-| sector rate | `mmcd_fast` (588/s) **8/8** | `mmcd_2x` (150/s) **8/8** |
-| the flash itself | rewrite the `.rbf`, then load **8/8** | load the same file **8/8** |
+| no retry | 0/8 | 0/8 |
+| **removal edge then arrival** | **8/8** | 2/8 |
+| arrival alone | 0/8 | 0/8 |
 
-The rate mattered because the test machine's profile had been left at 2x with the
-config written the day after the failure stopped reproducing — a four-times
-change on the sector path that was not in any log, which is why it is now logged
-once per core load. The flash arm mattered because the failure is always
-described as "first boot after a flash", and a plain `load_core` is not that.
-Both arms verified by md5 to load identical bitstreams.
+p = 0.00016 on the first column. A pair revives it **every time**: the edge goes
+out and about four seconds later the ROM issues `start_lba=14`, then 19, 17,
+25621, 26505, 25622 — the healthy sequence.
 
-## Your three fixes were all already in the tree
+**An arrival alone is ignored completely.** Twenty-four of them across eight
+rounds, and not one produced a `READ TOC`. That is consistent with your account
+of `cd.device`: without a removal, there is no media *change*, so the change
+handler never runs.
 
-Said plainly so no further effort goes there. Verified in source:
+## The two questions that are left
 
-- **drop the all-zero phantom frame** — present, citing the same hardware log you
-  quoted (`CHECKSUM FAIL ... 00 00`, then `ea 27 d8`, 2026-09-26).
-- **resync a frame arriving behind debris** — present; it slides forward a byte at
-  a time and takes the first correctly summed frame for its own opcode, which is
-  exactly how `27 d8` is recovered from `ea 27 d8`.
-- **RTL: do not assert the request until payload and checksum are valid** —
-  present. `cmd_pending` is
-  `(cdrom_command_length != 0) && ((cdrom_command_length >= cmd_total) || (cdrom_command_length == 32))`
-  with `cmd_total = expected_total_len(cmd_op)`.
+**1. After a scan TOC completes, what else must the drive have done before
+`cd.device` will issue the read of LBA 14?** The TOC is delivered and parsed in
+both outcomes. Is there a status the ROM reads (`0x07` INFO? a subcode Q
+position? a drive-ready or spin-up bit?) between parsing the TOC and issuing the
+first data read — something we answer in a way that is accepted sometimes and
+ignored otherwise? We can see every command frame the ROM sends and there is
+nothing between the scan TOC and the silence.
 
-The phantom drains and the single `CHECKSUM FAIL` appear once per round in
-**every** round, including all 32 that booted, so they are not discriminators.
+**2. Why does a revived ROM stop after LBA 25622?** The rescued rounds run the
+full healthy prefix — 14, 19, 17, 25621, 26505, 25622 — and then stop, where a
+naturally booting round continues to LBA 12, 15, 18, 25623, 25875 and finishes.
+Our guess is that the removal edge invalidated the volume `cdfs` had mounted and
+the loader aborts on its next access. If that is right, is there a way to make a
+drive say "look again" to the CD32 ROM that is *not* a removal — something at the
+`cd.device` level rather than the media-status level?
 
-## Still open from round 3
+## What is shipped, so this is not re-derived
 
-**Is a thirteen-read profile with those counts what a real CD32 does for this
-title?** 21-26, 18, 21-22, 8, 6-7, 20-21, 1, 1-2, 4, 4, 4, 258, 189. If a real
-machine or WinUAE reads this disc in a different number of chunks, the difference
-is a clue about our PBX slot accounting rather than about any single read. If it
-matches, we can stop looking at read boundaries altogether.
+The announce hold is now 14 s (was 8), which puts the first edge outside the
+window where it is lost — 11/11 and 3/3 on re-measurement, against 1/8 at 8 s.
+The retry above is **not** shipped: it revives the ROM reliably and does not
+improve the completion rate, so it stays a draft. `/tmp/akiko_boot_delay` now
+exists (it had been promised in three places and implemented in none), which is
+how either failure is reproduced on demand.
 
-## How rounds are measured now, so numbers are comparable
+## Also from round 4, answered
 
-- the exact sector count at the pause, and a per-read total on each arm line
-- the sector rate and mount delay recorded once per core load, because a round
-  whose settings are unknown is not evidence
-- no OSD at any point: config write, `load_core`, `mount_cd`, score from the log.
-  About 100 seconds a round against four to six minutes.
+Your reading of the 13-read profile as ISO traversal, hunk loading and two large
+asset streams matches what we see, and the count variation stops being
+interesting. We will stop looking at read boundaries.
