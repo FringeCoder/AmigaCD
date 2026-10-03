@@ -3124,35 +3124,60 @@ void akiko_cd32_poll(void)
 		}
 	}
 
-	// /tmp/akiko_reannounce_off disables the retry for one core load.
+	// /tmp/akiko_reannounce_mode picks the arm for one core load:
+	//   off      -- no retry at all
+	//   pair     -- removal edge then arrival, what a user does with the tray
+	//   arrival  -- the arrival alone, no removal
 	//
-	// Not a user setting -- an A/B switch, and the only honest way to measure
-	// this. At a short hold the boot is marginal enough that the INSTRUMENT
-	// moves it: eight rounds failed on one build and the next round booted on a
-	// build differing only by log lines, because akiko_diag is a synchronous
-	// write on the path being timed. Comparing two builds therefore compares
-	// their logging as much as their behaviour. One binary, one arm on and one
-	// arm off, interleaved, is the comparison that means something.
-	static int reann_off = -1;
-	if (reann_off < 0) {
-		FILE *rf = fopen("/tmp/akiko_reannounce_off", "r");
-		reann_off = rf ? (fclose(rf), 1) : 0;
-		if (reann_off) akiko_diag("[akiko] re-announce DISABLED by "
-		                          "/tmp/akiko_reannounce_off");
+	// The third arm exists because `pair` revives a dead ROM every time and the
+	// rescued rounds then stop after LBA 25622 without finishing the load. The
+	// suspicion is the removal half: AmigaOS is told the disc went away, and
+	// whatever it had mounted is invalidated under the loader. An arrival on its
+	// own is not a media CHANGE and may well be ignored -- that is the question.
+	//
+	// Runtime and not a build flag, because at a short hold the INSTRUMENT moves
+	// the result: eight rounds failed on one build and the next round booted on a
+	// build differing only by log lines, since akiko_diag is a synchronous write
+	// on the path being timed. One binary with a flag is the only honest A/B.
+	// /tmp/akiko_reannounce_off is still read, as "off", so an older script that
+	// sets it is not silently measuring the wrong arm.
+	enum { REANN_OFF = 0, REANN_PAIR = 1, REANN_ARRIVAL = 2 };
+	static int reann_mode = -1;
+	if (reann_mode < 0) {
+		reann_mode = REANN_PAIR;
+		FILE *mf = fopen("/tmp/akiko_reannounce_mode", "r");
+		if (mf) {
+			char w[16] = {0};
+			if (fscanf(mf, "%15s", w) == 1) {
+				if (!strcmp(w, "off"))          reann_mode = REANN_OFF;
+				else if (!strcmp(w, "arrival")) reann_mode = REANN_ARRIVAL;
+				else if (!strcmp(w, "pair"))    reann_mode = REANN_PAIR;
+			}
+			fclose(mf);
+		} else {
+			FILE *of = fopen("/tmp/akiko_reannounce_off", "r");
+			if (of) { fclose(of); reann_mode = REANN_OFF; }
+		}
+		akiko_diag("[akiko] re-announce mode: %s",
+		           reann_mode == REANN_OFF ? "off" :
+		           reann_mode == REANN_ARRIVAL ? "arrival" : "pair");
 	}
 
-	if (!reann_off && cd_reannounce_due_ms && !cd_data_armed_ever
+	if (reann_mode != REANN_OFF && cd_reannounce_due_ms && !cd_data_armed_ever
 	    && cd_media_present()
 	    && cd_cdda_lba_next < 0 && cd_initialized >= 2 && rx_idle
 	    && CheckTimer(cd_reannounce_due_ms)) {
 		if (cd_reannounce_count < AKIKO_REANNOUNCE_MAX) {
 			cd_reannounce_count++;
-			cd_media_swap_absent  = true;
+			// The removal half only in `pair`. In `arrival` the guest is
+			// simply told again that a disc is there.
+			if (reann_mode == REANN_PAIR) cd_media_swap_absent = true;
 			cd_media_push_pending = true;
 			cd_reannounce_due_ms  = (uint32_t)GetTimer(AKIKO_REANNOUNCE_MS);
-			akiko_diag("[akiko] re-announce %u/%u: disc present for %u ms and no "
+			akiko_diag("[akiko] re-announce %u/%u (%s): disc present for %u ms and no "
 			           "data read armed, sending the edge again",
 			           cd_reannounce_count, AKIKO_REANNOUNCE_MAX,
+			           reann_mode == REANN_ARRIVAL ? "arrival" : "pair",
 			           AKIKO_REANNOUNCE_MS);
 		} else {
 			// Out of attempts. A disc with nothing to boot is normal, so this
