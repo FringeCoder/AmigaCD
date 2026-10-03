@@ -164,8 +164,34 @@ typedef struct
 } mm_configTYPE;
 
 // Seconds. Kept here because the menu, the config loader and akiko all need it.
-#define AMIGACD_CD_DELAY_DEFAULT 8
+//
+// 14, raised from 8 on 2026-10-03. 8 was measured against a DIFFERENT failure
+// -- Flink's 1774.8 KB contiguous allocation, where announcing at t=0
+// fragments chip RAM (docs/chip-ram-shortfall.md). 6000 ms failed and 8000
+// worked, so 8 was the bottom of that window with about two seconds of margin,
+// and that file already said to raise it if trouble appeared.
+//
+// Trouble appeared. Chuck Rock does not boot reliably when the announce lands
+// at 8 s, across two independent mount routes:
+//
+//   announce at  0 s   0/2      disc in the config, delay 0
+//   announce at  8 s   1/8      disc in the config, and mount_cd at 3 s and 8 s
+//   announce at 10 s   1/2
+//   announce at 12 s+  11/11    12, 14, 16, 26 s, and the config route at 14
+//
+// The ROM issues INFO and two non-data PLAY frames (cmd[7]=0x03) either way;
+// in a failing round the data read (cmd[7]&0x80) simply never follows, and the
+// ROM stops asking. 1 of 8 against 11 of 11 is p < 0.001 by Fisher.
+//
+// The two failures pull the same way -- too early fragments chip RAM, too early
+// also loses the boot read -- so this moves away from both edges rather than
+// trading one for the other. Overridable without a rebuild: milliseconds into
+// /tmp/akiko_boot_delay, then reload the core.
+#define AMIGACD_CD_DELAY_DEFAULT 14
 #define AMIGACD_CD_DELAY_MAX     15
+// The old default, which existing configs on every card still carry. See the
+// migration in minimig_cfg_load.
+#define AMIGACD_CD_DELAY_LEGACY  8
 // CD sector delivery rate.
 //
 // mmcd_fast is the floor the core has always shipped with (see
