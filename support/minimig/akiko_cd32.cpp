@@ -3091,6 +3091,81 @@ void akiko_cd32_poll(void)
 #endif
 	const bool rx_idle = !(status & AKIKO_STATUS_RX_BUSY);
 
+	// Checked HERE, at the top, and not further down with the other media work.
+	//
+	// Down there it never ran. The branches above it -- command drain, status
+	// handling, the media pushes -- each return when they act, and the ROM polls
+	// this core continuously while it sits on its animation, so the one place
+	// that needed to notice "nobody has asked for the disc" was starved by the
+	// traffic proving nobody had asked. The log showed the timer expiring and
+	// three and a half seconds passing with the branch never reached.
+
+	// Why it did not fire, when it did not fire.
+	//
+	// Two builds have now been spent guessing at that from the outside: the
+	// first sent zero re-announces because the clock was armed on a branch that
+	// never runs at a 0 ms hold, the second still sent zero and the log could
+	// not say which of six conditions was false. A diagnostic that names the
+	// blocker costs one line and settles it in one round.
+	{
+		static uint32_t last_why_ms = 0;
+		static uint8_t  why_count = 0;
+		if (!cd_data_armed_ever && why_count < 20
+		    && (!last_why_ms || CheckTimer(last_why_ms))) {
+			last_why_ms = (uint32_t)GetTimer(2000);
+			why_count++;
+			akiko_diag("[akiko] re-announce idle: due=%u present=%d cdda=%d "
+			           "init=%u rx_idle=%d playing=%u expired=%d",
+			           cd_reannounce_due_ms, (int)cd_media_present(),
+			           (int)cd_cdda_lba_next, cd_initialized, (int)rx_idle,
+			           cd_playing,
+			           cd_reannounce_due_ms
+			             ? (int)CheckTimer(cd_reannounce_due_ms) : -1);
+		}
+	}
+
+	// /tmp/akiko_reannounce_off disables the retry for one core load.
+	//
+	// Not a user setting -- an A/B switch, and the only honest way to measure
+	// this. At a short hold the boot is marginal enough that the INSTRUMENT
+	// moves it: eight rounds failed on one build and the next round booted on a
+	// build differing only by log lines, because akiko_diag is a synchronous
+	// write on the path being timed. Comparing two builds therefore compares
+	// their logging as much as their behaviour. One binary, one arm on and one
+	// arm off, interleaved, is the comparison that means something.
+	static int reann_off = -1;
+	if (reann_off < 0) {
+		FILE *rf = fopen("/tmp/akiko_reannounce_off", "r");
+		reann_off = rf ? (fclose(rf), 1) : 0;
+		if (reann_off) akiko_diag("[akiko] re-announce DISABLED by "
+		                          "/tmp/akiko_reannounce_off");
+	}
+
+	if (!reann_off && cd_reannounce_due_ms && !cd_data_armed_ever
+	    && cd_media_present()
+	    && cd_cdda_lba_next < 0 && cd_initialized >= 2 && rx_idle
+	    && CheckTimer(cd_reannounce_due_ms)) {
+		if (cd_reannounce_count < AKIKO_REANNOUNCE_MAX) {
+			cd_reannounce_count++;
+			cd_media_swap_absent  = true;
+			cd_media_push_pending = true;
+			cd_reannounce_due_ms  = (uint32_t)GetTimer(AKIKO_REANNOUNCE_MS);
+			akiko_diag("[akiko] re-announce %u/%u: disc present for %u ms and no "
+			           "data read armed, sending the edge again",
+			           cd_reannounce_count, AKIKO_REANNOUNCE_MAX,
+			           AKIKO_REANNOUNCE_MS);
+		} else {
+			// Out of attempts. A disc with nothing to boot is normal, so this
+			// is not an error -- it is the point at which we stop insisting.
+			cd_reannounce_due_ms = 0;
+			akiko_diag("[akiko] re-announce: %u attempts made, leaving the disc "
+			           "alone (nothing to boot is a normal state)",
+			           AKIKO_REANNOUNCE_MAX);
+		}
+		return;
+	}
+
+
 	if (cd_initialized == 0 && rx_idle) {
 		if (cd_media_present()) {
 			// Hold the arrival until the settle expires, so the ROM boots into
@@ -3161,70 +3236,6 @@ void akiko_cd32_poll(void)
 	// silenced the retry after the first attempt in every round. The pump is
 	// the thing that means audio is actually streaming, and a disc being
 	// played must not have its tray yanked mid-track.
-	// Why it did not fire, when it did not fire.
-	//
-	// Two builds have now been spent guessing at that from the outside: the
-	// first sent zero re-announces because the clock was armed on a branch that
-	// never runs at a 0 ms hold, the second still sent zero and the log could
-	// not say which of six conditions was false. A diagnostic that names the
-	// blocker costs one line and settles it in one round.
-	{
-		static uint32_t last_why_ms = 0;
-		static uint8_t  why_count = 0;
-		if (!cd_data_armed_ever && why_count < 8
-		    && (!last_why_ms || CheckTimer(last_why_ms))) {
-			last_why_ms = (uint32_t)GetTimer(2000);
-			why_count++;
-			akiko_diag("[akiko] re-announce idle: due=%u present=%d cdda=%d "
-			           "init=%u rx_idle=%d playing=%u expired=%d",
-			           cd_reannounce_due_ms, (int)cd_media_present(),
-			           (int)cd_cdda_lba_next, cd_initialized, (int)rx_idle,
-			           cd_playing,
-			           cd_reannounce_due_ms
-			             ? (int)CheckTimer(cd_reannounce_due_ms) : -1);
-		}
-	}
-
-	// /tmp/akiko_reannounce_off disables the retry for one core load.
-	//
-	// Not a user setting -- an A/B switch, and the only honest way to measure
-	// this. At a short hold the boot is marginal enough that the INSTRUMENT
-	// moves it: eight rounds failed on one build and the next round booted on a
-	// build differing only by log lines, because akiko_diag is a synchronous
-	// write on the path being timed. Comparing two builds therefore compares
-	// their logging as much as their behaviour. One binary, one arm on and one
-	// arm off, interleaved, is the comparison that means something.
-	static int reann_off = -1;
-	if (reann_off < 0) {
-		FILE *rf = fopen("/tmp/akiko_reannounce_off", "r");
-		reann_off = rf ? (fclose(rf), 1) : 0;
-		if (reann_off) akiko_diag("[akiko] re-announce DISABLED by "
-		                          "/tmp/akiko_reannounce_off");
-	}
-
-	if (!reann_off && cd_reannounce_due_ms && !cd_data_armed_ever
-	    && cd_media_present()
-	    && cd_cdda_lba_next < 0 && cd_initialized >= 2 && rx_idle
-	    && CheckTimer(cd_reannounce_due_ms)) {
-		if (cd_reannounce_count < AKIKO_REANNOUNCE_MAX) {
-			cd_reannounce_count++;
-			cd_media_swap_absent  = true;
-			cd_media_push_pending = true;
-			cd_reannounce_due_ms  = (uint32_t)GetTimer(AKIKO_REANNOUNCE_MS);
-			akiko_diag("[akiko] re-announce %u/%u: disc present for %u ms and no "
-			           "data read armed, sending the edge again",
-			           cd_reannounce_count, AKIKO_REANNOUNCE_MAX,
-			           AKIKO_REANNOUNCE_MS);
-		} else {
-			// Out of attempts. A disc with nothing to boot is normal, so this
-			// is not an error -- it is the point at which we stop insisting.
-			cd_reannounce_due_ms = 0;
-			akiko_diag("[akiko] re-announce: %u attempts made, leaving the disc "
-			           "alone (nothing to boot is a normal state)",
-			           AKIKO_REANNOUNCE_MAX);
-		}
-		return;
-	}
 
 	// 1.5 Auto-TOC drip: re-enabled in Phase 17, gated on rx_idle in Phase 18.
 	// BIOS RXCMP after INFO+post-INFO goes 4,6,7,...,15,30 — the +15 jump from
