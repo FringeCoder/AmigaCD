@@ -2,6 +2,7 @@
 #define AKIKO_PACE_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 // Sector delivery pacing for the Akiko (CD32) bridge.
 //
@@ -73,5 +74,22 @@
 // than the floor -- a CHD miss, a physical drive seek -- is never delayed
 // further by it.
 int64_t akiko_pace_delay_us(int64_t prev_us, int64_t now_us, int64_t period_us);
+
+// Whether a sector request should be served at all.
+//
+// Two reasons to decline, and they are different failures. No armed read
+// (data_lba_base < 0) means the engine is asking for data nobody requested.
+// Paused means the guest asked the drive to stop, and a real drive delivers
+// nothing until it is told to resume -- this one used to deliver one more
+// sector into a PBX slot, which the next read then parses as its own.
+bool akiko_sec_should_serve(int32_t data_lba_base, int paused);
+
+// A pause that outlives a read is a hang, not a pause.
+//
+// Declining while paused is correct; declining for ever because cd_paused was
+// set and never cleared is a dead machine. `since_ms` is when the declining
+// started, 0 when it is not. True once it has gone on longer than `limit_ms`,
+// which is the caller's cue to say so rather than to keep quiet.
+bool akiko_pause_stuck(uint32_t since_ms, uint32_t now_ms, uint32_t limit_ms);
 
 #endif
