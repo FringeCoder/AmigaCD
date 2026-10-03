@@ -19,9 +19,10 @@ Two things it does NOT do, deliberately:
 Alternates the arms within the run, like boot-ab.py, because this core's boot
 rate drifts over an afternoon by more than most effects being measured.
 
-    python mount_round.py <rounds-per-arm> <offset> <labelA=valA> <labelB=valB>
-    python mount_round.py 8 7281 fast=0 2x=1          # the sector rate
-    python mount_round.py 6 7280 delay0=0 delay8=8    # the mount delay
+    python setting-ab.py <rounds-per-arm> <offset> <armA> <armB>
+    python setting-ab.py 8 7281 fast=0 2x=1           # the sector rate
+    python setting-ab.py 6 7280 delay0=0 delay8=8     # the mount delay
+    python setting-ab.py 8 7281 flash noflash         # the flash itself
 """
 import csv
 import io
@@ -97,7 +98,25 @@ def boot_order(text):
     return False
 
 
-def round_once(wait=100):
+# Copy the bitstream back over itself before loading.
+#
+# "First boot after a flash" is the failure this project has been chasing, and
+# a plain load_core is NOT that: the .rbf is already on the card and in the
+# card's cache. The flash arm does what a deploy does -- writes the file, syncs,
+# then loads -- so the two arms differ only in whether the bitstream was just
+# written. Same bytes either way, verified by md5, so a difference cannot be the
+# contents of the core.
+def flash_core():
+    before = ssh("md5sum %s | cut -d\" \" -f1" % CORE)
+    ssh("cp %s %s.reflash && mv %s.reflash %s && sync" % (CORE, CORE, CORE, CORE))
+    after = ssh("md5sum %s | cut -d\" \" -f1" % CORE)
+    return before == after and bool(after)
+
+
+def round_once(wait=100, reflash=False):
+    if reflash and not flash_core():
+        print("      (reflash did not verify; round not scored)", flush=True)
+        return None
     ssh("cp /dev/null %s" % LOG)
     ssh("echo load_core %s > /dev/MiSTer_cmd" % CORE)
     time.sleep(26)                                  # FPGA reconfig + binary re-exec
@@ -114,8 +133,14 @@ def round_once(wait=100):
 def main():
     per_arm = int(sys.argv[1])
     offset = int(sys.argv[2])
+    # An arm is either a config value (label=N) or the word "flash" /
+    # "noflash", which leaves the setting alone and varies whether the
+    # bitstream is rewritten before the load.
     arms = []
     for spec in sys.argv[3:]:
+        if spec in ("flash", "noflash"):
+            arms.append((spec, None))
+            continue
         label, _, val = spec.partition("=")
         arms.append((label, int(val)))
     if len(arms) < 2:
@@ -125,7 +150,8 @@ def main():
     out = os.path.join(SCRATCH, "mr_%d.csv" % offset)
     tally = {l: [0, 0] for l, _ in arms}
     print("offset %d, arms %s, %d rounds each"
-          % (offset, ", ".join("%s=%d" % a for a in arms), per_arm), flush=True)
+          % (offset, ", ".join(l if v is None else "%s=%d" % (l, v)
+                               for l, v in arms), per_arm), flush=True)
 
     try:
         with open(out, "w", newline="") as fh:
@@ -136,11 +162,11 @@ def main():
             fh.flush()
             for rnd in range(1, per_arm + 1):
                 for label, value in arms:
-                    if not write_setting(offset, value):
+                    if value is not None and not write_setting(offset, value):
                         print("round %2d  %-7s SKIPPED (setting did not land)"
                               % (rnd, label), flush=True)
                         continue
-                    took = round_once()
+                    took = round_once(reflash=(label == "flash"))
                     # Keep the whole log: the sector counts this run exists to
                     # compare are only in there, and a round scored without its
                     # log cannot be re-examined.
@@ -158,7 +184,7 @@ def main():
                     suspect = ("boot-too-fast" if took and took < MIN_BOOT_S else "")
                     tally[label][0] += booted
                     tally[label][1] += 1
-                    w.writerow([rnd, label, value, booted,
+                    w.writerow([rnd, label, "" if value is None else value, booted,
                                 "" if took is None else round(took, 1),
                                 ";".join(at_pause), ";".join(prevs),
                                 phantoms, checksum, suspect, int(time.time())])
