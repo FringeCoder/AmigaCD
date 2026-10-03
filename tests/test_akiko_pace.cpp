@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 #include "../support/minimig/akiko_pace.h"
 
@@ -22,6 +23,15 @@ static void check(const char *name, int64_t got, int64_t want)
 {
 	if (got == want) printf("PASS %s\n", name);
 	else { printf("FAIL %s: got %lld, want %lld\n", name, (long long)got, (long long)want); failures++; }
+}
+
+static void check_bool(const char *name, bool got, bool want)
+{
+	if (got != want) {
+		printf("FAIL %s: got %s want %s\n", name,
+		       got ? "true" : "false", want ? "true" : "false");
+		failures++;
+	}
 }
 
 int main(void)
@@ -119,6 +129,60 @@ int main(void)
 	      akiko_pace_delay_us(1000000, 1000000 + P2 - 1, P2), 1);
 	check("2x: exactly the period waits not at all",
 	      akiko_pace_delay_us(1000000, 1000000 + P2, P2), 0);
+
+	// ------------------------------------------------ the sector-serve gate
+	{
+		// Serve only when a read is armed and the drive is not paused.
+		check_bool("armed, running -> serve",
+		           akiko_sec_should_serve(0, 0), true);
+		check_bool("armed at a high lba, running -> serve",
+		           akiko_sec_should_serve(25622, 0), true);
+
+		// A paused drive delivers nothing. This is the change: the surplus
+		// sector that used to land in a PBX slot after the guest PAUSEd, and
+		// that the next read then parsed as its own first sector.
+		check_bool("armed, paused -> decline",
+		           akiko_sec_should_serve(0, 1), false);
+		check_bool("armed at a high lba, paused -> decline",
+		           akiko_sec_should_serve(25622, 1), false);
+
+		// No armed read: the engine is asking for data nobody requested.
+		check_bool("no armed read -> decline",
+		           akiko_sec_should_serve(-1, 0), false);
+		check_bool("no armed read and paused -> decline",
+		           akiko_sec_should_serve(-1, 1), false);
+
+		// A negative base that is not the -1 sentinel is still an armed read:
+		// DotC arms PLAY DATA at start_lba=-34 and streams across the pre-gap,
+		// and refusing those requests stranded its BIOS waiting for a first
+		// sector that never came. Only -1 means "nothing armed".
+		check_bool("a pre-gap base is armed, not idle",
+		           akiko_sec_should_serve(-34, 0), true);
+	}
+
+	// ------------------------------------------- the stuck-pause detector
+	{
+		// since_ms == 0 means "not declining", whatever the clock says.
+		check_bool("not declining is never stuck",
+		           akiko_pause_stuck(0, 999999, 2000), false);
+
+		// Inside the limit is a pause; past it is a hang.
+		check_bool("1 s of pause is just a pause",
+		           akiko_pause_stuck(1000, 2000, 2000), false);
+		check_bool("exactly the limit is not yet stuck",
+		           akiko_pause_stuck(1000, 3000, 2000), false);
+		check_bool("past the limit is stuck",
+		           akiko_pause_stuck(1000, 3001, 2000), true);
+
+		// The clock wraps. Unsigned subtraction has to carry the caller through
+		// it: computed signed, or widened, a wrap reads as a pause of about
+		// forty-nine days -- which would either warn instantly for ever or
+		// never warn again, depending on which way the comparison fell.
+		check_bool("a pause spanning a clock wrap still measures",
+		           akiko_pause_stuck(0xFFFFF000u, 0x00000100u, 2000), true);
+		check_bool("a short pause spanning a wrap is still short",
+		           akiko_pause_stuck(0xFFFFF000u, 0xFFFFF500u, 2000), false);   // 1280 ms
+	}
 
 	if (failures) { printf("%d FAILURES\n", failures); return 1; }
 	printf("ALL TESTS PASSED\n");

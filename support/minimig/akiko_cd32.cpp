@@ -222,6 +222,10 @@ static uint32_t cd_sec_dbg_n        = 0;
 static uint32_t cd_sec_pushed       = 0;
 static uint32_t cd_sec_last_ms      = 0;
 static bool     cd_stall_reported   = false;
+// When we started declining sector requests because of a pause, and whether
+// that has already been reported. See the decline site.
+static uint32_t cd_pause_decline_ms = 0;
+static bool     cd_pause_warned     = false;
 static uint32_t cd_boot_ready_ms    = 0;   // 0 = no hold pending
 static uint32_t cd_boot_settle_ms   = 0;
 static uint8_t  cd_paused           = 0;
@@ -2395,16 +2399,40 @@ static bool akiko_handle_sec_req(void)
 
 	uint8_t buf[AKIKO_SECTOR_BYTES];
 
-	if (cd_data_lba_base == -1) {
-		// Throttled, and counted. The core holds sec_req up while we decline, so
-		// this fires as fast as the loop runs: 17,049 times in one 90 s round,
-		// which was 17,049 of that log's 17,275 lines. akiko_diag is a
+	// Two reasons not to serve, and they are different faults.
+	//
+	// PAUSED: a real drive delivers nothing until it is told to resume. This
+	// one used to deliver one more sector into a PBX slot after the guest's
+	// PAUSE, and the next read then parsed that surplus as its own first
+	// sector. Declining is what the hardware does.
+	//
+	// NO ARMED READ: the engine is asking for data nobody requested.
+	if (!akiko_sec_should_serve(cd_data_lba_base, cd_paused)) {
+		if (cd_paused && cd_data_lba_base != -1) {
+			// Tracked, not merely declined. If this persists, cd_paused was set
+			// and never cleared -- a dead machine rather than a paused one, and
+			// silence is the worst way to ship that. Five sites clear the flag
+			// against one that sets it, so this should never fire; if it does,
+			// the guard below is the bug and the log says so.
+			if (!cd_pause_decline_ms) cd_pause_decline_ms = (uint32_t)GetTimer(0);
+			if (!cd_pause_warned && akiko_pause_stuck(cd_pause_decline_ms,
+			                                          (uint32_t)GetTimer(0), 2000)) {
+				cd_pause_warned = true;
+				akiko_diag("[akiko] paused with a read armed (base=%d) for over 2 s: "
+				           "cd_paused looks stuck, not paused", cd_data_lba_base);
+			}
+			return false;
+		}
+
+		// Throttled, and counted. The core holds sec_req up while we decline,
+		// so this fires as fast as the loop runs: 17,049 times in one 90 s
+		// round, which was 17,049 of that log's 17,275 lines. akiko_diag is a
 		// synchronous fopen/fwrite/fclose and this is the sector path, so the
 		// diagnostic cost more than the condition -- and it buried the rest of
 		// the log, in a round that turned out to have BOOTED.
 		//
 		// The running total is the useful part: a handful at a disc change is
-		// normal, tens of thousands is the arbiter and the host disagreeing
+		// normal, tens of thousands means the arbiter and the host disagree
 		// about whether a read is armed.
 		static uint32_t noarm = 0;
 		noarm++;
@@ -2414,6 +2442,11 @@ static bool akiko_handle_sec_req(void)
 		}
 		return false;
 	}
+
+	// Serving again, so any pause that was being tracked is over.
+	cd_pause_decline_ms = 0;
+	cd_pause_warned     = false;
+
 
 	drive_t *drv = cd_find_drive();
 	if (!drv) {
