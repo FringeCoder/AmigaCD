@@ -47,4 +47,19 @@ bool akiko_frame_valid(const uint8_t *buf, int n);
 // of its own: it is the remains of one already answered.
 int akiko_frame_resync(const uint8_t *buf, int n);
 
+// The checksum byte a frame is missing, or 0 when it is not missing one.
+//
+// A frame whose only bad byte is a trailing ZERO where the checksum belongs has
+// not been corrupted -- it has not finished being written. The 68020 writes the
+// checksum last, the TX engine fetches from chip RAM, and a drain can win that
+// race, so the whole command lands with a hole at the end. Answering
+// CH_ERR_CHECKSUM to that is what ends every stalled Chuck Rock boot measured on
+// 2026-10-03.
+//
+// Returns the value that byte must hold for the frame to sum correctly, or 0
+// when the frame is already valid, when the trailing byte is not zero, or when
+// the needed value is itself zero (in which case the frame is valid as it
+// stands and never gets here). `len` counts the command bytes AND the checksum.
+uint8_t akiko_frame_unwritten_checksum(const uint8_t *buf, int len);
+
 #endif // AKIKO_FRAMING_H

@@ -175,6 +175,36 @@ int main(void)
 		          akiko_frame_resync(buf, 1 + a + b), 1);
 	}
 
+	// ------------------------------- a checksum byte that was never written
+	{
+		// The exact frame that ends every stalled boot: READ TOC, whole, with a
+		// zero where 0xb8 belongs. 0x44 + 0x03 = 0x47, so the missing byte is
+		// 0xff - 0x47 = 0xb8.
+		const uint8_t stalled[13] = {0x44, 0, 0, 0, 0, 0, 0, 0x03, 0, 0, 0, 0, 0x00};
+		check_int("the frame that ends a stalled boot wants 0xb8",
+		      akiko_frame_unwritten_checksum(stalled, 13), 0xb8);
+
+		// The same frame once the byte has landed is not missing anything.
+		const uint8_t whole[13] = {0x44, 0, 0, 0, 0, 0, 0, 0x03, 0, 0, 0, 0, 0xb8};
+		check_int("a complete frame wants nothing",
+		      akiko_frame_unwritten_checksum(whole, 13), 0);
+
+		// A body that already sums to 0xff has 0x00 as its REAL checksum, so a
+		// trailing zero there is correct and must not be rewritten.
+		const uint8_t zero_is_right[3] = {0x27, 0xd8, 0x00};
+		check_int("a genuine 0x00 checksum is left alone",
+		      akiko_frame_unwritten_checksum(zero_is_right, 3), 0);
+
+		// Corruption in the body is not this case: the trailing byte is present,
+		// so nothing is missing and the frame must still be rejected.
+		const uint8_t corrupt[3] = {0xea, 0x27, 0xd8};
+		check_int("a corrupt frame with a byte present is not rescued",
+		      akiko_frame_unwritten_checksum(corrupt, 3), 0);
+
+		check_int("a frame too short to have a checksum", 
+		      akiko_frame_unwritten_checksum(corrupt, 1), 0);
+	}
+
 	if (failures) {
 		printf("test_akiko_framing: %d failure(s)\n", failures);
 		return 1;

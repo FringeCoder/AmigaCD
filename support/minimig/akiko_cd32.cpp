@@ -3533,12 +3533,51 @@ void akiko_cd32_poll(void)
 		uint32_t sum = 0;
 		for (int i = 0; i < chk_total; i++) sum += cmd[i];
 		if ((sum & 0xff) != 0xff) {
-			char hx2[3 * AKIKO_CMD_MAX + 1];
-			akiko_diag("[akiko] CHECKSUM FAIL n=%d expected=%d sum=%02x bytes=%s",
-					           n, chk_total, sum & 0xff,
-					           akiko_hexbuf(cmd, n, hx2, sizeof(hx2)));
-			cmd_bad(cmd, CH_ERR_CHECKSUM);
-			return;
+			// A frame whose ONLY missing byte is its checksum has not been
+			// corrupted -- it has not finished being written.
+			//
+			// The TX engine fetches the command from chip RAM and the bridge
+			// raises REQ once the expected number of bytes has arrived, but the
+			// last byte the 68020 writes is the checksum, and a drain can win
+			// that race. What lands is the whole command with a zero where the
+			// checksum belongs.
+			//
+			// This is the end of every stalled boot measured on 2026-10-03:
+			// fourteen rounds out of fourteen finish with
+			//
+			//     CHECKSUM FAIL n=13 bytes=44 00 00 00 00 00 00 03 00 00 00 00 00
+			//     BAD cmd=44 err=88
+			//
+			// against a valid 44 ... b8 -- a READ TOC with its checksum byte
+			// still zero. We answer CH_ERR_CHECKSUM, and the ROM stops talking
+			// to us for ever. Neither round that booted ends this way.
+			//
+			// So: if the trailing byte is zero and writing the correct checksum
+			// there would make the frame valid, take the command. Every other
+			// byte is present, the opcode and length already agree, and the only
+			// thing missing is a byte whose value is implied by the rest. A
+			// genuinely corrupt frame fails this test, because the sum of a
+			// corrupt body does not leave a zero byte as the one needed to
+			// complete it -- and a frame with a real checksum of 0x00 (body sum
+			// 0xff) is valid already and never reaches here.
+			// The predicate lives in akiko_framing.cpp so it can be unit
+			// tested; this file cannot be compiled off the target.
+			const uint8_t needed = akiko_frame_unwritten_checksum(cmd, chk_total);
+			if (needed != 0x00) {
+				char hx3[3 * AKIKO_CMD_MAX + 1];
+				akiko_diag("[akiko] UNWRITTEN CHECKSUM n=%d expected=%d want=%02x "
+				           "bytes=%s -- taking the command",
+				           n, chk_total, needed,
+				           akiko_hexbuf(cmd, n, hx3, sizeof(hx3)));
+				cmd[chk_total - 1] = needed;
+			} else {
+				char hx2[3 * AKIKO_CMD_MAX + 1];
+				akiko_diag("[akiko] CHECKSUM FAIL n=%d expected=%d sum=%02x bytes=%s",
+						           n, chk_total, sum & 0xff,
+						           akiko_hexbuf(cmd, n, hx2, sizeof(hx2)));
+				cmd_bad(cmd, CH_ERR_CHECKSUM);
+				return;
+			}
 		}
 	}
 
