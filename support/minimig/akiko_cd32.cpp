@@ -2769,6 +2769,18 @@ void akiko_cd32_init(void)
 	cd_boot_ready_ms  = cd_boot_settle_ms ? (uint32_t)GetTimer(cd_boot_settle_ms) : 0;
 	akiko_diag("[akiko] boot settle: holding first media announce %u ms",
 	           cd_boot_settle_ms);
+	// Which machine this round actually ran as, recorded once per core load.
+	//
+	// Both of these change the timing of the sector path, and neither was in
+	// the log. So a saved round cannot be classified after the fact: the fifteen
+	// rounds that booted and the nine that did not were compared without knowing
+	// whether they shared a sector rate, and cd_speed is a factor of four --
+	// 588 sectors/s against 150. A round that cannot be classified cannot be
+	// evidence, which is the fourth time an uninstrumented variable has cost
+	// this investigation a day.
+	akiko_diag("[akiko] config: cd_speed=%s mount_delay=%us",
+	           (minimig_config.cd_speed == mmcd_2x) ? "2x" : "fast",
+	           minimig_config.cd_mount_delay);
 	cd_initialized   = 0;
 	cd_paused        = 0;
 	cd_playing       = 0;
