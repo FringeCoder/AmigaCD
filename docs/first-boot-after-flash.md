@@ -23,7 +23,36 @@ because it is the only invariant that survived, and because the obvious reading
 is testable: a CD32 title booting against an EEPROM full of whatever the FPGA
 powered up with.
 
-## It no longer reproduces
+## IT REPRODUCES AGAIN, on demand, 6 times in 8
+
+Found 2026-10-03, by accident, while testing something else. With the announce
+hold forced to 8 s the ROM asks for nothing at all; a removal-then-arrival media
+pair revives it every time, and **the revived ROM runs six arms -- 14, 19, 17,
+25621, 26505, 25622 -- and stops, with no loader read at lba 12**. That is the
+signature in `akiko-push-collision.md` for the first boot after a flash, exactly.
+
+```bash
+echo 8000 > /tmp/akiko_boot_delay        # put the announce back in the lost window
+echo pair > /tmp/akiko_reannounce_mode   # revive the ROM from it
+# load the core, mount the disc, watch for the stop after 25622
+```
+
+About a hundred seconds a round, six failures in eight, with
+`scripts/setting-ab.py` for the round loop. Both files are read once per core
+load and both are logged, so a round can always be checked against the state it
+claims. The re-announce ships OFF; it is a hook, not behaviour.
+
+**This is what the whole investigation was missing.** Every fix proposed for this
+failure -- including the ones in this session -- was untestable because the
+failure would not come back. It now comes back on demand, so the next person can
+test instead of argue.
+
+The section below is kept as written, because the thing it describes was true:
+the failure stopped appearing by itself, and nothing in the table re-enabled it.
+What re-enables it is a media edge delivered into the window where the ROM loses
+it, which is not something any of those controls varied.
+
+## It no longer reproduces (as of 2026-10-02, superseded by the section above)
 
 Fifteen consecutive first boots have succeeded, across:
 
