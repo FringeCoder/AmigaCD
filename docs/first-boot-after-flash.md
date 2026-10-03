@@ -23,6 +23,42 @@ because it is the only invariant that survived, and because the obvious reading
 is testable: a CD32 title booting against an EEPROM full of whatever the FPGA
 powered up with.
 
+## SOLVED: a command frame was being read one byte too early
+
+Every stalled boot ends with the same frame, 14 rounds out of 14:
+
+```
+CHECKSUM FAIL n=13 bytes=44 00 00 00 00 00 00 03 00 00 00 00 00
+BAD cmd=44 err=88
+```
+
+against a valid `44 00 00 00 00 00 00 03 00 00 00 00 b8`. A `READ TOC` with
+**only its checksum byte missing**. The 68020 writes that byte last, the TX
+engine fetches the command out of chip RAM, and the bridge raises REQ once the
+expected byte COUNT has arrived -- so a drain can win the race and take the whole
+command with a hole at the end. We answered `CH_ERR_CHECKSUM`, and the ROM
+stopped talking to us for ever.
+
+Taking such a frame instead of rejecting it (`akiko_frame_unwritten_checksum`,
+unit tested) fixes both known shapes of the failure, because both were this one
+frame:
+
+| hold | before | after |
+|---|---|---|
+| 8 s, the failure window | 1/8 booted | **16/16** |
+| 14 s, the shipped default | 11/11 | 8/8, no regression |
+| 0 ms | 0/8 | 0/10, unchanged |
+
+The 0 ms case is a different failure -- the disc is announced before the ROM is
+ready, and it reads LBA 16 and mounts a data volume instead of booting -- and the
+14 s hold keeps the announce out of that window.
+
+**What the stall actually was:** the revived ROM ran 14, 19, 17, 25621, 26505,
+25622 and stopped. That is the signature this whole file is about. It was not PBX
+accounting, not sector data, not the TOC contents, not the sector rate, and not
+interrupt timing. It was one byte that had not been written yet.
+
+## The reproducer that made it findable
 ## IT REPRODUCES AGAIN, on demand, 6 times in 8
 
 Found 2026-10-03, by accident, while testing something else. With the announce
