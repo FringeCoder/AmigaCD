@@ -36,6 +36,61 @@ Fifteen consecutive first boots have succeeded, across:
 So there is nothing to test a fix against, and none is proposed here. Whatever
 re-enables it, the table above is the thing to check first.
 
+## 2026-10-03: two more arms, and the sector-count lead withdrawn
+
+Thirty-two further consecutive boots, in two interleaved eight-round A/Bs on one
+binary and one bitstream:
+
+| arm | | arm | |
+|---|---|---|---|
+| `mmcd_fast`, 588 sectors/s | **8/8** | `mmcd_2x`, 150 sectors/s | **8/8** |
+| rewrite the `.rbf`, then load | **8/8** | load the same file | **8/8** |
+
+The rate was worth testing because the machine's CD32 profile had been left at
+2x, with the config written the day after the failure stopped reproducing -- a
+four-times change on the sector path that was in nobody's log. It is now logged
+once per core load, because a round whose settings are unknown cannot be used as
+evidence. It is not the explanation.
+
+The flash arm was worth testing because the failure is always described as the
+first boot after a *flash*, and `load_core` on a file already on the card is not
+that. Writing the same bytes back and syncing first changes nothing; both arms
+were verified by md5 to load identical bitstreams.
+
+**The 20-versus-24 sector lead is withdrawn.** It read: a failing round takes
+about twenty sectors before the BIOS pauses, a booting one at least twenty-four.
+The "at least" was the instrument -- a trace capped at 24 lines per read -- so
+the comparison was a cap against a real number. With an exact count taken at the
+pause, sixteen booting rounds give:
+
+```
+first read pauses at: 21 22 22 22 22 22 22 22 23 25 25 25 25 26
+then:                 18, 21-22, 8, 6-7, 20-21, 1, 1-2, 4, 4, 4, 258, 189
+```
+
+A boot is **thirteen** reads, not the six we had been looking at; a pause after
+about twenty sectors is the sixth read of every successful boot; and the first
+read's count varies from 21 to 26 with no effect on anything. The phantom drain
+and the single `CHECKSUM FAIL` also appear in every one of the 32 boots, so they
+are not discriminators either.
+
+## One failure that does reproduce, 3 of 3: the disc already in the bay
+
+Putting the disc **path in the config**, so the core mounts it on load and the
+bay is occupied from power-on, never boots -- three of three, at
+`cd_mount_delay=0` and at `8`. The mount is fine: the TOC is built and the root
+directory reads `CHUCK CHUCK.A CHUCK.B`. The guest issues `INFO`, then `PLAY
+DATA` *before* our media announce, then `UNPAUSE`, then `PLAY DATA` again after
+the announce -- and then stops asking. No sector request is ever made, and our
+host never arms a read for either attempt.
+
+The same disc on the same binary and bitstream boots 32 of 32 when it arrives
+**after** the boot starts. So this is not the flash failure, but it is the only
+reproducible non-boot we have, and it is in the same area: what the ROM does
+with a disc that was already there. Worth a separate investigation; see
+`scripts/setting-ab.py`, which records the path and why it is not used for
+measurement.
+
 ## Five explanations, each falsified by its own control
 
 Recorded so none of them is re-derived:
