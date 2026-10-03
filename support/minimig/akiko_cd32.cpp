@@ -3104,6 +3104,14 @@ void akiko_cd32_poll(void)
 			r[1] = 0x01;
 			akiko_send_response(r, 2);
 			akiko_diag("[akiko] auto-init media-status push: opcode=0x0a status=0x01");
+			// This is the cold-boot arrival, and the one the ROM is measured
+			// to miss. The first cut of the re-announce started its clock
+			// only on the mount-driven push further down, so at a hold of 0
+			// -- where this branch sends the only arrival there is -- not a
+			// single re-announce ever fired.
+			if (!cd_data_armed_ever) {
+				cd_reannounce_due_ms = (uint32_t)GetTimer(AKIKO_REANNOUNCE_MS);
+			}
 		}
 		cd_initialized = 1;
 		return;
@@ -3145,11 +3153,16 @@ void akiko_cd32_poll(void)
 	// The disc was announced and the guest has not asked for a byte of it.
 	//
 	// A real drive cannot do this, which is the point: the guest missed the
-	// edge, so it is given a fresh one, removal first. cd_playing excludes an
-	// audio disc being played, which legitimately never arms a data read and
-	// must not have its tray yanked mid-track.
+	// edge, so it is given a fresh one, removal first.
+	//
+	// The audio exclusion tests the CDDA pump (cd_cdda_lba_next), not
+	// cd_playing. cd_playing is set by the ROM's own startup PLAY frames --
+	// the two with cmd[7]=0x03 that every boot sends -- so guarding on it
+	// silenced the retry after the first attempt in every round. The pump is
+	// the thing that means audio is actually streaming, and a disc being
+	// played must not have its tray yanked mid-track.
 	if (cd_reannounce_due_ms && !cd_data_armed_ever && cd_media_present()
-	    && !cd_playing && cd_initialized >= 2 && rx_idle
+	    && cd_cdda_lba_next < 0 && cd_initialized >= 2 && rx_idle
 	    && CheckTimer(cd_reannounce_due_ms)) {
 		if (cd_reannounce_count < AKIKO_REANNOUNCE_MAX) {
 			cd_reannounce_count++;
