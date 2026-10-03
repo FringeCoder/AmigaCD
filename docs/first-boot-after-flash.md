@@ -1,72 +1,77 @@
-# The first boot after a core flash fails, and what it is not
+# The first boot after a core flash: what it tracks, and that it stopped reproducing
 
-Reproducible on demand: flash the core, mount a disc, boot once. That round fails.
-Reset and mount again and it boots in about five seconds, every time.
+Earlier revisions of this file called this a deterministic core failure and
+offered three explanations in turn. All three were wrong, and the failure itself
+no longer reproduces. This is what the evidence actually supports.
 
-Measured 0 of 9 on the 2026-10-01 netlist and again on current mainline
-(`6b4486e`, which carries the `minimig_idle` cone split, the `tx_busy` arbiter
-gate and the registered DDR3 command boundary):
+## The one thing that tracks it perfectly
 
-```
-round 1  booted=False  arms=6   lines=161
-round 2  booted=True   in 5s    arms=13
-round 3  booted=True   in 5s    arms=13
-```
+Across fourteen captured rounds, with no exceptions:
 
-## What it looks like
+| | mounts in the round | `set_cd_path` runs | `NVR loaded` | outcome |
+|---|---|---|---|---|
+| failed | **1** | **0** | **0** | 5 of 5 |
+| booted | **2** | 1 | 2 | 9 of 9 |
 
-The failing round is **a black screen**, not a stalled splash. The working round
-at the same point shows Chuck Rock's intro text. So the machine is not waiting for
-something; it has stopped.
+A round in which the disc is announced once, `akiko_cd32_set_cd_path()` takes its
+same-slot early return, and the per-game NVRAM is therefore never loaded into the
+BRAM the flash just wiped — fails. A round with two mounts, a real path change
+and an NVRAM load — boots.
 
-It stops *after* reading the disc. Both cases issue the same six `PLAY DATA arm`
-bases in the same order — 14, 19, 17, 25621, 26505, 25622 — and the failing one
-simply does not continue to the seventh, which in a working boot is lba 12, the
-loader. So the loader runs and dies.
+That is a correlation over fourteen rounds, not a mechanism. It is written down
+because it is the only invariant that survived, and because the obvious reading
+is testable: a CD32 title booting against an EEPROM full of whatever the FPGA
+powered up with.
 
-## What has been excluded, by measurement
+## It no longer reproduces
 
-| candidate | how it was excluded |
-|---|---|
-| the Akiko command traffic | identical counts of INFO (1), TOC rebuilds (4), media-status pushes (3), `CHECKSUM FAIL` (1) and `BAD cmd` (1) in failing and working rounds |
-| the corrupted command frame | occurs in the rounds that **succeed** |
-| the drive object | every round reports `serving: CD32 slot drive, tracks=2 track0_len=26914 chd=yes f=yes` |
-| per-game NVRAM not reloading | an uncleaned trace of a failing round shows `set_cd_path`, the deferred load armed, `init: scheduling reload` and `NVR loaded (1024 bytes)` |
-| stale host state across the reflash | `fpga_load_rbf()` ends in `app_restart()`; the PID changes (2569 → 6716, measured) |
-| the "60-sector walk" | a `static` trace counter capped per **process**, and `load_core` restarts the process |
-| the 8 s cold-boot mount delay | with the delay saved as Off — verified from the core's own `boot settle: holding first media announce 0 ms` — the failure persists |
-| a reset between flash and mount | the reset itself boots the game, so that arm measures the reset rather than the mount; the rounds that follow behave as normal rounds |
-| the three merged RTL fixes | the failure is unchanged on `6b4486e` |
+Fifteen consecutive first boots have succeeded, across:
 
-## Three measurement artifacts, recorded so they are not re-derived
+- three binaries — master, a build with a stall probe, a build with the swap fix;
+- two mount sequences — the old "take the highlighted disc" and a directory-aware
+  one that selects by name;
+- insertion 0 s and 40 s after the core came up;
+- the netlist that failed 9 of 9 the day before.
 
-Each of these looked like a finding and two reached a document before being caught:
+So there is nothing to test a fix against, and none is proposed here. Whatever
+re-enables it, the table above is the thing to check first.
 
-1. **A cleared log.** The harness clears the Akiko log at the start of a round, and
-   the clear landed *after* `set_cd_path` and the NVR load had run. Their absence
-   read as "the NVRAM never reloads".
-2. **An over-wide window.** `CHECKSUM FAIL` counts of 5 and 8 came from an
-   uncleaned 75-second capture spanning the flash, several OSD interactions and
-   more than one boot attempt. Scored per round it is **1**, in failing and
-   working rounds alike.
-3. **A process-lifetime budget.** `DBG sec_req#` was capped at 60 for the life of
-   the binary; `load_core` re-execs it, so the first boot after a flash printed 60
-   lines and every later boot printed none.
+## Five explanations, each falsified by its own control
 
-The common lesson, and the one worth keeping: before believing a difference an
-instrument reports, check the instrument's **window** and its **budget**.
+Recorded so none of them is re-derived:
 
-## Where to look next
+- **A missing or extra `CDINT_PBX`**, the project's leading theory for months. A
+  probe reading the FPGA's own completion counter at the stall shows
+  `pushed=21 fpga_ctr=20` — one *behind*, which is the normal staged sector, not
+  ahead. The completion count is right.
+- **The swap removal edge.** The control build had it and booted 3 of 3.
+- **Insertion timing.** 0 s and 40 s both boot 2 of 2.
+- **Closing the OSD on top of the mount.** Both arms boot 2 of 2.
+- **The RTL.** Master, with none of this session's host changes, boots 3 of 3 on
+  the same netlist.
 
-The loader runs and the machine goes black, which points at the guest rather than
-at the CD channel — the Akiko side is now identical between the two cases on every
-counter available. The project's existing note on this title says the loader
-destroys itself after a mis-parsed header and points at PBX slot placement; that
-is the thread to pull, and it wants guest-side state (the save-state peek path)
-rather than more log reading.
+Earlier revisions also blamed, and this file withdrew in turn, a stale PBX ship,
+cold page cache (the CHD is 1.7 MB and entirely covered by the 16 MB `fadvise`),
+the 8 s mount delay (tested with the setting *saved*, verified from the core's
+own boot-settle line), and a "60-sector walk" that was a per-process debug
+counter.
 
-Worth knowing while hunting: a `sec_req but no data read armed` runaway has been
-seen once, 17,049 times in one round — the core holding `sec_req` asserted while
-the host declines because `cd_data_lba_base` is -1. That round **booted**, so it
-is a separate defect. It is now throttled and counted rather than logged
-unconditionally on the sector path.
+## The measurement lessons, which cost more than the bug
+
+Four separate artifacts read as findings during this hunt:
+
+1. **A log cleared after the lines of interest had been written** — which made
+   `set_cd_path` and the NVRAM load look absent, and sent the first diagnosis
+   down the wrong path.
+2. **An over-wide capture window** — `CHECKSUM FAIL` counts of 5 and 8 that came
+   from a trace spanning a flash, several OSD interactions and more than one boot
+   attempt. Per round it is 1, in failing and working rounds alike.
+3. **A process-lifetime diagnostic budget** — `DBG sec_req#` capped at 60 for the
+   life of a binary that `load_core` restarts.
+4. **Falsifying a true hypothesis with the wrong window.** The NVRAM theory was
+   dropped on the strength of an uncleaned trace whose `set_cd_path` line belonged
+   to a different mount. Per-round logs put it back as the only surviving
+   correlation.
+
+The rule all four share: **check an instrument's window and budget before
+believing a difference it reports** — and before disbelieving one.
