@@ -369,10 +369,41 @@ static bool     cd_media_event        = false;
 // Owe the guest the absent edge first.
 static bool     cd_media_swap_absent  = false;
 static uint32_t cd_media_swap_ready_ms = 0;
+// Whether the guest has EVER armed a data read since this core load, when the
+// next re-announce is due, and how many have been spent. "Ever" is the right
+// test: once the ROM has read one sector it is plainly listening, and nothing
+// below should touch a machine that is running.
+static bool     cd_data_armed_ever   = false;
+static uint32_t cd_reannounce_due_ms = 0;
+static uint8_t  cd_reannounce_count  = 0;
 // The tray cannot open and shut in the same instant, and the removal has to
 // reach CDFileSystem before the arrival lands or the two collapse back into
 // no change at all.
 #define AKIKO_SWAP_SETTLE_MS 700
+
+// Re-announce a disc the guest never asked about.
+//
+// The ROM can MISS the first media-present edge. Measured 2026-10-03: announce
+// at 8 s and the ROM never issues a data read -- it sits on the CD32 animation
+// for ever, with no timeout, no retry and no error frame, and nothing is refused
+// on our side because nothing is asked. Announce the same disc again at 50 s and
+// it boots immediately, LBA 14 then the loader. So the edge is LOST, not
+// mistimed: the ROM is not yet listening when it arrives, and we never send
+// another.
+//
+// Raising the hold to 14 s moves the first edge past the window where it is
+// lost, which is a tuned constant standing in for a state we cannot read. This
+// is the net under it: if the guest has not armed a single data read a few
+// seconds after being told a disc is present, tell it again, as a proper
+// removal-then-arrival pair -- exactly what a user does when they open the tray
+// and shut it.
+//
+// Bounded, because a disc with nothing to boot is a normal thing to hold: an
+// audio CD, an AmigaOS disc, a data disc put in to be browsed. Three attempts is
+// enough to cover the window that was ever observed to fail, and then it stops
+// and leaves the machine alone.
+#define AKIKO_REANNOUNCE_MS   6000
+#define AKIKO_REANNOUNCE_MAX  3
 
 // Hold the FIRST media-present announcement after a cold boot, so the CD32 ROM
 // comes up and reaches its animation before the disc appears.
@@ -1368,6 +1399,10 @@ static void cmd_multi(const uint8_t *cmd)
 			// reset between reads, so LBA=base+counter delivers base+leftover
 			// (wrong sector) — deterministic, matches the read-#3 divergence.
 			cd_sec_dbg_n = 0;   // reopen the trace window for this read
+			// The guest is plainly listening, so the re-announce net retires
+			// for the rest of this core load.
+			cd_data_armed_ever   = true;
+			cd_reannounce_due_ms = 0;
 			// prev= is the read that just ended, counted exactly rather than
 			// inferred from a trace capped at 24 lines. Six reads make up a
 			// boot, so this one field turns each round into a sector profile.
@@ -2825,6 +2860,9 @@ void akiko_cd32_init(void)
 	cd_media_event   = false;
 	cd_media_swap_absent   = false;
 	cd_media_swap_ready_ms = 0;
+	cd_data_armed_ever     = false;
+	cd_reannounce_due_ms   = 0;
+	cd_reannounce_count    = 0;
 	toc_point_count  = 0;
 	toc_push_idx     = -1;
 	toc_push_last_ms = 0;
@@ -3053,6 +3091,133 @@ void akiko_cd32_poll(void)
 #endif
 	const bool rx_idle = !(status & AKIKO_STATUS_RX_BUSY);
 
+	// Checked HERE, at the top, and not further down with the other media work.
+	//
+	// Down there it never ran. The branches above it -- command drain, status
+	// handling, the media pushes -- each return when they act, and the ROM polls
+	// this core continuously while it sits on its animation, so the one place
+	// that needed to notice "nobody has asked for the disc" was starved by the
+	// traffic proving nobody had asked. The log showed the timer expiring and
+	// three and a half seconds passing with the branch never reached.
+
+	// Why it did not fire, when it did not fire.
+	//
+	// Two builds have now been spent guessing at that from the outside: the
+	// first sent zero re-announces because the clock was armed on a branch that
+	// never runs at a 0 ms hold, the second still sent zero and the log could
+	// not say which of six conditions was false. A diagnostic that names the
+	// blocker costs one line and settles it in one round.
+	{
+		static uint32_t last_why_ms = 0;
+		static uint8_t  why_count = 0;
+		if (!cd_data_armed_ever && why_count < 20
+		    && (!last_why_ms || CheckTimer(last_why_ms))) {
+			last_why_ms = (uint32_t)GetTimer(2000);
+			why_count++;
+			akiko_diag("[akiko] re-announce idle: due=%u present=%d cdda=%d "
+			           "init=%u rx_idle=%d playing=%u expired=%d",
+			           cd_reannounce_due_ms, (int)cd_media_present(),
+			           (int)cd_cdda_lba_next, cd_initialized, (int)rx_idle,
+			           cd_playing,
+			           cd_reannounce_due_ms
+			             ? (int)CheckTimer(cd_reannounce_due_ms) : -1);
+		}
+	}
+
+	// A REPRODUCER for the first-boot failure, off unless asked for.
+	//
+	// /tmp/akiko_reannounce_mode picks the arm for one core load:
+	//   off      -- the default, and what ships: nothing here runs
+	//   pair     -- removal edge then arrival, what a user does with the tray
+	//   arrival  -- the arrival alone, no removal
+	//
+	// This exists because of what `pair` turned out to do. With the announce
+	// forced to 8 s the ROM asks for nothing at all; a removal-then-arrival pair
+	// revives it every time (8/8 against 0/8, p = 0.00016) and it then runs the
+	// boot sequence and STOPS after lba 25622 -- six arms, 14, 19, 17, 25621,
+	// 26505, 25622, no loader read at lba 12.
+	//
+	// That is the exact signature docs/akiko-push-collision.md records for the
+	// first boot after a flash: the failure this project chased for weeks, which
+	// then stopped reproducing and left every proposed fix untestable. Through
+	// this hook it reproduces 6 times in 8, on demand, in about a hundred
+	// seconds a round.
+	//
+	// So it ships OFF. It is not a fix -- it does not improve the completion rate
+	// (3/14 either way) -- and the announce hold of 14 s is what keeps the first
+	// edge from being lost in normal use. What it buys is a failing machine to
+	// test against:
+	//
+	//   echo 8000 > /tmp/akiko_boot_delay
+	//   echo pair > /tmp/akiko_reannounce_mode
+	//   (load the core, mount the disc, watch for the 25622 stop)
+	//
+	// An arrival with no removal is ignored completely -- 24 of them across 8
+	// rounds, not one producing a READ TOC -- so `arrival` is kept only to stop
+	// that being re-tried.
+	//
+	// The third arm exists because `pair` revives a dead ROM every time and the
+	// rescued rounds then stop after LBA 25622 without finishing the load. The
+	// suspicion is the removal half: AmigaOS is told the disc went away, and
+	// whatever it had mounted is invalidated under the loader. An arrival on its
+	// own is not a media CHANGE and may well be ignored -- that is the question.
+	//
+	// Runtime and not a build flag, because at a short hold the INSTRUMENT moves
+	// the result: eight rounds failed on one build and the next round booted on a
+	// build differing only by log lines, since akiko_diag is a synchronous write
+	// on the path being timed. One binary with a flag is the only honest A/B.
+	// /tmp/akiko_reannounce_off is still read, as "off", so an older script that
+	// sets it is not silently measuring the wrong arm.
+	enum { REANN_OFF = 0, REANN_PAIR = 1, REANN_ARRIVAL = 2 };
+	static int reann_mode = -1;
+	if (reann_mode < 0) {
+		reann_mode = REANN_OFF;      // see the note above: a test hook, not behaviour
+		FILE *mf = fopen("/tmp/akiko_reannounce_mode", "r");
+		if (mf) {
+			char w[16] = {0};
+			if (fscanf(mf, "%15s", w) == 1) {
+				if (!strcmp(w, "off"))          reann_mode = REANN_OFF;
+				else if (!strcmp(w, "arrival")) reann_mode = REANN_ARRIVAL;
+				else if (!strcmp(w, "pair"))    reann_mode = REANN_PAIR;
+			}
+			fclose(mf);
+		} else {
+			FILE *of = fopen("/tmp/akiko_reannounce_off", "r");
+			if (of) { fclose(of); reann_mode = REANN_OFF; }
+		}
+		akiko_diag("[akiko] re-announce mode: %s",
+		           reann_mode == REANN_OFF ? "off" :
+		           reann_mode == REANN_ARRIVAL ? "arrival" : "pair");
+	}
+
+	if (reann_mode != REANN_OFF && cd_reannounce_due_ms && !cd_data_armed_ever
+	    && cd_media_present()
+	    && cd_cdda_lba_next < 0 && cd_initialized >= 2 && rx_idle
+	    && CheckTimer(cd_reannounce_due_ms)) {
+		if (cd_reannounce_count < AKIKO_REANNOUNCE_MAX) {
+			cd_reannounce_count++;
+			// The removal half only in `pair`. In `arrival` the guest is
+			// simply told again that a disc is there.
+			if (reann_mode == REANN_PAIR) cd_media_swap_absent = true;
+			cd_media_push_pending = true;
+			cd_reannounce_due_ms  = (uint32_t)GetTimer(AKIKO_REANNOUNCE_MS);
+			akiko_diag("[akiko] re-announce %u/%u (%s): disc present for %u ms and no "
+			           "data read armed, sending the edge again",
+			           cd_reannounce_count, AKIKO_REANNOUNCE_MAX,
+			           reann_mode == REANN_ARRIVAL ? "arrival" : "pair",
+			           AKIKO_REANNOUNCE_MS);
+		} else {
+			// Out of attempts. A disc with nothing to boot is normal, so this
+			// is not an error -- it is the point at which we stop insisting.
+			cd_reannounce_due_ms = 0;
+			akiko_diag("[akiko] re-announce: %u attempts made, leaving the disc "
+			           "alone (nothing to boot is a normal state)",
+			           AKIKO_REANNOUNCE_MAX);
+		}
+		return;
+	}
+
+
 	if (cd_initialized == 0 && rx_idle) {
 		if (cd_media_present()) {
 			// Hold the arrival until the settle expires, so the ROM boots into
@@ -3066,6 +3231,14 @@ void akiko_cd32_poll(void)
 			r[1] = 0x01;
 			akiko_send_response(r, 2);
 			akiko_diag("[akiko] auto-init media-status push: opcode=0x0a status=0x01");
+			// This is the cold-boot arrival, and the one the ROM is measured
+			// to miss. The first cut of the re-announce started its clock
+			// only on the mount-driven push further down, so at a hold of 0
+			// -- where this branch sends the only arrival there is -- not a
+			// single re-announce ever fired.
+			if (!cd_data_armed_ever) {
+				cd_reannounce_due_ms = (uint32_t)GetTimer(AKIKO_REANNOUNCE_MS);
+			}
 		}
 		cd_initialized = 1;
 		return;
@@ -3095,8 +3268,26 @@ void akiko_cd32_poll(void)
 		cd_media_push_pending = false;
 		akiko_build_toc();
 		akiko_diag("[akiko] media-status push: opcode=0x0a status=0x%02x", r[1]);
+		// Start the clock on an arrival. If the guest asks for anything in the
+		// next few seconds this never fires; if it asks for nothing, the edge
+		// was lost and it is told again.
+		if (r[1] && !cd_data_armed_ever) {
+			cd_reannounce_due_ms = (uint32_t)GetTimer(AKIKO_REANNOUNCE_MS);
+		}
 		return;
 	}
+
+	// The disc was announced and the guest has not asked for a byte of it.
+	//
+	// A real drive cannot do this, which is the point: the guest missed the
+	// edge, so it is given a fresh one, removal first.
+	//
+	// The audio exclusion tests the CDDA pump (cd_cdda_lba_next), not
+	// cd_playing. cd_playing is set by the ROM's own startup PLAY frames --
+	// the two with cmd[7]=0x03 that every boot sends -- so guarding on it
+	// silenced the retry after the first attempt in every round. The pump is
+	// the thing that means audio is actually streaming, and a disc being
+	// played must not have its tray yanked mid-track.
 
 	// 1.5 Auto-TOC drip: re-enabled in Phase 17, gated on rx_idle in Phase 18.
 	// BIOS RXCMP after INFO+post-INFO goes 4,6,7,...,15,30 — the +15 jump from
