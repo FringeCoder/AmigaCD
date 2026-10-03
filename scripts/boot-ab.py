@@ -129,6 +129,46 @@ def osd_enable(host):
     ssh(host, "touch %s" % OSD_MIRROR)
 
 
+def osd_title(host):
+    """The page title, e.g. "[AmigaCD]" for the main page or "[Select]" for a
+    file picker. "[closed]" when the OSD is down."""
+    raw = osd_raw(host).splitlines()
+    return raw[0].strip() if raw else ""
+
+
+# Get to a KNOWN page before navigating by row name.
+#
+# osd_goto reads the page and looks for a row. If some other page is up -- a
+# file picker left open by an aborted round, a submenu, a confirmation dialog --
+# the row is genuinely not there, and the harness reported "no Reset row found"
+# and "no CD row on the OSD" about a machine whose main page has both. It then
+# spent three minutes an attempt discovering that. ESC backs out of whatever is
+# open; HOME puts the cursor on the first row, which also makes the row
+# distances osd_goto works from short and predictable.
+def osd_home(host, want_title="[AmigaCD]", tries=6):
+    """Main page, cursor at the top. True when it got there."""
+    if not osd_ensure(host, True):
+        return False
+    for _ in range(tries):
+        title = osd_title(host)
+        if title == want_title:
+            key(host, "HOME")
+            time.sleep(0.4)
+            return True
+        if not title or title == "[closed]":
+            if not osd_ensure(host, True):
+                return False
+            key(host, "DOWN"); key(host, "UP")      # provoke a paint
+            time.sleep(0.4)
+            continue
+        before = osd_raw(host)
+        key(host, "ESC")                            # back out of this page
+        osd_wait_page(host, before, timeout=4.0)
+    print("      (could not get back to %s; OSD shows %r)"
+          % (want_title, osd_title(host)), flush=True)
+    return False
+
+
 # The real format, read off the machine rather than assumed:
 #
 #     [AmigaCD]
@@ -265,6 +305,13 @@ def osd_goto(host, want, max_steps=24):
             key(host, "DOWN"); key(host, "UP")
             time.sleep(0.3)
             continue
+        # One press per read. Batching the presses was tried, to cut the
+        # ssh round trips, and does not work: from the CD row the cursor
+        # advances two rows and then stops, whether the presses are 0.08s
+        # or 0.35s apart, so a batch of twelve lands in the same place as
+        # a batch of two. Something between the uinput daemon and the OSD
+        # is dropping them, and until that is understood the slow form is
+        # the one that is known to work.
         key(host, "DOWN" if target > cur else "UP")
         time.sleep(0.25)
     return False
@@ -511,7 +558,7 @@ def mount_and_wait(host, wait, expect_disc=None, disc_dir=None):
     wrong_disc = None
     for attempt in (1, 2):
         osd_enable(host)
-        if not osd_ensure(host, True):
+        if not osd_home(host):
             continue
         # Land on the CD row BY NAME, the way reset_machine does.
         #
@@ -527,9 +574,9 @@ def mount_and_wait(host, wait, expect_disc=None, disc_dir=None):
             print("      (no CD row on the OSD; not pressing ENTER)", flush=True)
             osd_ensure(host, False)
             continue
-        before = osd_raw(host)
+        page_before = osd_raw(host)
         key(host, "ENTER")                       # open the picker
-        osd_wait_page(host, before)
+        osd_wait_page(host, page_before)
         # Pick the title BY NAME too, when the caller named one.
         #
         # Taking "whatever is highlighted" worked only because the picker
@@ -603,7 +650,7 @@ def reset_machine(host):
     doing it explicitly keeps every round starting from the same place.
     """
     osd_enable(host)
-    osd_ensure(host, True)
+    osd_home(host)
 
     # Eject, by name rather than by position.
     if osd_goto(host, "CD"):
