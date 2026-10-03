@@ -35,3 +35,17 @@ int akiko_frame_resync(const uint8_t *buf, int n)
 	}
 	return -1;
 }
+
+uint8_t akiko_frame_unwritten_checksum(const uint8_t *buf, int len)
+{
+	if (!buf || len < 2) return 0;
+	if (buf[len - 1] != 0x00) return 0;          // the byte is there; not this case
+
+	uint32_t body = 0;
+	for (int i = 0; i < len - 1; i++) body += buf[i];
+	uint8_t needed = (uint8_t)(0xffu - (body & 0xffu));
+
+	// needed == 0 means the body already sums to 0xff, so a trailing zero IS the
+	// correct checksum and the frame is valid as it stands.
+	return needed;
+}
