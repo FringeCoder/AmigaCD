@@ -3161,6 +3161,30 @@ void akiko_cd32_poll(void)
 	// silenced the retry after the first attempt in every round. The pump is
 	// the thing that means audio is actually streaming, and a disc being
 	// played must not have its tray yanked mid-track.
+	// Why it did not fire, when it did not fire.
+	//
+	// Two builds have now been spent guessing at that from the outside: the
+	// first sent zero re-announces because the clock was armed on a branch that
+	// never runs at a 0 ms hold, the second still sent zero and the log could
+	// not say which of six conditions was false. A diagnostic that names the
+	// blocker costs one line and settles it in one round.
+	{
+		static uint32_t last_why_ms = 0;
+		static uint8_t  why_count = 0;
+		if (!cd_data_armed_ever && why_count < 8
+		    && (!last_why_ms || CheckTimer(last_why_ms))) {
+			last_why_ms = (uint32_t)GetTimer(2000);
+			why_count++;
+			akiko_diag("[akiko] re-announce idle: due=%u present=%d cdda=%d "
+			           "init=%u rx_idle=%d playing=%u expired=%d",
+			           cd_reannounce_due_ms, (int)cd_media_present(),
+			           (int)cd_cdda_lba_next, cd_initialized, (int)rx_idle,
+			           cd_playing,
+			           cd_reannounce_due_ms
+			             ? (int)CheckTimer(cd_reannounce_due_ms) : -1);
+		}
+	}
+
 	if (cd_reannounce_due_ms && !cd_data_armed_ever && cd_media_present()
 	    && cd_cdda_lba_next < 0 && cd_initialized >= 2 && rx_idle
 	    && CheckTimer(cd_reannounce_due_ms)) {
