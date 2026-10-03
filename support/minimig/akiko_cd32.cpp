@@ -3124,10 +3124,37 @@ void akiko_cd32_poll(void)
 		}
 	}
 
+	// A REPRODUCER for the first-boot failure, off unless asked for.
+	//
 	// /tmp/akiko_reannounce_mode picks the arm for one core load:
-	//   off      -- no retry at all
+	//   off      -- the default, and what ships: nothing here runs
 	//   pair     -- removal edge then arrival, what a user does with the tray
 	//   arrival  -- the arrival alone, no removal
+	//
+	// This exists because of what `pair` turned out to do. With the announce
+	// forced to 8 s the ROM asks for nothing at all; a removal-then-arrival pair
+	// revives it every time (8/8 against 0/8, p = 0.00016) and it then runs the
+	// boot sequence and STOPS after lba 25622 -- six arms, 14, 19, 17, 25621,
+	// 26505, 25622, no loader read at lba 12.
+	//
+	// That is the exact signature docs/akiko-push-collision.md records for the
+	// first boot after a flash: the failure this project chased for weeks, which
+	// then stopped reproducing and left every proposed fix untestable. Through
+	// this hook it reproduces 6 times in 8, on demand, in about a hundred
+	// seconds a round.
+	//
+	// So it ships OFF. It is not a fix -- it does not improve the completion rate
+	// (3/14 either way) -- and the announce hold of 14 s is what keeps the first
+	// edge from being lost in normal use. What it buys is a failing machine to
+	// test against:
+	//
+	//   echo 8000 > /tmp/akiko_boot_delay
+	//   echo pair > /tmp/akiko_reannounce_mode
+	//   (load the core, mount the disc, watch for the 25622 stop)
+	//
+	// An arrival with no removal is ignored completely -- 24 of them across 8
+	// rounds, not one producing a READ TOC -- so `arrival` is kept only to stop
+	// that being re-tried.
 	//
 	// The third arm exists because `pair` revives a dead ROM every time and the
 	// rescued rounds then stop after LBA 25622 without finishing the load. The
@@ -3144,7 +3171,7 @@ void akiko_cd32_poll(void)
 	enum { REANN_OFF = 0, REANN_PAIR = 1, REANN_ARRIVAL = 2 };
 	static int reann_mode = -1;
 	if (reann_mode < 0) {
-		reann_mode = REANN_PAIR;
+		reann_mode = REANN_OFF;      // see the note above: a test hook, not behaviour
 		FILE *mf = fopen("/tmp/akiko_reannounce_mode", "r");
 		if (mf) {
 			char w[16] = {0};
