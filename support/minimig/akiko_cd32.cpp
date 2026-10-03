@@ -1172,6 +1172,25 @@ static void cmd_pause(const uint8_t *cmd)
 	cd_paused = 1;
 	akiko_send_response(r, 2);
 	akiko_dbg("PAUSE (playing=%d, present=%d)\n", cd_playing, cd_media_present());
+	// How many sectors the guest took before it stopped the read.
+	//
+	// This is the sharpest difference we have between a boot that works and
+	// one that hangs: the failing rounds pause after about twenty sectors, the
+	// working ones after at least twenty-four. "At least", because the only
+	// instrument was the per-arm sector trace, and that is capped at 24 lines.
+	//
+	// Raising the cap is the obvious fix and the wrong one. akiko_diag() is a
+	// synchronous fopen/fwrite/fclose and the trace sits on the sector path, so
+	// a bigger cap buys the count by perturbing the timing that is itself under
+	// suspicion -- the same mistake as the 17,000-line no-armed-read log, which
+	// cost more than the condition it reported. cd_sec_pushed already counts
+	// every sector of the current read exactly, so one line here at the moment
+	// of the pause gives the true figure for nothing.
+	if (cd_data_lba_base != -1) {
+		akiko_diag("[akiko] PAUSE during a data read: %u sectors delivered "
+		           "(base=%d, fpga_ctr=%u)",
+		           cd_sec_pushed, cd_data_lba_base, akiko_read_sec_counter());
+	}
 }
 
 // 0x03 — UNPAUSE. WinUAE akiko.cpp:1027-1044. Same checkerr() pattern.
@@ -1349,11 +1368,16 @@ static void cmd_multi(const uint8_t *cmd)
 			// reset between reads, so LBA=base+counter delivers base+leftover
 			// (wrong sector) — deterministic, matches the read-#3 divergence.
 			cd_sec_dbg_n = 0;   // reopen the trace window for this read
+			// prev= is the read that just ended, counted exactly rather than
+			// inferred from a trace capped at 24 lines. Six reads make up a
+			// boot, so this one field turns each round into a sector profile.
+			akiko_diag("[akiko] PLAY DATA arm: start_lba=%d (cmd7=0x%02x) "
+			           "fpga_ctr@arm=%u prev=%u",
+			           (int32_t)s_lba, cmd[7], akiko_read_sec_counter(),
+			           cd_sec_pushed);
 			cd_sec_pushed     = 0;
 			cd_sec_last_ms    = (uint32_t)GetTimer(0);
 			cd_stall_reported = false;
-			akiko_diag("[akiko] PLAY DATA arm: start_lba=%d (cmd7=0x%02x) fpga_ctr@arm=%u",
-			           (int32_t)s_lba, cmd[7], akiko_read_sec_counter());
 		}
 	} else if (seek_negative) {
 		// PLAY with seekpos < 0 = "scan TOC" trigger (akiko.cpp:1095-1097).
