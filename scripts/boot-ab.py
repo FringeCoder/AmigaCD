@@ -145,6 +145,61 @@ def osd_enable(host):
 OSD_ROW = re.compile(r"^\s*(\d+)\s(.)\s*(.*?)\s*$")
 
 
+# F12 is a TOGGLE, and the harness used to press it as though it were "open".
+#
+# When the OSD was already open -- which it is whenever a round bailed out
+# through a path that pressed F12 an odd number of times -- that press CLOSED
+# it, and every key after it went to the running game instead of the menu.
+# Nothing mounted, and the symptom was "Chuck not on the picker page" or a bare
+# "mount did not take", which reads like OSD drift and is not: the menu was
+# never up. Worse, the keys still land somewhere, so a stray ENTER arrives at
+# whatever the game does with it.
+#
+# The mirror already answers the question -- it writes the literal "[closed]"
+# when the OSD is down -- so the state is checked rather than assumed. osd_rows
+# cannot tell "[closed]" from "not painted yet", which is why that distinction
+# lives here.
+def osd_raw(host):
+    """The mirror file as written, title line included."""
+    return ssh(host, "cat %s 2>/dev/null" % OSD_TEXT)
+
+
+# Wait for a NEW page rather than sleeping a guessed interval.
+#
+# The mirror is written on a PAINT, so a read taken between the keypress and the
+# paint returns the PREVIOUS page -- and every decision made from it is made
+# about a page that is no longer on screen. That is the whole of the OSD
+# flakiness here: a picker read too early looks like the main menu, so the disc
+# "is not on the page"; a main menu read too early looks like the picker, so
+# ENTER lands on whatever row the stale page called selected. Fixed sleeps made
+# it rarer and could not remove it.
+def osd_wait_page(host, before, timeout=6.0):
+    """True once the mirror differs from `before`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if osd_raw(host) != before:
+            time.sleep(0.25)          # let the paint finish
+            return True
+        time.sleep(0.3)
+    return False
+
+
+def osd_is_open(host):
+    return "[closed]" not in ssh(host, "cat %s 2>/dev/null" % OSD_TEXT)
+
+
+def osd_ensure(host, want_open, tries=3):
+    """Get the OSD to the wanted state, pressing F12 only when it is wrong."""
+    for _ in range(tries):
+        if osd_is_open(host) == want_open:
+            return True
+        key(host, "F12")
+        time.sleep(1.2)
+    state = "open" if want_open else "closed"
+    print("      (could not get the OSD %s)" % state, flush=True)
+    return False
+
+
 def osd_rows(host):
     """[(row_number, text, selected)], or [] if nothing has been painted yet.
 
@@ -215,6 +270,96 @@ def osd_goto(host, want, max_steps=24):
     return False
 
 
+# The picker opens where it was last left, and that is not a property of this
+# harness: another session browsing for a test image moves it, and it had moved
+# to a directory holding nothing but subdirectories. "Take whatever is
+# highlighted" then pressed ENTER on `..` and walked UP a level, mounting
+# nothing -- which the run reported as a flaky mount, every round, with no hint
+# that the picker was somewhere else entirely.
+#
+# So the file is found by name, descending into `dir_name` when it is on the
+# page and going up through `..` when it is not. Bounded, because a picker that
+# shows neither is a page this does not understand, and guessing further only
+# presses ENTER on something unknown.
+def picker_page(host):
+    """The current picker page as a comparable tuple of its row texts."""
+    return tuple(text for _, text, _ in osd_rows(host))
+
+
+def picker_find(host, want, dir_name=None, max_pages=12):
+    """Scroll the open picker until `want` or `dir_name` is ON THE PAGE.
+
+    Returns the name found, or None. Paging is the point: osd_find only sees
+    the SIXTEEN rows the OSD has painted, and /media/fat/games holds about a
+    hundred directories -- so AmigaCD32 was simply off-screen, and a search
+    that only ever read the visible window reported it absent. There is no
+    page-down key in the remote's table, so this scrolls with DOWN and stops
+    when the page stops changing, which is the bottom.
+    """
+    seen = None
+    for _ in range(max_pages):
+        rows = osd_rows(host)
+        if not rows:
+            key(host, "DOWN"); key(host, "UP")      # provoke a paint
+            time.sleep(0.4)
+            continue
+        if osd_find(rows, want) >= 0:
+            return want
+        if dir_name and osd_find(rows, dir_name) >= 0:
+            return dir_name
+        page = picker_page(host)
+        if page == seen:
+            return None                             # bottom, and not here
+        seen = page
+        before = osd_raw(host)
+        key(host, "DOWN", repeat=14, gap=0.12)
+        osd_wait_page(host, before, timeout=4.0)
+    return None
+
+
+# The picker opens where it was last left, and that is not a property of this
+# harness: another session browsing for a test image moves it, and it had moved
+# to /media/fat/games/Amiga, which holds nothing but subdirectories. "Take
+# whatever is highlighted" then pressed ENTER on `..` and walked UP a level,
+# mounting nothing -- which the run reported as a flaky mount, every round, with
+# no hint that the picker was somewhere else entirely.
+#
+# So the file is found by name: scroll the directory looking for the disc or for
+# `dir_name`, descend into that directory when it turns up, and go up through
+# `..` when neither does. Bounded, because a picker showing none of the three is
+# a page this does not understand, and guessing further only presses ENTER on
+# something unknown.
+def picker_select(host, want, dir_name=None, max_steps=8):
+    """Select `want` in the open picker and press ENTER. True when it mounted."""
+    for _ in range(max_steps):
+        found = picker_find(host, want, dir_name)
+        if found == want:
+            if not osd_goto(host, want, max_steps=60):
+                return False
+            before = osd_raw(host)
+            key(host, "ENTER")
+            osd_wait_page(host, before)
+            return True
+        if found == dir_name:
+            if not osd_goto(host, dir_name, max_steps=60):
+                return False
+            before = osd_raw(host)
+            key(host, "ENTER")                      # descend
+            osd_wait_page(host, before)
+            continue
+        # Neither is here. Go up a level and look again -- the picker is rooted
+        # at a per-core base, so `..` at the top does nothing and the page stops
+        # changing, which the bound below catches.
+        rows = osd_rows(host)
+        if osd_find(rows, "..") < 0:
+            return False
+        if not osd_goto(host, "..", max_steps=60):
+            return False
+        before = osd_raw(host)
+        key(host, "ENTER")                          # up a level
+        osd_wait_page(host, before)
+    return False
+
 def flash(host, rbf, settle):
     """Put a bitstream on the machine and load it."""
     if not scp(host, rbf, CORE_PATH + ".new"):
@@ -252,7 +397,90 @@ def install_binary(host, elf, settle):
     return True
 
 
-def mount_and_wait(host, wait, expect_disc=None):
+# ------------------------------------------------- comparing SETTINGS
+#
+# The third thing worth A/B-ing is neither a bitstream nor a binary: it is a
+# config byte. Two of them change the timing of the sector path, and neither was
+# in the log until 2026-10-03, so every round recorded before that date is
+# unclassifiable --
+#
+#   cd_mount_delay (offset 7280)  seconds the first media announce is held
+#   cd_speed       (offset 7281)  0 = mmcd_fast (~588 sectors/s), 1 = mmcd_2x (150)
+#
+# Those offsets are documented in minimig_config.h, where the fields were
+# deliberately appended in this order. They are read once at akiko_cd32_init(),
+# so a setting takes effect on a core LOAD and not before -- which is why this
+# writes the file and then reloads, exactly as the binary arm does.
+#
+# Writing the running machine's config behind its back is safe in one direction
+# only: the value is read into minimig_config at startup, so a later OSD-driven
+# save writes the same byte back. Changing the setting from the OSD DURING a run
+# would fight this, so do not.
+CFG_FILES = ("/media/fat/config/AmigaCD.cfg",
+             "/media/fat/config/AmigaCD_CD32.cfg")
+CFG_DELAY_OFF = 7280
+CFG_SPEED_OFF = 7281
+
+# label -> (offset, value). Add a pair here rather than teaching the CLI
+# arithmetic; a run should name what it is testing.
+SETTINGS = {
+    "fast":    (CFG_SPEED_OFF, 0),    # mmcd_fast, the rate the core shipped with
+    "2x":      (CFG_SPEED_OFF, 1),    # mmcd_2x, what a CD32 actually is
+    "delay0":  (CFG_DELAY_OFF, 0),    # announce the disc at once, as before the fix
+    "delay8":  (CFG_DELAY_OFF, 8),    # the default, and the value measured to work
+}
+
+
+def cfg_backup(host):
+    """Copy every config this harness writes, once, before the first round."""
+    for f in CFG_FILES:
+        ssh(host, "[ -f %s.abbak ] || cp %s %s.abbak" % (f, f, f))
+
+
+def cfg_restore(host):
+    """Put them back. A run that changes a user's setting and leaves it changed
+    is a run that poisons whatever is measured next -- which is how a 2x profile
+    came to be live on the test machine without anyone choosing it."""
+    for f in CFG_FILES:
+        ssh(host, "[ -f %s.abbak ] && mv %s.abbak %s && sync" % (f, f, f))
+
+
+def cfg_read(host, offset):
+    """The byte at `offset` in each config, for reporting. Not for control
+    flow: a config that does not exist yet reads as empty, and that is normal
+    on a profile the machine has not saved."""
+    out = []
+    for f in CFG_FILES:
+        v = ssh(host, "od -An -tu1 -j %d -N 1 %s 2>/dev/null" % (offset, f)).strip()
+        out.append(v or "?")
+    return ",".join(out)
+
+
+def install_setting(host, name, settle):
+    """Write one config byte to every profile, then reload the core."""
+    if name not in SETTINGS:
+        print("      (unknown setting %r)" % name, flush=True)
+        return False
+    offset, value = SETTINGS[name]
+    for f in CFG_FILES:
+        # conv=notrunc, or dd truncates the file to one byte and the next core
+        # load migrates a 1-byte config through the loader's size dispatch.
+        ssh(host, "printf '\\%03o' %d | dd of=%s bs=1 seek=%d count=1 conv=notrunc "
+                  "2>/dev/null" % (value, value, f, offset))
+    ssh(host, "sync")
+    got = cfg_read(host, offset)
+    if got != ",".join([str(value)] * len(CFG_FILES)):
+        # Report, do not retry silently. A write that did not land scores the
+        # round under the wrong label, which is worse than losing the round.
+        print("      (setting %s: wrote %d at %d, read back %s)"
+              % (name, value, offset, got), flush=True)
+        return False
+    ssh(host, "echo load_core %s > /dev/MiSTer_cmd" % CORE_PATH)
+    time.sleep(settle)
+    return True
+
+
+def mount_and_wait(host, wait, expect_disc=None, disc_dir=None):
     """Mount the disc from the OSD picker and wait for the title to load.
 
     Polls rather than sampling once at a fixed time. A fixed window looked
@@ -282,12 +510,44 @@ def mount_and_wait(host, wait, expect_disc=None):
     mounted = False
     wrong_disc = None
     for attempt in (1, 2):
-        key(host, "F12"); time.sleep(1.0)
-        # Nudge the cursor so the mirror repaints, then land on the CD row.
-        key(host, "DOWN"); key(host, "UP")
-        key(host, "ENTER"); time.sleep(1.4)      # open the picker
-        key(host, "ENTER"); time.sleep(2.0)      # take the highlighted disc
-        key(host, "F12")                         # close the OSD
+        osd_enable(host)
+        if not osd_ensure(host, True):
+            continue
+        # Land on the CD row BY NAME, the way reset_machine does.
+        #
+        # This used to nudge DOWN/UP to provoke a repaint and then press ENTER
+        # where it stood, with a comment claiming it had landed on the CD row.
+        # It had not: the cursor is wherever the previous round's reset left it,
+        # and ENTER on the wrong row does whatever that row does. On the System
+        # row ENTER CYCLES THE MACHINE, so a drifted cursor does not merely
+        # fail to mount -- it silently retunes the machine under test and every
+        # round after it. The eject in reset_machine has navigated by name
+        # since the day that cost a run; the mount never did.
+        if not osd_goto(host, "CD"):
+            print("      (no CD row on the OSD; not pressing ENTER)", flush=True)
+            osd_ensure(host, False)
+            continue
+        before = osd_raw(host)
+        key(host, "ENTER")                       # open the picker
+        osd_wait_page(host, before)
+        # Pick the title BY NAME too, when the caller named one.
+        #
+        # Taking "whatever is highlighted" worked only because the picker
+        # remembers the last selection -- and a core LOAD resets it to the top
+        # of the directory, which is a folder. ENTER there walks into the
+        # folder instead of mounting, nothing is mounted, and the round is
+        # skipped as a flaky mount. Every round of a --setting run reloads the
+        # core, so this was every round.
+        if expect_disc:
+            if not picker_select(host, expect_disc, disc_dir):
+                print("      (could not find %r in the picker)" % expect_disc,
+                      flush=True)
+                key(host, "ESC"); time.sleep(0.6)
+                osd_ensure(host, False)
+                continue
+        else:
+            key(host, "ENTER"); time.sleep(2.0)  # take the highlighted disc
+        osd_ensure(host, False)                  # close the OSD
         time.sleep(2.0)
         now = int(ssh(host, "grep -c 'set_cd_path: /media' %s" % CDTV_LOG) or 0)
         if now > before:
@@ -308,7 +568,7 @@ def mount_and_wait(host, wait, expect_disc=None):
         # with an empty Akiko log. Close whatever is open and try once more.
         print("      (mount did not take, retrying)", flush=True)
         key(host, "ESC"); time.sleep(0.6)
-        key(host, "F12"); time.sleep(1.0)
+        osd_ensure(host, False)
 
     if not mounted:
         # A wrong disc is not a failed boot and not a flaky mount: it is a round
@@ -342,8 +602,8 @@ def reset_machine(host):
     Reset always ejects, so the disc has to be re-picked for the next round;
     doing it explicitly keeps every round starting from the same place.
     """
-    key(host, "F12"); time.sleep(1.2)
     osd_enable(host)
+    osd_ensure(host, True)
 
     # Eject, by name rather than by position.
     if osd_goto(host, "CD"):
@@ -453,11 +713,16 @@ def main():
                     metavar="LABEL=PATH", help="bitstreams to compare")
     ap.add_argument("--binary", action="append", default=[],
                     metavar="LABEL=PATH", help="core binaries to compare")
+    ap.add_argument("--setting", action="append", default=[], metavar="LABEL",
+                    help="config settings to compare, from %s; the bitstream and "
+                         "binary stay as they are" % "/".join(sorted(SETTINGS)))
     ap.add_argument("--fixed-core", metavar="PATH",
                     help="bitstream to install once, when comparing binaries")
     ap.add_argument("--expect-disc", metavar="SUBSTRING",
                     help="require the mounted path to contain this, so a drifted "
                          "OSD picking another title is skipped rather than scored")
+    ap.add_argument("--disc-dir", metavar="NAME", default="AmigaCD32",
+                    help="directory the picker descends into to find the disc")
     ap.add_argument("--wait", type=int, default=90,
                     help="seconds to wait for the title to load before calling it a hang")
     ap.add_argument("--settle", type=int, default=24,
@@ -476,8 +741,15 @@ def main():
 
     cores = parse(args.core, "core")
     binaries = parse(args.binary, "binary")
-    if bool(cores) == bool(binaries):
-        sys.exit("give either --core (two or more) or --binary (two or more), not both")
+    # A setting arm carries its own label as its "path", so the round loop
+    # below stays one loop over (label, path) pairs.
+    settings = [(s, s) for s in args.setting]
+    for label, _ in settings:
+        if label not in SETTINGS:
+            sys.exit("setting %r: not one of %s" % (label, ", ".join(sorted(SETTINGS))))
+    chosen = [bool(cores), bool(binaries), bool(settings)]
+    if sum(chosen) != 1:
+        sys.exit("give exactly one of --core, --binary or --setting (two or more of it)")
 
     # Comparing binaries: the bitstream is the constant, installed once.
     if binaries and args.fixed_core:
@@ -486,65 +758,79 @@ def main():
         print("installing fixed bitstream %s" % os.path.basename(args.fixed_core), flush=True)
         flash(args.host, args.fixed_core, args.settle)
 
-    variants = cores if cores else binaries
-    install = flash if cores else install_binary
+    if settings:
+        variants, install = settings, install_setting
+        cfg_backup(args.host)
+        print("comparing settings %s (configs backed up to *.abbak)"
+              % ", ".join(l for l, _ in settings), flush=True)
+    elif cores:
+        variants, install = cores, flash
+    else:
+        variants, install = binaries, install_binary
 
     tally = {label: [0, 0] for label, _ in variants}    # [good, total]
     flagged = {label: [0, 0] for label, _ in variants}  # the flagged subset
     suspect_count = {label: 0 for label, _ in variants}
 
-    with open(args.out, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(["round", "variant", "booted", "seconds", "phantoms",
-                    "checksum_fails", "resyncs", "log_lines", "suspect",
-                    "unix_time"])
-        fh.flush()
+    try:
+        with open(args.out, "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["round", "variant", "booted", "seconds", "phantoms",
+                        "checksum_fails", "resyncs", "log_lines", "suspect",
+                        "unix_time"])
+            fh.flush()
 
-        for rnd in range(1, args.rounds + 1):
-            for label, path in variants:
-                if not install(args.host, path, args.settle):
-                    print("round %2d  %-8s SKIPPED (install failed)" % (rnd, label),
-                          flush=True)
-                    continue
-                took, mounted = mount_and_wait(args.host, args.wait,
-                                               args.expect_disc)
-                if not mounted:
-                    # Not a result: the disc never went in. Leave it out of the
-                    # tally rather than scoring a boot that was never attempted.
-                    print("round %2d  %-8s SKIPPED (no mount)" % (rnd, label), flush=True)
-                    w.writerow([rnd, label, "", "", "", "", "", "",
-                                "no-mount", int(time.time())])
+            for rnd in range(1, args.rounds + 1):
+                for label, path in variants:
+                    if not install(args.host, path, args.settle):
+                        print("round %2d  %-8s SKIPPED (install failed)" % (rnd, label),
+                              flush=True)
+                        continue
+                    took, mounted = mount_and_wait(args.host, args.wait,
+                                                   args.expect_disc,
+                                                   args.disc_dir)
+                    if not mounted:
+                        # Not a result: the disc never went in. Leave it out of the
+                        # tally rather than scoring a boot that was never attempted.
+                        print("round %2d  %-8s SKIPPED (no mount)" % (rnd, label), flush=True)
+                        w.writerow([rnd, label, "", "", "", "", "", "",
+                                    "no-mount", int(time.time())])
+                        fh.flush()
+                        reset_machine(args.host)
+                        continue
+                    phantoms, checksum, resyncs, lines = measure(args.host)
+                    booted = 0 if took is None else 1
+
+                    # Flag, do not drop. Only a success can be implausibly fast; a
+                    # failure waited out the whole window either way.
+                    suspect = ""
+                    if booted and took is not None and took < MIN_BOOT_S:
+                        suspect = "boot-too-fast"
+
+                    tally[label][0] += booted
+                    tally[label][1] += 1
+                    if suspect:
+                        suspect_count[label] += 1
+                        flagged[label][0] += booted
+                        flagged[label][1] += 1
+
+                    w.writerow([rnd, label, booted, "" if took is None else round(took, 1),
+                                phantoms, checksum, resyncs, lines, suspect,
+                                int(time.time())])
                     fh.flush()
+                    print("round %2d  %-8s booted=%d in %-5s phantoms=%d resync=%d lines=%d   (%d/%d)%s"
+                          % (rnd, label, booted,
+                             "-" if took is None else "%.0fs" % took,
+                             phantoms, resyncs, lines,
+                             tally[label][0], tally[label][1],
+                             "  SUSPECT: " + suspect if suspect else ""), flush=True)
                     reset_machine(args.host)
-                    continue
-                phantoms, checksum, resyncs, lines = measure(args.host)
-                booted = 0 if took is None else 1
 
-                # Flag, do not drop. Only a success can be implausibly fast; a
-                # failure waited out the whole window either way.
-                suspect = ""
-                if booted and took is not None and took < MIN_BOOT_S:
-                    suspect = "boot-too-fast"
-
-                tally[label][0] += booted
-                tally[label][1] += 1
-                if suspect:
-                    suspect_count[label] += 1
-                    flagged[label][0] += booted
-                    flagged[label][1] += 1
-
-                w.writerow([rnd, label, booted, "" if took is None else round(took, 1),
-                            phantoms, checksum, resyncs, lines, suspect,
-                            int(time.time())])
-                fh.flush()
-                print("round %2d  %-8s booted=%d in %-5s phantoms=%d resync=%d lines=%d   (%d/%d)%s"
-                      % (rnd, label, booted,
-                         "-" if took is None else "%.0fs" % took,
-                         phantoms, resyncs, lines,
-                         tally[label][0], tally[label][1],
-                         "  SUSPECT: " + suspect if suspect else ""), flush=True)
-                reset_machine(args.host)
-
+    finally:
+        # Even on Ctrl-C. A half-finished run that leaves cd_speed
+        # flipped silently retunes whatever is measured next.
+        if settings:
+            cfg_restore(args.host)
     print("")
     print("--- totals ---")
     for label, _ in variants:
