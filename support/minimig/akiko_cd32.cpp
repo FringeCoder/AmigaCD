@@ -3185,7 +3185,25 @@ void akiko_cd32_poll(void)
 		}
 	}
 
-	if (cd_reannounce_due_ms && !cd_data_armed_ever && cd_media_present()
+	// /tmp/akiko_reannounce_off disables the retry for one core load.
+	//
+	// Not a user setting -- an A/B switch, and the only honest way to measure
+	// this. At a short hold the boot is marginal enough that the INSTRUMENT
+	// moves it: eight rounds failed on one build and the next round booted on a
+	// build differing only by log lines, because akiko_diag is a synchronous
+	// write on the path being timed. Comparing two builds therefore compares
+	// their logging as much as their behaviour. One binary, one arm on and one
+	// arm off, interleaved, is the comparison that means something.
+	static int reann_off = -1;
+	if (reann_off < 0) {
+		FILE *rf = fopen("/tmp/akiko_reannounce_off", "r");
+		reann_off = rf ? (fclose(rf), 1) : 0;
+		if (reann_off) akiko_diag("[akiko] re-announce DISABLED by "
+		                          "/tmp/akiko_reannounce_off");
+	}
+
+	if (!reann_off && cd_reannounce_due_ms && !cd_data_armed_ever
+	    && cd_media_present()
 	    && cd_cdda_lba_next < 0 && cd_initialized >= 2 && rx_idle
 	    && CheckTimer(cd_reannounce_due_ms)) {
 		if (cd_reannounce_count < AKIKO_REANNOUNCE_MAX) {
