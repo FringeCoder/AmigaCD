@@ -252,6 +252,89 @@ def install_binary(host, elf, settle):
     return True
 
 
+# ------------------------------------------------- comparing SETTINGS
+#
+# The third thing worth A/B-ing is neither a bitstream nor a binary: it is a
+# config byte. Two of them change the timing of the sector path, and neither was
+# in the log until 2026-10-03, so every round recorded before that date is
+# unclassifiable --
+#
+#   cd_mount_delay (offset 7280)  seconds the first media announce is held
+#   cd_speed       (offset 7281)  0 = mmcd_fast (~588 sectors/s), 1 = mmcd_2x (150)
+#
+# Those offsets are documented in minimig_config.h, where the fields were
+# deliberately appended in this order. They are read once at akiko_cd32_init(),
+# so a setting takes effect on a core LOAD and not before -- which is why this
+# writes the file and then reloads, exactly as the binary arm does.
+#
+# Writing the running machine's config behind its back is safe in one direction
+# only: the value is read into minimig_config at startup, so a later OSD-driven
+# save writes the same byte back. Changing the setting from the OSD DURING a run
+# would fight this, so do not.
+CFG_FILES = ("/media/fat/config/AmigaCD.cfg",
+             "/media/fat/config/AmigaCD_CD32.cfg")
+CFG_DELAY_OFF = 7280
+CFG_SPEED_OFF = 7281
+
+# label -> (offset, value). Add a pair here rather than teaching the CLI
+# arithmetic; a run should name what it is testing.
+SETTINGS = {
+    "fast":    (CFG_SPEED_OFF, 0),    # mmcd_fast, the rate the core shipped with
+    "2x":      (CFG_SPEED_OFF, 1),    # mmcd_2x, what a CD32 actually is
+    "delay0":  (CFG_DELAY_OFF, 0),    # announce the disc at once, as before the fix
+    "delay8":  (CFG_DELAY_OFF, 8),    # the default, and the value measured to work
+}
+
+
+def cfg_backup(host):
+    """Copy every config this harness writes, once, before the first round."""
+    for f in CFG_FILES:
+        ssh(host, "[ -f %s.abbak ] || cp %s %s.abbak" % (f, f, f))
+
+
+def cfg_restore(host):
+    """Put them back. A run that changes a user's setting and leaves it changed
+    is a run that poisons whatever is measured next -- which is how a 2x profile
+    came to be live on the test machine without anyone choosing it."""
+    for f in CFG_FILES:
+        ssh(host, "[ -f %s.abbak ] && mv %s.abbak %s && sync" % (f, f, f))
+
+
+def cfg_read(host, offset):
+    """The byte at `offset` in each config, for reporting. Not for control
+    flow: a config that does not exist yet reads as empty, and that is normal
+    on a profile the machine has not saved."""
+    out = []
+    for f in CFG_FILES:
+        v = ssh(host, "od -An -tu1 -j %d -N 1 %s 2>/dev/null" % (offset, f)).strip()
+        out.append(v or "?")
+    return ",".join(out)
+
+
+def install_setting(host, name, settle):
+    """Write one config byte to every profile, then reload the core."""
+    if name not in SETTINGS:
+        print("      (unknown setting %r)" % name, flush=True)
+        return False
+    offset, value = SETTINGS[name]
+    for f in CFG_FILES:
+        # conv=notrunc, or dd truncates the file to one byte and the next core
+        # load migrates a 1-byte config through the loader's size dispatch.
+        ssh(host, "printf '\\%03o' %d | dd of=%s bs=1 seek=%d count=1 conv=notrunc "
+                  "2>/dev/null" % (value, value, f, offset))
+    ssh(host, "sync")
+    got = cfg_read(host, offset)
+    if got != ",".join([str(value)] * len(CFG_FILES)):
+        # Report, do not retry silently. A write that did not land scores the
+        # round under the wrong label, which is worse than losing the round.
+        print("      (setting %s: wrote %d at %d, read back %s)"
+              % (name, value, offset, got), flush=True)
+        return False
+    ssh(host, "echo load_core %s > /dev/MiSTer_cmd" % CORE_PATH)
+    time.sleep(settle)
+    return True
+
+
 def mount_and_wait(host, wait, expect_disc=None):
     """Mount the disc from the OSD picker and wait for the title to load.
 
@@ -453,6 +536,9 @@ def main():
                     metavar="LABEL=PATH", help="bitstreams to compare")
     ap.add_argument("--binary", action="append", default=[],
                     metavar="LABEL=PATH", help="core binaries to compare")
+    ap.add_argument("--setting", action="append", default=[], metavar="LABEL",
+                    help="config settings to compare, from %s; the bitstream and "
+                         "binary stay as they are" % "/".join(sorted(SETTINGS)))
     ap.add_argument("--fixed-core", metavar="PATH",
                     help="bitstream to install once, when comparing binaries")
     ap.add_argument("--expect-disc", metavar="SUBSTRING",
@@ -476,8 +562,15 @@ def main():
 
     cores = parse(args.core, "core")
     binaries = parse(args.binary, "binary")
-    if bool(cores) == bool(binaries):
-        sys.exit("give either --core (two or more) or --binary (two or more), not both")
+    # A setting arm carries its own label as its "path", so the round loop
+    # below stays one loop over (label, path) pairs.
+    settings = [(s, s) for s in args.setting]
+    for label, _ in settings:
+        if label not in SETTINGS:
+            sys.exit("setting %r: not one of %s" % (label, ", ".join(sorted(SETTINGS))))
+    chosen = [bool(cores), bool(binaries), bool(settings)]
+    if sum(chosen) != 1:
+        sys.exit("give exactly one of --core, --binary or --setting (two or more of it)")
 
     # Comparing binaries: the bitstream is the constant, installed once.
     if binaries and args.fixed_core:
@@ -486,65 +579,78 @@ def main():
         print("installing fixed bitstream %s" % os.path.basename(args.fixed_core), flush=True)
         flash(args.host, args.fixed_core, args.settle)
 
-    variants = cores if cores else binaries
-    install = flash if cores else install_binary
+    if settings:
+        variants, install = settings, install_setting
+        cfg_backup(args.host)
+        print("comparing settings %s (configs backed up to *.abbak)"
+              % ", ".join(l for l, _ in settings), flush=True)
+    elif cores:
+        variants, install = cores, flash
+    else:
+        variants, install = binaries, install_binary
 
     tally = {label: [0, 0] for label, _ in variants}    # [good, total]
     flagged = {label: [0, 0] for label, _ in variants}  # the flagged subset
     suspect_count = {label: 0 for label, _ in variants}
 
-    with open(args.out, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(["round", "variant", "booted", "seconds", "phantoms",
-                    "checksum_fails", "resyncs", "log_lines", "suspect",
-                    "unix_time"])
-        fh.flush()
+    try:
+        with open(args.out, "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["round", "variant", "booted", "seconds", "phantoms",
+                        "checksum_fails", "resyncs", "log_lines", "suspect",
+                        "unix_time"])
+            fh.flush()
 
-        for rnd in range(1, args.rounds + 1):
-            for label, path in variants:
-                if not install(args.host, path, args.settle):
-                    print("round %2d  %-8s SKIPPED (install failed)" % (rnd, label),
-                          flush=True)
-                    continue
-                took, mounted = mount_and_wait(args.host, args.wait,
-                                               args.expect_disc)
-                if not mounted:
-                    # Not a result: the disc never went in. Leave it out of the
-                    # tally rather than scoring a boot that was never attempted.
-                    print("round %2d  %-8s SKIPPED (no mount)" % (rnd, label), flush=True)
-                    w.writerow([rnd, label, "", "", "", "", "", "",
-                                "no-mount", int(time.time())])
+            for rnd in range(1, args.rounds + 1):
+                for label, path in variants:
+                    if not install(args.host, path, args.settle):
+                        print("round %2d  %-8s SKIPPED (install failed)" % (rnd, label),
+                              flush=True)
+                        continue
+                    took, mounted = mount_and_wait(args.host, args.wait,
+                                                   args.expect_disc)
+                    if not mounted:
+                        # Not a result: the disc never went in. Leave it out of the
+                        # tally rather than scoring a boot that was never attempted.
+                        print("round %2d  %-8s SKIPPED (no mount)" % (rnd, label), flush=True)
+                        w.writerow([rnd, label, "", "", "", "", "", "",
+                                    "no-mount", int(time.time())])
+                        fh.flush()
+                        reset_machine(args.host)
+                        continue
+                    phantoms, checksum, resyncs, lines = measure(args.host)
+                    booted = 0 if took is None else 1
+
+                    # Flag, do not drop. Only a success can be implausibly fast; a
+                    # failure waited out the whole window either way.
+                    suspect = ""
+                    if booted and took is not None and took < MIN_BOOT_S:
+                        suspect = "boot-too-fast"
+
+                    tally[label][0] += booted
+                    tally[label][1] += 1
+                    if suspect:
+                        suspect_count[label] += 1
+                        flagged[label][0] += booted
+                        flagged[label][1] += 1
+
+                    w.writerow([rnd, label, booted, "" if took is None else round(took, 1),
+                                phantoms, checksum, resyncs, lines, suspect,
+                                int(time.time())])
                     fh.flush()
+                    print("round %2d  %-8s booted=%d in %-5s phantoms=%d resync=%d lines=%d   (%d/%d)%s"
+                          % (rnd, label, booted,
+                             "-" if took is None else "%.0fs" % took,
+                             phantoms, resyncs, lines,
+                             tally[label][0], tally[label][1],
+                             "  SUSPECT: " + suspect if suspect else ""), flush=True)
                     reset_machine(args.host)
-                    continue
-                phantoms, checksum, resyncs, lines = measure(args.host)
-                booted = 0 if took is None else 1
 
-                # Flag, do not drop. Only a success can be implausibly fast; a
-                # failure waited out the whole window either way.
-                suspect = ""
-                if booted and took is not None and took < MIN_BOOT_S:
-                    suspect = "boot-too-fast"
-
-                tally[label][0] += booted
-                tally[label][1] += 1
-                if suspect:
-                    suspect_count[label] += 1
-                    flagged[label][0] += booted
-                    flagged[label][1] += 1
-
-                w.writerow([rnd, label, booted, "" if took is None else round(took, 1),
-                            phantoms, checksum, resyncs, lines, suspect,
-                            int(time.time())])
-                fh.flush()
-                print("round %2d  %-8s booted=%d in %-5s phantoms=%d resync=%d lines=%d   (%d/%d)%s"
-                      % (rnd, label, booted,
-                         "-" if took is None else "%.0fs" % took,
-                         phantoms, resyncs, lines,
-                         tally[label][0], tally[label][1],
-                         "  SUSPECT: " + suspect if suspect else ""), flush=True)
-                reset_machine(args.host)
-
+    finally:
+        # Even on Ctrl-C. A half-finished run that leaves cd_speed
+        # flipped silently retunes whatever is measured next.
+        if settings:
+            cfg_restore(args.host)
     print("")
     print("--- totals ---")
     for label, _ in variants:
