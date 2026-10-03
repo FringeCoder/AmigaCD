@@ -74,22 +74,42 @@ read's count varies from 21 to 26 with no effect on anything. The phantom drain
 and the single `CHECKSUM FAIL` also appear in every one of the 32 boots, so they
 are not discriminators either.
 
-## One failure that does reproduce, 3 of 3: the disc already in the bay
+## One failure that does reproduce: the announce lands too early
 
-Putting the disc **path in the config**, so the core mounts it on load and the
-bay is occupied from power-on, never boots -- three of three, at
-`cd_mount_delay=0` and at `8`. The mount is fine: the TOC is built and the root
-directory reads `CHUCK CHUCK.A CHUCK.B`. The guest issues `INFO`, then `PLAY
-DATA` *before* our media announce, then `UNPAUSE`, then `PLAY DATA` again after
-the announce -- and then stops asking. No sector request is ever made, and our
-host never arms a read for either attempt.
+First reported here as "the disc already in the bay never boots, 0 of 3". That
+was true of the rounds taken and **overstated as a rate** -- a later three rounds
+on the same path booted once. The real variable is not the mount route but WHEN
+the first media-present announce lands, and at the shipped hold of 8 s the boot
+is marginal rather than impossible:
 
-The same disc on the same binary and bitstream boots 32 of 32 when it arrives
-**after** the boot starts. So this is not the flash failure, but it is the only
-reproducible non-boot we have, and it is in the same area: what the ROM does
-with a disc that was already there. Worth a separate investigation; see
-`scripts/setting-ab.py`, which records the path and why it is not used for
-measurement.
+| announce at | booted |
+|---|---|
+| 0 s | 0/2 |
+| 8 s | 1/8 (the shipped default) |
+| 10 s | 1/2 |
+| 12, 14, 16, 26 s | 11/11 |
+
+Measured across two independent mount routes -- the disc in the config, so the
+core mounts it on load, and the `mount_cd` hook at a controlled delay -- which is
+why the rows pool. 1 of 8 against 11 of 11 is p < 0.001 by Fisher.
+
+The ROM looks identical up to the failure: `INFO`, then two non-data `PLAY`
+frames (`cmd[7]=0x03`), one before the announce and one after, in rounds that
+boot and rounds that do not. In a failing round the data read (`cmd[7]` bit 7)
+never follows and the ROM stops asking. Nothing is refused host-side; it is
+never asked for.
+
+**Fixed by raising the hold to 14 s**, which also moves further from the chip-RAM
+edge the hold exists for (`chip-ram-shortfall.md` measured 6 s failing, 8 s
+working, and said to raise it if trouble appeared). Re-measured with the fix
+deployed: the two arrival times that were 0/2 each are 3/3 each, and the core
+reports a 14000 ms hold from a config that still stores 8, so the load-path
+migration works.
+
+This is **not** the first-boot-after-a-flash failure the rest of this file is
+about: that one still does not reproduce, and 32 boots today were clean at both
+sector rates and with and without a real flash. It is a different failure that
+was found while building an instrument for the first one.
 
 ## Five explanations, each falsified by its own control
 

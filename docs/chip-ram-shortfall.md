@@ -218,7 +218,14 @@ threshold is between them and the margin is about two seconds. That is thinner
 than it looks. A slower disc, another Kickstart, or a busier card could push the
 boot past it, and the symptom would be an intermittent out-of-memory
 indistinguishable from a game bug. **If that is ever reported, raise this
-first.** Overridable at runtime: write milliseconds into /tmp/akiko_boot_delay
+first.** **Raised to 14000 ms on 2026-10-03, and this is why that was the right
+direction.** The thin margin above was real but the pressure came from the other
+side: at an 8 s announce Chuck Rock boots 1 time in 8, against 11 of 11 at 12 s
+and above, because the ROM never issues its data read. Both failures want the
+announce LATER, so 14 moves away from both edges. See
+`first-boot-after-flash.md` for that measurement.
+
+Overridable at runtime: write milliseconds into /tmp/akiko_boot_delay
 and reload the core, no rebuild.
 
 ## Two mistakes worth keeping
