@@ -111,6 +111,53 @@ about: that one still does not reproduce, and 32 boots today were clean at both
 sector rates and with and without a real flash. It is a different failure that
 was found while building an instrument for the first one.
 
+## An early announce fails in TWO different ways
+
+Both were found with the hold forced short through `/tmp/akiko_boot_delay`, which
+is the only way to reproduce either on demand now that the default is 14 s.
+
+**At an 8 s announce the ROM asks for nothing at all.** No `PLAY DATA` with the
+data bit set, ever; no timeout, no retry, no error frame. It sits on the CD32
+animation, which a screenshot confirms is the idle animation and not a crash.
+Nothing is refused host-side, because nothing is asked for.
+
+**At a 0 s announce the ROM reads the disc but never boots it.** Thirteen reads,
+the same count as a healthy boot, and they go to the wrong place: the first is
+**LBA 16**, the ISO primary volume descriptor, where a healthy boot starts at
+**LBA 14**, the CD32 boot block. LBA 14 is read once, later, and the game loader
+at LBA 12 is never reached. Eight rounds out of eight, identical. That reads like
+the ROM treating the disc as a data volume to mount rather than a disc to boot.
+
+So "announce too early" is not one failure with a threshold; it is two failures
+with different signatures, and the 12 s boundary in the table above is where the
+first of them stops happening.
+
+## Telling the guest again revives it, and is not enough
+
+If the edge is lost rather than mistimed, sending another should fix it, and it
+half does. Eight rounds an arm, one binary, interleaved, hold 8000 ms, the arms
+separated only by a flag file:
+
+| | ROM asks for the boot block | completes the boot |
+|---|---|---|
+| re-announce on | **8/8** (it fired in 6) | 2/8 |
+| re-announce off | 3/8 | 3/8 |
+
+p = 0.026 on the first column. In every round where the ROM was dead the retry
+revived it: removal edge, arrival edge, and about four seconds later `start_lba=14`
+followed by 19, 17, 25621, 26505, 25622 -- the healthy sequence. **And then it
+stops**, without going on to LBA 12 and the rest of the load. A guess worth
+testing: the removal half invalidates the mounted volume and the loader aborts.
+
+Left unmerged as a draft. It converts a silent hang into a boot attempt that
+stalls, which is a better diagnosis and not yet a fix.
+
+**A measurement warning that cost three builds.** At a short hold the boot is
+marginal enough that the INSTRUMENT moves it: eight rounds failed on one build
+and the next round booted on a build differing only by log lines, because
+`akiko_diag` is a synchronous write on the path being timed. Two builds cannot be
+compared here. One binary with a runtime flag can.
+
 ## Five explanations, each falsified by its own control
 
 Recorded so none of them is re-derived:
