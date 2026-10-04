@@ -64,7 +64,42 @@ gives every site `cd.device` issues one from.
    logs and got about 8x. `mmcd_drive` now serves at the commanded rate and is
    the default for a config that has none. (PR #117)
 
-## Known gaps, not fixed
+## Known gaps, since closed
+
+Three of the four were one mechanism -- the head has to get there -- and were
+closed together in PR #119. `akiko_seek_us` charges nothing for a read that
+continues where the last one stopped, and otherwise a settle plus a stroke
+proportional to the distance, capped at a full sweep. Audio arms through the
+same function and a 1x/2x change charges a spindle settle. Only `mmcd_drive`
+pays any of it.
+
+Measured in authentic mode, all three titles opening at lba 14:
+
+| title | arms | max lba | seeks | modelled travel |
+|---|---|---|---|---|
+| Chuck Rock | 13 | 26505 | 13 | 2677 ms |
+| Flink | 12 | 779 | 14 | 1688 ms |
+| Diggers | 16 | 3204 | 16 | 2170 ms |
+
+With `fast` selected: no seeks charged, boots as before.
+
+**The design error is the part worth keeping.** The first version SLEPT the seek
+inside the sector push, which blocks the binary's single main loop -- the one
+that also services the bridge and the OSD -- for up to half a second, where a
+sector interval is 6.7 ms. A drive asked for data before the head arrives does
+not stall the bus; it does not answer yet. The seek is now waited out by
+declining the request, the same path a paused drive uses. Anything that models
+mechanical time in this core has to be written that way.
+
+### What is still not modelled
+
+Spin-up remains a timer rather than a state: the drive reports empty for the
+announce hold and then present, with no not-ready in between. The protocol has
+no way to say "ready soon" -- the status byte's bit 0 is a binary disk-present
+flag -- so a faithful version would have to be built out of the timing alone,
+which is what the hold already is. Left as it stands deliberately.
+
+## Superseded: the gaps as they were first listed
 
 Ranked by how likely they are to matter.
 
