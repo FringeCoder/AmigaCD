@@ -47,11 +47,27 @@ frame:
 |---|---|---|
 | 8 s, the failure window | 1/8 booted | **16/16** |
 | 14 s, the shipped default | 11/11 | 8/8, no regression |
-| 0 ms | 0/8 | 0/10, unchanged |
+| 0 ms | 0/8 | **3/3**, see the correction below |
 
-The 0 ms case is a different failure -- the disc is announced before the ROM is
-ready, and it reads LBA 16 and mounts a data volume instead of booting -- and the
-14 s hold keeps the announce out of that window.
+### Correction: the 0 ms case boots too, and "0 of 10" was my own scoring
+
+An early announce does make the ROM open at **LBA 16**, the ISO primary volume
+descriptor, instead of **LBA 14**, the CD32 boot block: it mounts the disc as a
+data volume rather than booting it. Every read is then shifted -- 16, 21, 19,
+25623, 26507, 25624 against 14, 19, 17, 25621, 26505, 25622 -- and all three
+titles tested do it, so it is the ROM, not a quirk of one disc.
+
+**It is not a failure.** That route reaches the loader at LBA 12 and the game
+data at 25623 and 25875, exactly like the other one. Measured after the checksum
+fix: holds of 0, 1, 2 and 4 seconds all boot, and 0 ms booted 3 of 3 by hand.
+
+The "0 of 10" reported earlier was an artifact of the harness, which scored a
+boot as "LBA 14 and THEN LBA 12". The data-mount path never reads 14, so every
+one of those boots was counted as a failure. `scripts/setting-ab.py` now accepts
+either opening read.
+
+So the checksum fix covers every announce timing tested, and the 14 s hold is
+kept for the chip-RAM reason it was raised for rather than for the boot read.
 
 **What the stall actually was:** the revived ROM ran 14, 19, 17, 25621, 26505,
 25622 and stopped. That is the signature this whole file is about. It was not PBX
