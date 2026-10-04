@@ -346,7 +346,7 @@ static const char *config_ss_slot_msg[] = { "1", "2", "3", "4" };
 // 1700 us is 588/s, near enough 8x and not a rate any real machine produces;
 // a CD32 is a 2x unit at 150/s. Labelled by what they are rather than "Fast"
 // and "Slow", because the slow one is the accurate one.
-const char *config_cd_speed_msg[] = { "Fast (~8x)", "CD32 (2x)" };
+const char *config_cd_speed_msg[] = { "Fast (~8x)", "CD32 (2x)", "Drive (asked)" };
 
 // Save states are refused in two configurations. The OSD greys the rows out so
 // the user is told, rather than pressing SELECT and having nothing happen:

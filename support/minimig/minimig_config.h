@@ -203,12 +203,24 @@ typedef struct
 // more faithful, gives about four times the margin over that knee, and costs
 // about four times the load time. Which is right is a judgement about the
 // machine you want, so it is a choice and not a constant.
+// mmcd_drive is what the hardware does: the guest COMMANDS a rate, in bit 6 of
+// cmd[8] of every PLAY/READ, and the drive runs at it. We parsed that byte and
+// threw it away -- "recorded for future seek-time simulation" -- so the CD32 has
+// been asking for 2x and getting about 8x on the shipped default, for every
+// title, since this core existed. It is the default now; the other two remain as
+// deliberate overrides.
 enum mm_cdSpeed
 {
-	mmcd_fast = 0,
-	mmcd_2x   = 1,
+	mmcd_fast  = 0,
+	mmcd_2x    = 1,
+	mmcd_drive = 2,
 	mmcd_count
 };
+
+// New configs get the authentic behaviour. An existing config keeps whatever it
+// stores: unlike the announce hold, neither of the other two values is broken,
+// and which one you want is a preference about loading times.
+#define AMIGACD_CD_SPEED_DEFAULT mmcd_drive
 
 extern mm_configTYPE minimig_config;
 

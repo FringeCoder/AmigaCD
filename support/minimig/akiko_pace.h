@@ -63,6 +63,11 @@
 // default, so a machine nobody has touched behaves exactly as it always has.
 #define AKIKO_SECTOR_PERIOD_2X_US 6667
 
+// And 1x, 75 sectors/s, which the guest does ask for: the ROM commands a rate
+// in bit 6 of cmd[8] of every PLAY/READ, and 3 of the 133 speed changes seen in
+// our logs were back down to 1x.
+#define AKIKO_SECTOR_PERIOD_1X_US 13333
+
 // How long to wait, in microseconds, before starting a push, so that it begins
 // at least period_us after the previous one began.
 //

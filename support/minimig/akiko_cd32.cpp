@@ -1244,8 +1244,7 @@ static void cmd_unpause(const uint8_t *cmd)
 //   cmd[7] bit 7: 1 = data read, 0 = audio play.
 //   cmd[8] bit 6: 1 = 2x CD speed, 0 = 1x (WinUAE akiko.cpp:1055).
 // We *record* the LBAs but do not actually start audio/data — that's M4.
-// cdrom_speed is recorded for future seek-time simulation; we do not currently
-// throttle to the requested speed (we deliver faster than 2x already).
+// cdrom_speed is the rate the guest commanded, and mmcd_drive serves at it;
 static int cdrom_speed = 1;  // 1x or 2x; updated each cmd_multi
 
 static void cmd_multi(const uint8_t *cmd)
@@ -2060,8 +2059,16 @@ static void akiko_push_sector(const uint8_t *buf)
 	// Read per push rather than latched at mount: changing the setting then has
 	// an effect on the disc already in the drive, which is how you would want
 	// to compare the two without reloading a game to do it.
-	const int64_t period_us = (minimig_config.cd_speed == mmcd_2x)
-	                        ? AKIKO_SECTOR_PERIOD_2X_US : AKIKO_SECTOR_PERIOD_US;
+	// mmcd_drive runs at the rate the guest ASKED for. Every PLAY/READ carries
+	// one in bit 6 of cmd[8]; cmd_multi has always parsed it into cdrom_speed and
+	// then ignored it, so a CD32 commanding 2x was served at about 8x.
+	int64_t period_us;
+	switch (minimig_config.cd_speed) {
+	case mmcd_2x:    period_us = AKIKO_SECTOR_PERIOD_2X_US; break;
+	case mmcd_drive: period_us = (cdrom_speed >= 2) ? AKIKO_SECTOR_PERIOD_2X_US
+	                                                : AKIKO_SECTOR_PERIOD_1X_US; break;
+	default:         period_us = AKIKO_SECTOR_PERIOD_US; break;
+	}
 
 	const int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, period_us);
 	if (wait_us > 0) {
@@ -2855,7 +2862,8 @@ void akiko_cd32_init(void)
 	// evidence, which is the fourth time an uninstrumented variable has cost
 	// this investigation a day.
 	akiko_diag("[akiko] config: cd_speed=%s mount_delay=%us",
-	           (minimig_config.cd_speed == mmcd_2x) ? "2x" : "fast",
+	           (minimig_config.cd_speed == mmcd_2x)    ? "2x" :
+	           (minimig_config.cd_speed == mmcd_drive) ? "drive" : "fast",
 	           minimig_config.cd_mount_delay);
 	cd_initialized   = 0;
 	cd_paused        = 0;
