@@ -1683,10 +1683,17 @@ static void cmd_subq(const uint8_t *cmd)
 	// (0x40 = data, 0x00 = audio). adr=1 in low nibble (current Q-mode).
 	uint8_t ctl_adr = (uint8_t)((t.attr & 0xf0) | 0x01);
 
-	// MSF positions, with 2-second pre-gap. Saturate trk_lsn at 0 if
-	// cur_lba sits before the track start (shouldn't happen in steady
-	// state but defensive).
-	uint32_t trk_lsn  = (cur_lba >= t.start) ? (cur_lba - t.start) + 150u : 150u;
+	// Two different times, and only one of them carries the pre-gap.
+	//
+	// The Q channel in mode 1 reports the running time WITHIN THE TRACK, which
+	// starts at 00:00:00 at index 1, and the ABSOLUTE time, where lba 0 is
+	// 00:02:00 because the two-second lead-in is counted. This added 150 to
+	// both, so every track-relative position came back two seconds high -- a
+	// player sitting on the first frame of a track would read 00:02:00.
+	//
+	// Saturate at the track start if cur_lba sits before it; that should not
+	// happen in steady state, and a wrapped unsigned here would read as 14 hours.
+	uint32_t trk_lsn  = (cur_lba >= t.start) ? (cur_lba - t.start) : 0u;
 	uint32_t disk_lsn = cur_lba + 150u;
 
 	uint32_t tm = (trk_lsn / 75u) / 60u;
@@ -2340,10 +2347,26 @@ static bool akiko_cdda_pump(void)
 		akiko_diag("[akiko] CDDA pump abort: drive gone");
 		return false;
 	}
+	// The head has to reach the audio too. akiko_arm_seek charges a trip when
+	// PLAY arms, and until this was here nothing on the audio side spent it: the
+	// first audio sector went out instantly, and the unspent delay then sat there
+	// until some later DATA sector cleared it. Declining is how mechanical time
+	// is waited out in this file -- never a sleep in the poll loop.
+	if (cd_ready_at_us) {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		const int64_t now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+		if (now_us < cd_ready_at_us) return false;
+		cd_ready_at_us = 0;
+	}
+
 	if (!akiko_audio_fifo_ready()) return false;
 
 	uint8_t buf[AKIKO_CDDA_BYTES];
 	uint32_t lba = (uint32_t)cd_cdda_lba_next;
+	// Audio moves the head like anything else does, so a data read that follows
+	// a track pays for the distance from where the music stopped.
+	cd_head_lba = (int32_t)lba;
 	if (!cd_read_audio_sector(cd_cdda_drv, lba, buf)) {
 		// Read failure — push silence so the FIFO doesn't underrun at the
 		// boundary, but tear down so we don't loop here forever. WinUAE
