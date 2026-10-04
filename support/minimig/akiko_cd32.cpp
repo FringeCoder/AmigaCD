@@ -1261,9 +1261,24 @@ static void cmd_multi(const uint8_t *cmd)
 	}
 
 	if (!cd_media_present()) {
-		r[1] = 0x01;
+		// An empty drive answers CH_ERR_NODISK, the same as STOP, PAUSE and
+		// UNPAUSE already do -- WinUAE's checkerr(), akiko.cpp:1014.
+		//
+		// This branch used to answer 0x01: the door bit with CH_ERR_OK, which
+		// tells the guest "no error, carry on" about a drive holding nothing.
+		// It is the same mistake the other three commands were fixed for, and
+		// it was inherited rather than chosen -- it predates the commit that
+		// last touched this condition.
+		//
+		// It matters because of WHO asks. `checkdisk` is a resident in the CD32
+		// extended ROM at priority 49, so it runs before almost anything else
+		// and probes with a READ TOC (op 0x04, seekpos < 0). During the cold-boot
+		// announce hold the drive is deliberately reporting empty, so that probe
+		// lands here -- on every boot this core has ever done. See
+		// docs/cd32-extended-rom-modules.md for how the ROM is laid out.
+		r[1] = CH_ERR_NODISK | cd_door;
 		akiko_send_response(r, 2);
-		akiko_diag("[akiko] PLAY: no disk");
+		akiko_diag("[akiko] MULTI: no disk (status=0x%02x)", r[1]);
 		return;
 	}
 
