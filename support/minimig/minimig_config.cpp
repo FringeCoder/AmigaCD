@@ -892,6 +892,33 @@ static void ApplyConfiguration(char reloadkickstart)
 	// A1200 and CDTV keep exactly the behaviour they have today. The physical
 	// disc exception applies here too, since that reaches its drive over IDE.
 	unsigned char ide_bits = minimig_config.ide_cfg;
+
+	// A STOCK CD32 HAS NO IDE AT ALL, whatever the config file says.
+	//
+	// amigacd_apply_system() sets ide_cfg correctly when a machine is chosen,
+	// and nothing corrects it on LOAD -- so a card whose AmigaCD_CD32.cfg was
+	// written while the bit was set keeps it for ever, and the user never
+	// re-selects the profile because the machine is already the one they want.
+	// That is the third time this asymmetry has bitten: chip RAM and the floppy
+	// count are corrected a few lines up for the same reason.
+	//
+	// It is not cosmetic. Gayle costs about 190 KB of chip RAM and, worse,
+	// fragments the low region: docs/chip-ram-shortfall.md measured the largest
+	// contiguous block at 1703 KB with IDE on against 1774.8 KB with it off, and
+	// Flink wants 1774.8 KB in one piece. Found again on 2026-10-04 with Banshee,
+	// which stops at "not enough memory" on a stock CD32 and runs as soon as fast
+	// RAM is added -- the classic shape of this fault.
+	//
+	// Computed here rather than written back, so it cannot drift from what the
+	// machine actually is, and so a user who later picks CD32+ still gets IDE.
+	if (is_amigacd()
+	    && amigacd_system() == AMIGACD_SYS_CD32
+	    && !amigacd_cd_needs_ide())
+	{
+		ide_bits &= (unsigned char)~0x01;
+	}
+
+	// CD32+ pays for Gayle only when a hard disk is actually attached.
 	if (is_amigacd()
 	    && amigacd_system() == AMIGACD_SYS_CD32PLUS
 	    && !amigacd_cd_needs_ide()
