@@ -1261,9 +1261,24 @@ static void cmd_multi(const uint8_t *cmd)
 	}
 
 	if (!cd_media_present()) {
-		r[1] = 0x01;
+		// An empty drive answers CH_ERR_NODISK, the same as STOP, PAUSE and
+		// UNPAUSE already do -- WinUAE's checkerr(), akiko.cpp:1014.
+		//
+		// This branch used to answer 0x01: the door bit with CH_ERR_OK, which
+		// tells the guest "no error, carry on" about a drive holding nothing.
+		// It is the same mistake the other three commands were fixed for, and
+		// it was inherited rather than chosen -- it predates the commit that
+		// last touched this condition.
+		//
+		// It matters because of WHO asks. `checkdisk` is a resident in the CD32
+		// extended ROM at priority 49, so it runs before almost anything else
+		// and probes with a READ TOC (op 0x04, seekpos < 0). During the cold-boot
+		// announce hold the drive is deliberately reporting empty, so that probe
+		// lands here -- on every boot this core has ever done. See
+		// docs/cd32-extended-rom-modules.md for how the ROM is laid out.
+		r[1] = CH_ERR_NODISK | cd_door;
 		akiko_send_response(r, 2);
-		akiko_diag("[akiko] PLAY: no disk");
+		akiko_diag("[akiko] MULTI: no disk (status=0x%02x)", r[1]);
 		return;
 	}
 
@@ -3143,10 +3158,20 @@ void akiko_cd32_poll(void)
 	// this hook it reproduces 6 times in 8, on demand, in about a hundred
 	// seconds a round.
 	//
-	// So it ships OFF. It is not a fix -- it does not improve the completion rate
-	// (3/14 either way) -- and the announce hold of 14 s is what keeps the first
-	// edge from being lost in normal use. What it buys is a failing machine to
-	// test against:
+	// It shipped OFF while it was only a reproducer. It is ON now, because it has
+	// a job: it is the recovery edge an empty-drive abort waits for.
+	//
+	// cd.device aborts command 4 when the status has bit 7 set ($E58CA4, bpl.w),
+	// turns the LED off and returns TDERR_DiskChanged ($E58DCE..$E58DE4, verified
+	// against the ROM). That is the correct answer to a probe of an empty drive,
+	// and it leaves the ROM waiting for a media change. Measured at an 8 s
+	// announce: without the retry 0 of 6, with it 6 of 6, every round opening at
+	// lba 14 -- the CD32 boot block -- rather than the lba 16 data-mount path.
+	// At the shipped 14 s hold it is 6 of 6 either way and the retry never fires.
+	//
+	// It is still bounded to three attempts, still excluded while CDDA streams,
+	// and still retires the moment any data read is armed. The modes remain, and
+	// a reproducer is now `off` plus a short hold:
 	//
 	//   echo 8000 > /tmp/akiko_boot_delay
 	//   echo pair > /tmp/akiko_reannounce_mode
@@ -3171,7 +3196,7 @@ void akiko_cd32_poll(void)
 	enum { REANN_OFF = 0, REANN_PAIR = 1, REANN_ARRIVAL = 2 };
 	static int reann_mode = -1;
 	if (reann_mode < 0) {
-		reann_mode = REANN_OFF;      // see the note above: a test hook, not behaviour
+		reann_mode = REANN_PAIR;     // see the note above: the recovery edge
 		FILE *mf = fopen("/tmp/akiko_reannounce_mode", "r");
 		if (mf) {
 			char w[16] = {0};
