@@ -34,6 +34,15 @@ static void check_bool(const char *name, bool got, bool want)
 	}
 }
 
+static void check_i64(const char *name, int64_t got, int64_t want)
+{
+	if (got != want) {
+		printf("FAIL %s: got %lld want %lld\n", name,
+		       (long long)got, (long long)want);
+		failures++;
+	}
+}
+
 int main(void)
 {
 	const int64_t P = AKIKO_SECTOR_PERIOD_US;
@@ -182,6 +191,47 @@ int main(void)
 		           akiko_pause_stuck(0xFFFFF000u, 0x00000100u, 2000), true);
 		check_bool("a short pause spanning a wrap is still short",
 		           akiko_pause_stuck(0xFFFFF000u, 0xFFFFF500u, 2000), false);   // 1280 ms
+	}
+
+	// --------------------------------------------- the head has to get there
+	{
+		const uint32_t span = 26914;            // Chuck Rock, lead-out
+
+		// Streaming costs nothing. This is the case the drive is built for and
+		// the one every loader depends on, so it has to be exactly zero rather
+		// than small.
+		check_i64("the next sector is free", akiko_seek_us(100, 101, span), 0);
+		check_i64("the same sector is free", akiko_seek_us(100, 100, span), 0);
+
+		// Anything else pays the settle, at least.
+		check_bool("a short hop costs the base",
+		           akiko_seek_us(100, 140, span) >= AKIKO_SEEK_BASE_US, true);
+		check_bool("a short hop costs little more than the base",
+		           akiko_seek_us(100, 140, span) < AKIKO_SEEK_BASE_US + 2000, true);
+
+		// A full stroke is the cap, and nothing exceeds it -- including a seek
+		// past the lead-out, which BIOS does issue.
+		check_i64("lead-in to lead-out is the full stroke",
+		          akiko_seek_us(0, (int32_t)span, span), AKIKO_SEEK_FULL_US);
+		check_i64("past the lead-out is still the full stroke",
+		          akiko_seek_us(0, 286166, span), AKIKO_SEEK_FULL_US);
+
+		// Direction does not matter to a head.
+		check_i64("seeking back costs what seeking out costs",
+		          akiko_seek_us(25622, 14, span), akiko_seek_us(14, 25622, span));
+
+		// An unknown head position is a drive that just spun up: the head is at
+		// the lead-in, not wherever the last disc left it.
+		check_i64("unknown is the lead-in",
+		          akiko_seek_us(-1, 25622, span), akiko_seek_us(0, 25622, span));
+
+		// A pre-gap target is a real place on the disc, and DotC reads from one.
+		check_i64("a pre-gap target is the lead-in",
+		          akiko_seek_us(5000, -34, span), akiko_seek_us(5000, 0, span));
+
+		// A disc whose span we do not know yet must not come out free.
+		check_i64("no span means assume the worst",
+		          akiko_seek_us(0, 25622, 0), AKIKO_SEEK_FULL_US);
 	}
 
 	if (failures) { printf("%d FAILURES\n", failures); return 1; }

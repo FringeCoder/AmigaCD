@@ -1247,6 +1247,39 @@ static void cmd_unpause(const uint8_t *cmd)
 // cdrom_speed is the rate the guest commanded, and mmcd_drive serves at it;
 static int cdrom_speed = 1;  // 1x or 2x; updated each cmd_multi
 
+// Where the head is, and the earliest the next sector may be delivered.
+//
+// A real drive moves its head before it streams; we deliver the first sector of
+// a new read instantly, from anywhere to anywhere. cd_head_lba follows what we
+// actually served, and an arm that jumps somewhere else sets cd_ready_at_us far
+// enough ahead to pay for the trip. Only mmcd_drive, the authentic mode, pays
+// it -- the override rates are there for people who want loading over realism.
+static int32_t cd_head_lba      = -1;    // -1 = unknown, i.e. just spun up
+static int64_t cd_ready_at_us   = 0;     // 0 = no outstanding mechanical delay
+
+// Charge the mechanical cost of moving the head to `to_lba`, if the authentic
+// mode is selected. Also used for audio, which seeks exactly like data does.
+static void akiko_arm_seek(int32_t to_lba, const char *what)
+{
+	if (minimig_config.cd_speed != mmcd_drive) return;
+
+	drive_t *drv = cd_find_drive();
+	uint32_t span = 0;
+	if (drv && drv->track_cnt > 0) span = drv->track[drv->track_cnt - 1].start;
+
+	const int64_t seek_us = akiko_seek_us(cd_head_lba, to_lba, span);
+	if (seek_us <= 0) return;
+
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	const int64_t now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+	const int64_t ready  = now_us + seek_us;
+	if (ready > cd_ready_at_us) cd_ready_at_us = ready;
+
+	akiko_diag("[akiko] seek %s: %d -> %d, %lld us", what,
+	           cd_head_lba, to_lba, (long long)seek_us);
+}
+
 static void cmd_multi(const uint8_t *cmd)
 {
 	uint8_t r[2];
@@ -1257,6 +1290,17 @@ static void cmd_multi(const uint8_t *cmd)
 		akiko_diag("[akiko] cdrom_speed change %dx -> %dx (cmd8=0x%02x)",
 		           cdrom_speed, new_speed, cmd[8]);
 		cdrom_speed = new_speed;
+		// Changing rate is a spindle change. The drive settles before it can
+		// stream again, which is why this is charged once per change and not
+		// per sector.
+		if (minimig_config.cd_speed == mmcd_drive) {
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			const int64_t now_us = (int64_t)ts.tv_sec * 1000000LL
+			                     + ts.tv_nsec / 1000LL;
+			const int64_t ready = now_us + AKIKO_SPEED_SETTLE_US;
+			if (ready > cd_ready_at_us) cd_ready_at_us = ready;
+		}
 	}
 
 	if (!cd_media_present()) {
@@ -1412,6 +1456,7 @@ static void cmd_multi(const uint8_t *cmd)
 			// READ DATA without re-pulsing CDFLAG_ENABLE, the counter is NOT
 			// reset between reads, so LBA=base+counter delivers base+leftover
 			// (wrong sector) — deterministic, matches the read-#3 divergence.
+			akiko_arm_seek((int32_t)s_lba, "data");
 			cd_sec_dbg_n = 0;   // reopen the trace window for this read
 			// The guest is plainly listening, so the re-announce net retires
 			// for the rest of this core load.
@@ -1455,6 +1500,7 @@ static void cmd_multi(const uint8_t *cmd)
 		// cd_cdda_drv form the pump's working set; the poll loop's
 		// akiko_cdda_pump() then pushes one sector per FIFO-ready tick and
 		// fires playend_notify(1) on natural end via cd_audio_timeout = -1.
+		akiko_arm_seek((int32_t)s_lba, "audio");
 		cd_data_lba_base = -1;
 		cd_playing = 1;
 		cd_paused = 0;
@@ -2070,6 +2116,14 @@ static void akiko_push_sector(const uint8_t *buf)
 	default:         period_us = AKIKO_SECTOR_PERIOD_US; break;
 	}
 
+	// Only the streaming interval is slept here. A SEEK is not: it is waited out
+	// by declining the request until the head arrives, in akiko_handle_sec_req.
+	//
+	// This is the whole difference between a model and an outage. usleep() here
+	// blocks the binary's single main loop, which also services the bridge and
+	// the OSD, and a sector interval is 6.7 ms at 2x -- survivable. A modelled
+	// seek is up to half a second, and sleeping that cost the test machine its
+	// network the first time this was run on hardware.
 	const int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, period_us);
 	if (wait_us > 0) {
 		usleep((useconds_t)wait_us);
@@ -2528,6 +2582,17 @@ static bool akiko_handle_sec_req(void)
 	cd_pause_decline_ms = 0;
 	cd_pause_warned     = false;
 
+	// The head is still travelling. Decline, and the engine will ask again --
+	// which is what a drive does to a host that asks early, and keeps the poll
+	// loop running instead of sleeping in it.
+	if (cd_ready_at_us) {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		const int64_t now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+		if (now_us < cd_ready_at_us) return false;
+		cd_ready_at_us = 0;
+	}
+
 
 	drive_t *drv = cd_find_drive();
 	if (!drv) {
@@ -2563,6 +2628,10 @@ static bool akiko_handle_sec_req(void)
 	cd_sec_pushed++;
 	cd_sec_last_ms    = (uint32_t)GetTimer(0);
 	cd_stall_reported = false;
+	// The head is wherever the last sector came from, including the skip-pushed
+	// pre-gap ones below: the drive crosses those too.
+	cd_head_lba   = signed_lba;
+	cd_ready_at_us = 0;                 // the trip is paid for
 	if (signed_lba < 0) {
 		return false;
 	}
@@ -2873,6 +2942,10 @@ void akiko_cd32_init(void)
 	cd_play_start_lba = 0;
 	cd_play_end_lba   = 0;
 	cd_data_lba_base = -1;
+	// A core load spins the drive up again, so the head is back at the lead-in
+	// and nothing is owed.
+	cd_head_lba      = -1;
+	cd_ready_at_us   = 0;
 	cd_audio_timeout = 0;
 	cd_audio_play_until_ms = 0;
 	cd_cdda_lba_next = -1;

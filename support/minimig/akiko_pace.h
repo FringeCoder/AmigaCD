@@ -68,6 +68,34 @@
 // our logs were back down to 1x.
 #define AKIKO_SECTOR_PERIOD_1X_US 13333
 
+// Drive mechanics: the head has to get there, and it is not instant.
+//
+// We deliver the first sector of a new read immediately, from anywhere to
+// anywhere. No drive does that. A 2x unit of 1993 quotes random access around
+// 400 ms and a full stroke around half a second, and the cost scales with how
+// far the head travels -- which is why a sequential read costs nothing and a
+// jump from the directory to the far end of the disc costs the most.
+//
+// These numbers are MODELLED from published typical figures for drives of that
+// class, not measured from a CD32, and they are deliberately on the low side:
+// the shape (proportional to distance, free when sequential) is what matters
+// here, and an over-long seek would be indistinguishable from the stalls this
+// core spent weeks chasing. Applied only in mmcd_drive, the authentic mode.
+#define AKIKO_SEEK_BASE_US    120000   // head settle plus rotational latency
+#define AKIKO_SEEK_FULL_US    500000   // lead-in to lead-out
+
+// Changing between 1x and 2x is a spindle change, not a register write.
+#define AKIKO_SPEED_SETTLE_US 100000
+
+// How long the head takes to move from `from_lba` to `to_lba` on a disc whose
+// last sector is `span_lba`, in microseconds.
+//
+// Zero when the read continues where the last one stopped, because that is the
+// case the drive is built for and the one every streaming title relies on. A
+// negative `from_lba` means the head position is unknown -- after a spin-up it
+// is at the lead-in, so that is what is assumed.
+int64_t akiko_seek_us(int32_t from_lba, int32_t to_lba, uint32_t span_lba);
+
 // How long to wait, in microseconds, before starting a push, so that it begins
 // at least period_us after the previous one began.
 //
