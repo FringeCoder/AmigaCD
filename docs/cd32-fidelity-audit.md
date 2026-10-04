@@ -91,6 +91,48 @@ not stall the bus; it does not answer yet. The seek is now waited out by
 declining the request, the same path a paused drive uses. Anything that models
 mechanical time in this core has to be written that way.
 
+## Second pass (2026-10-04)
+
+Checked and correct, so the next audit can skip them:
+
+- **CD audio always plays at 1x.** The CDDA pump is paced by the FIFO's
+  `cdda_req` backpressure, and that FIFO drains at the audio clock, so the
+  sector-rate setting cannot make music play fast. This was the first thing
+  worth ruling out.
+- **The NVRAM is a real I2C slave.** `akiko_nvram.v` implements the protocol
+  against a 1 KB memory, which is what a CD32 carries; `akiko.v` only models the
+  SCL/SDA pin pair. The "M1 stub" comment beside the register writes is stale.
+- **TOC control bits** come from the track attribute: 0x04 for data, 0x00 for
+  audio, with ADR=1, and the A0/A1/A2 points take track 1's.
+- **The SUBQ response layout** is a faithful Q-channel copy.
+
+Found and fixed (PR #121):
+
+- **The audio path never spent its seek.** `akiko_arm_seek` charged a trip for
+  audio as well as data and only the data path honoured it, so the first audio
+  sector went out instantly and the unspent delay then postponed a later data
+  read instead. A defect in the change that closed the seek gap, found by
+  re-reading it rather than by a failure.
+- **SUBQ put the pre-gap in both times.** The Q channel carries running time
+  within the track, which starts at 00:00:00 at index 1, and absolute time,
+  where lba 0 is 00:02:00. We added 150 frames to both, so every track-relative
+  position was two seconds high.
+
+### Known and not fixed
+
+**Pre-gap sectors are reported as the previous track, index 1.** Between the end
+of one track and the start of the next -- 150 sectors on Banshee, lba 1773..1922
+-- a real drive reports the NEXT track with index 0 and a relative time counting
+DOWN to zero. We report the previous track at index 1 counting up. Fixing it
+means teaching the track search about pre-gaps and index 0, which is more
+invasive than the two above and has nothing measured behind it yet.
+
+**The SUBQ change is unverified on hardware.** Nothing in the boot path issues
+SUBQ, and driving a title into audio playback needs a pad on the machine. The
+arithmetic is from the Red Book rather than a measurement -- which, after the
+NODISK episode above, is exactly the kind of claim this project has learned to
+label rather than trust.
+
 ### What is still not modelled
 
 Spin-up remains a timer rather than a state: the drive reports empty for the
