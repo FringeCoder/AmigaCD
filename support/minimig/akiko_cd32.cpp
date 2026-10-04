@@ -3158,10 +3158,20 @@ void akiko_cd32_poll(void)
 	// this hook it reproduces 6 times in 8, on demand, in about a hundred
 	// seconds a round.
 	//
-	// So it ships OFF. It is not a fix -- it does not improve the completion rate
-	// (3/14 either way) -- and the announce hold of 14 s is what keeps the first
-	// edge from being lost in normal use. What it buys is a failing machine to
-	// test against:
+	// It shipped OFF while it was only a reproducer. It is ON now, because it has
+	// a job: it is the recovery edge an empty-drive abort waits for.
+	//
+	// cd.device aborts command 4 when the status has bit 7 set ($E58CA4, bpl.w),
+	// turns the LED off and returns TDERR_DiskChanged ($E58DCE..$E58DE4, verified
+	// against the ROM). That is the correct answer to a probe of an empty drive,
+	// and it leaves the ROM waiting for a media change. Measured at an 8 s
+	// announce: without the retry 0 of 6, with it 6 of 6, every round opening at
+	// lba 14 -- the CD32 boot block -- rather than the lba 16 data-mount path.
+	// At the shipped 14 s hold it is 6 of 6 either way and the retry never fires.
+	//
+	// It is still bounded to three attempts, still excluded while CDDA streams,
+	// and still retires the moment any data read is armed. The modes remain, and
+	// a reproducer is now `off` plus a short hold:
 	//
 	//   echo 8000 > /tmp/akiko_boot_delay
 	//   echo pair > /tmp/akiko_reannounce_mode
@@ -3186,7 +3196,7 @@ void akiko_cd32_poll(void)
 	enum { REANN_OFF = 0, REANN_PAIR = 1, REANN_ARRIVAL = 2 };
 	static int reann_mode = -1;
 	if (reann_mode < 0) {
-		reann_mode = REANN_OFF;      // see the note above: a test hook, not behaviour
+		reann_mode = REANN_PAIR;     // see the note above: the recovery edge
 		FILE *mf = fopen("/tmp/akiko_reannounce_mode", "r");
 		if (mf) {
 			char w[16] = {0};
