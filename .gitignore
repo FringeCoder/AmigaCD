@@ -76,3 +76,8 @@ build/
 # and one of them rode along in an unrelated commit.
 tests/build/
 compile_commands.json
+
+# The clangd index, written by the editor and the language server, not by us.
+# It is the Serena/clangd setup that puts it here, so it appears on any machine
+# that opens this tree in an IDE.
+.cache/
