@@ -83,17 +83,29 @@ def write_setting(offset, value):
     return got == str(value)
 
 
+# There are TWO paths into a working boot, and scoring only one of them cost a
+# whole conclusion.
+#
+# The familiar path opens at lba 14, the CD32 boot block. But when the disc is
+# announced early the ROM opens at lba 16, the ISO primary volume descriptor,
+# mounts the disc as a data volume and loads the game from there -- a different
+# route to the same place, and it reaches the loader at lba 12 and the game data
+# exactly like the other one.
+#
+# Requiring lba 14 first therefore scored every one of those as a FAILURE. That
+# is how "a 0 ms announce never boots, 0 of 10" was reported here, when three
+# rounds checked by hand booted 3 of 3 with the loader read plainly in the log.
+#
+# What actually distinguishes a boot is the loader read happening after SOME
+# opening read in this round's log, and the log is cleared at the start of each
+# round, so anything in it belongs to this round.
 def boot_order(text):
-    """True when the game's loader read AFTER the BIOS's own first read.
-
-    Both reads matter: start_lba=12 on its own can be the previous round still
-    running, and the BIOS read at 14 is what proves this boot got that far.
-    """
-    seen_bios = False
+    """True when the game's loader read follows an opening read in this round."""
+    opened = False
     for line in text.splitlines():
-        if "start_lba=14 " in line:
-            seen_bios = True
-        elif "start_lba=12 " in line and seen_bios:
+        if "start_lba=14 " in line or "start_lba=16 " in line:
+            opened = True
+        elif "start_lba=12 " in line and opened:
             return True
     return False
 
