@@ -2116,10 +2116,15 @@ static void akiko_push_sector(const uint8_t *buf)
 	default:         period_us = AKIKO_SECTOR_PERIOD_US; break;
 	}
 
-	// The head may still be travelling. Whichever is later -- the streaming
-	// interval or the end of a seek -- is when this sector may go out.
-	int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, period_us);
-	if (cd_ready_at_us > now_us + wait_us) wait_us = cd_ready_at_us - now_us;
+	// Only the streaming interval is slept here. A SEEK is not: it is waited out
+	// by declining the request until the head arrives, in akiko_handle_sec_req.
+	//
+	// This is the whole difference between a model and an outage. usleep() here
+	// blocks the binary's single main loop, which also services the bridge and
+	// the OSD, and a sector interval is 6.7 ms at 2x -- survivable. A modelled
+	// seek is up to half a second, and sleeping that cost the test machine its
+	// network the first time this was run on hardware.
+	const int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, period_us);
 	if (wait_us > 0) {
 		usleep((useconds_t)wait_us);
 		clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -2576,6 +2581,17 @@ static bool akiko_handle_sec_req(void)
 	// Serving again, so any pause that was being tracked is over.
 	cd_pause_decline_ms = 0;
 	cd_pause_warned     = false;
+
+	// The head is still travelling. Decline, and the engine will ask again --
+	// which is what a drive does to a host that asks early, and keeps the poll
+	// loop running instead of sleeping in it.
+	if (cd_ready_at_us) {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		const int64_t now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+		if (now_us < cd_ready_at_us) return false;
+		cd_ready_at_us = 0;
+	}
 
 
 	drive_t *drv = cd_find_drive();
