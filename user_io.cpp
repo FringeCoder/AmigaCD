@@ -4064,9 +4064,10 @@ void user_io_poll()
 				else if (op & 1) iigs_read(disk, &sd_image[disk], lba, blks, ack);
 				else break;
 			}
-			else if (int stop = st_fdd_sd_service(disk, op, lba, sz, ack))
+			else if (int macop = mac_sd_service(disk, &sd_image[disk], op, lba, sz, ack))
 			{
-				if (stop < 0) break;
+				// Mac Toolbox/CD slots (support/mac); SPI is done by the hook.
+				if (macop < 0) break;
 			}
 			else if (int nxop = next_sd_service(disk, op, (uint32_t)lba, sz, ack))
 			{
@@ -4079,6 +4080,10 @@ void user_io_poll()
 			else if (int a3op = a3_sd_service(disk, &sd_image[disk], op, lba, sz, ack))
 			{
 				if (a3op < 0) break;
+			}
+			else if (int stop = st_fdd_sd_service(disk, op, lba, sz, ack))
+			{
+				if (stop < 0) break;
 			}
 			else if ((blks == G64_BLOCK_COUNT_1541+1 || blks == G64_BLOCK_COUNT_1571+1) && sd_type[disk]==SD_TYPE_C64)
 			{
