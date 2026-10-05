@@ -21,6 +21,9 @@
 // Mac
 #include "support/mac/mac.h"
 
+// Atari Falcon SCSI support
+#include "support/falcon/falcon_scsi.h"
+
 // Archie support
 #include "support/archie/archie.h"
 

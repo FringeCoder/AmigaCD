@@ -307,6 +307,7 @@ void diskled_on();
 char is_minimig();
 char is_amigacd();
 char is_next();
+char is_falcon();
 char is_menu();
 char is_x86();
 char is_snes();
