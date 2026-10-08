@@ -187,11 +187,51 @@ typedef struct
 // also loses the boot read -- so this moves away from both edges rather than
 // trading one for the other. Overridable without a rebuild: milliseconds into
 // /tmp/akiko_boot_delay, then reload the core.
-#define AMIGACD_CD_DELAY_DEFAULT 14
+// 0 since 2026-10-08: a CD32 needs no hold at all.
+//
+// The hold was added because Flink failed when the disc was announced at t=0 --
+// the ROM allocated its CD structures in an order that fragmented chip RAM and
+// Flink could not get its 1774.8 KB in one piece. That was real, and it was a
+// symptom: the frame whose checksum byte had not been written yet (PR #110) was
+// making the ROM take a different path. With that fixed, Flink boots to
+// GAMEPLAY at a 0 ms hold, which is the case it was failing in.
+//
+// Checked against a reference rather than argued: Copperline, configured as the
+// same stock CD32 with the same ROMs and the same CHDs, boots both Flink and
+// Banshee with the disc in the tray at power-on and no hold of any kind.
+//
+// BANSHEE IS NOT THIS SETTING, and an earlier version of this comment said it
+// was. Banshee needs 1731 KB contiguous and a 2 MB machine has about 1728 KB
+// free, so it only runs when the disc is in the tray AT POWER-ON: the ROM boots
+// it straight from the boot block and never builds a DOS environment. Give the
+// same machine the same disc LATE -- which is the only thing a MiSTer can do,
+// because the OSD mounts after the core has started -- and the ROM mounts it as
+// a data volume and runs bans.exe from an AmigaDOS shell instead, where the
+// console and its structures cost more than the margin:
+//
+//     bans.exe: not enough memory available
+//     bans.exe failed returncode 10
+//
+// Measured on this core at a 0 ms hold on 2026-10-08, and measured on
+// Copperline the same afternoon with `--insert-cd-after 20`, chip 2M and no
+// fast RAM: the same two lines, at the same prompt. A real CD32 fails this disc
+// the same way we do, so there is nothing to fix at this setting -- the fix is
+// a disc that is present from reset (or fast RAM, which is what the user did).
+//
+// What DOES boot at 0 is the late-mount route for titles that fit: Chuck Rock
+// reaches its loader in 13 s (lba 14 then 12), and Flink reads its game data
+// and starts CD audio. Neither needs a hold.
+//
+// The row stays, because a hold is still the only lever if some title ever needs
+// one, and /tmp/akiko_boot_delay still overrides without a rebuild.
+#define AMIGACD_CD_DELAY_DEFAULT 0
 #define AMIGACD_CD_DELAY_MAX     15
 // The old default, which existing configs on every card still carry. See the
 // migration in minimig_cfg_load.
+// The two values this core has handed out by default: 8 until 2026-10-03 and 14
+// after it. Both are corrected on load; anything else is the user's own choice.
 #define AMIGACD_CD_DELAY_LEGACY  8
+#define AMIGACD_CD_DELAY_LEGACY2 14
 // CD sector delivery rate.
 //
 // mmcd_fast is the floor the core has always shipped with (see
