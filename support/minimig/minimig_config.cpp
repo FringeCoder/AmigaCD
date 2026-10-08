@@ -905,9 +905,16 @@ static void ApplyConfiguration(char reloadkickstart)
 	// It is not cosmetic. Gayle costs about 190 KB of chip RAM and, worse,
 	// fragments the low region: docs/chip-ram-shortfall.md measured the largest
 	// contiguous block at 1703 KB with IDE on against 1774.8 KB with it off, and
-	// Flink wants 1774.8 KB in one piece. Found again on 2026-10-04 with Banshee,
-	// which stops at "not enough memory" on a stock CD32 and runs as soon as fast
-	// RAM is added -- the classic shape of this fault.
+	// Flink wants 1774.8 KB in one piece.
+	//
+	// Banshee was the motivating case and is NOT evidence for this change, which
+	// is worth saying because the numbers invite the conclusion: it needs 1731 KB,
+	// which falls in that gap. But on 2026-10-08 it booted from a config-named
+	// disc with IDE ON and with IDE OFF, identically, and failed the late
+	// mount_cd route both ways. What decides Banshee is whether the disc is there
+	// at reset -- see docs/banshee-needs-the-disc-at-power-on.md, where a real
+	// CD32 fails the late route the same way. This change stands on the 190 KB
+	// and on a stock CD32 having no IDE, not on rescuing a title.
 	//
 	// Computed here rather than written back, so it cannot drift from what the
 	// machine actually is, and so a user who later picks CD32+ still gets IDE.

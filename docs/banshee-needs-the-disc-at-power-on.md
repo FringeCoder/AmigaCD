@@ -43,17 +43,31 @@ environment. With the disc late it mounts a volume and goes through the shell.
 
 ## Why this matters beyond Banshee
 
-**A MiSTer can only do the late route.** The OSD mounts a disc after the core
-has started, and a path left in the config does not boot at all -- 0 of 3,
-recorded in `setting-ab.py`'s own header and re-confirmed since. Every disc this
-core has ever run has arrived late. Titles that fit do not care: Chuck Rock
-reaches its loader in 13 s (lba 14, then 12) and Flink reads game data and
+**The OSD route is the late route.** It mounts after the core has started, so
+every disc mounted that way arrives late. Titles that fit do not care: Chuck
+Rock reaches its loader in 13 s (lba 14, then 12) and Flink reads game data and
 starts CD audio. A title with no headroom cares a great deal.
 
-That makes "a disc named in the config is present from reset" the highest-value
-fidelity gap left in the CD path, and it now has a reference measurement behind
-it rather than a preference: on real hardware the power-on route is a different
-boot, not a faster one.
+## The config route works, and it runs Banshee
+
+`setting-ab.py`'s header says a path left in the config "does not boot at all --
+0 of 3". **That is now false**, and it was measured before the unwritten-checksum
+fix (PR #110) changed which path the ROM takes. On 2026-10-08, with the title
+written into `hardfile[0].filename` and a plain `load_core`:
+
+```
+[akiko] serving: CD32 slot drive, tracks=4 track0_len=1773 chd=yes f=yes
+```
+
+and Banshee reaches its Core Design intro (`output/banshee-ideoff-config.png`).
+It is served through the **CD32 slot drive**, not the IDE path that `mount_cd`
+uses. Run twice, once with the stock-CD32 IDE bit cleared and once without: the
+same screenshot, byte for byte. So the IDE bit is not what decides Banshee --
+the route is.
+
+That makes the config route the one to prefer, and it is also the authentic one.
+It remains worth closing the gap properly so that an OSD-mounted disc behaves
+like a disc in the tray, because that is what a user actually does.
 
 ## What not to conclude
 
