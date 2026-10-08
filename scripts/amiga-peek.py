@@ -221,9 +221,31 @@ TC_SPLOWER    = 0x3A
 TC_SPUPPER    = 0x3E
 
 
+# The Kickstart image lives at SDRAM $780000, so a name pointer into ROM space
+# is readable after translation -- which is most of them, since a ROM-resident
+# library keeps its name in ROM. Without this the walk returns blanks for
+# everything except the few things named from RAM, which reads as "exec knows
+# nothing about this region" when in fact it knows the names and we threw them
+# away. The CD32 extended ROM at $E00000 is NOT in the peek window, so those
+# stay blank and the jump table below each base is the way to identify them.
+KICK_BASE = 0xF80000
+KICK_IN_SDRAM = 0x780000
+KICK_SIZE = 0x80000
+
+
+def _readable(ptr):
+    """The peek address for a guest pointer, or 0 if it cannot be reached."""
+    if 0 < ptr < CHIP_TOP:
+        return ptr
+    if KICK_BASE <= ptr < KICK_BASE + KICK_SIZE:
+        return KICK_IN_SDRAM + (ptr - KICK_BASE)
+    return 0
+
+
 def _name_at(p, ptr, limit=40):
     """The NUL-terminated string at `ptr`, read four bytes at a time."""
-    if not (0 < ptr < CHIP_TOP):
+    ptr = _readable(ptr)
+    if not ptr:
         return ""
     out = bytearray()
     while len(out) < limit:
