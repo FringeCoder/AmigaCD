@@ -1348,9 +1348,9 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		// value is the user's and is left alone.
 		if (minimig_config.cd_mount_delay == AMIGACD_CD_DELAY_LEGACY)
 		{
-			printf("AmigaCD: raising the CD announce hold %us -> %us "
-			       "(8s loses the boot read; see minimig_config.h)\n",
-			       AMIGACD_CD_DELAY_LEGACY, AMIGACD_CD_DELAY_DEFAULT);
+			printf("AmigaCD: clearing the CD announce hold %us -> %us "
+			       "(a CD32 needs none; see minimig_config.h)\n",
+			       minimig_config.cd_mount_delay, AMIGACD_CD_DELAY_DEFAULT);
 			minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
 		}
 

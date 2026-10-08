@@ -187,11 +187,35 @@ typedef struct
 // also loses the boot read -- so this moves away from both edges rather than
 // trading one for the other. Overridable without a rebuild: milliseconds into
 // /tmp/akiko_boot_delay, then reload the core.
-#define AMIGACD_CD_DELAY_DEFAULT 14
+// 0 since 2026-10-08: a CD32 needs no hold at all, and holding breaks titles.
+//
+// The hold was added because Flink failed when the disc was announced at t=0 --
+// the ROM allocated its CD structures in an order that fragmented chip RAM and
+// Flink could not get its 1774.8 KB in one piece. That was real, and it was a
+// symptom: the frame whose checksum byte had not been written yet (PR #110) was
+// making the ROM take a different path. With that fixed, Flink boots to
+// GAMEPLAY at a 0 ms hold, which is the case it was failing in.
+//
+// Holding is also what BREAKS Banshee: at 14 s the ROM builds its idle
+// animation first, boots the disc without releasing it, and bans.exe cannot get
+// its 1731 KB contiguous -- "not enough memory available" on a 2 MB machine with
+// 1728 KB free. At 0 ms it runs.
+//
+// Checked against a reference rather than argued: Copperline, configured as the
+// same stock CD32 with the same ROMs and the same CHDs, boots both Flink and
+// Banshee with the disc in the tray at power-on and no hold of any kind. Five
+// titles boot at 0 here -- Chuck Rock, Flink, Banshee, Diggers, Lotus Trilogy.
+//
+// The row stays, because a hold is still the only lever if some title ever needs
+// one, and /tmp/akiko_boot_delay still overrides without a rebuild.
+#define AMIGACD_CD_DELAY_DEFAULT 0
 #define AMIGACD_CD_DELAY_MAX     15
 // The old default, which existing configs on every card still carry. See the
 // migration in minimig_cfg_load.
+// The two values this core has handed out by default: 8 until 2026-10-03 and 14
+// after it. Both are corrected on load; anything else is the user's own choice.
 #define AMIGACD_CD_DELAY_LEGACY  8
+#define AMIGACD_CD_DELAY_LEGACY2 14
 // CD sector delivery rate.
 //
 // mmcd_fast is the floor the core has always shipped with (see
