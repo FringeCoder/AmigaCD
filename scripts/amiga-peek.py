@@ -170,9 +170,11 @@ def cmd_mem(p, args):
     mh0 = regions[0][0]
     chunk = p.long(mh0 + MH_FIRST)
     largest = largest_at = count = total = 0
+    chunks = []
     while 0 < chunk < CHIP_TOP and count < 400:
         nxt, size = p.longs(chunk)[0:2]
         total += size
+        chunks.append((chunk, size))
         if size > largest:
             largest, largest_at = size, chunk
         chunk = nxt
@@ -184,6 +186,20 @@ def cmd_mem(p, args):
     if largest:
         print("fragmentation            : largest block is %.0f%% of free"
               % (100.0 * largest / total if total else 0))
+
+    # The counts say a region is fragmented; only the LIST says where the
+    # holes are, and the gaps between chunks are what somebody allocated and
+    # is still holding. Two of these, from a boot that works and one that
+    # does not, is the difference in a form you can read.
+    if args.chunks:
+        print()
+        print("free chunks, in address order (gap = what is held above it):")
+        prev_end = None
+        for addr, size in sorted(chunks):
+            gap = ("%8.1f KB" % ((addr - prev_end) / 1024.0)) if prev_end else "        -"
+            print("  $%08X  %9.1f KB free   held above previous: %s"
+                  % (addr, size / 1024.0, gap))
+            prev_end = addr + size
     return 0
 
 
@@ -198,7 +214,9 @@ def main():
     r = sub.add_parser("read", help="dump longwords from an address")
     r.add_argument("address")
     r.add_argument("--count", type=int, default=4, help="longwords, rounded up to 4")
-    sub.add_parser("mem", help="free chip RAM and the largest contiguous block")
+    m = sub.add_parser("mem", help="free chip RAM and the largest contiguous block")
+    m.add_argument("--chunks", action="store_true",
+                   help="list every free chunk and the gap held above it")
     args = ap.parse_args()
 
     p = Peek(args.host or default_host(), args.settle)
