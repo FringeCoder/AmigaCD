@@ -8693,8 +8693,13 @@ void HandleUI(void)
 				// reach without the keyboard.
 				if (amigacd_system() != AMIGACD_SYS_A1200)
 				{
-					minimig_config.cd_speed = (minimig_config.cd_speed == mmcd_2x)
-					                        ? mmcd_fast : mmcd_2x;
+					// CYCLE, do not toggle. This flipped between two values, so
+					// when a third was added the row could not reach it: pressing
+					// it from "Drive (asked)" went to "CD32 (2x)" and then just
+					// alternated, and the new mode was unselectable from the OSD
+					// even though the label for it was right there.
+					minimig_config.cd_speed =
+						(unsigned char)((minimig_config.cd_speed + 1) % mmcd_count);
 				}
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}

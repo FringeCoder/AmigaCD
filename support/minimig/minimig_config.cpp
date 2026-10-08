@@ -1332,21 +1332,26 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		// OSD offers no row for it. Re-assert it from the system the config
 		// itself names, leaving FastRAM and HRTmon untouched. SlowRAM is
 		// part of the profile for an A500 and the user's elsewhere.
-		// The announce hold, for the same reason in the same shape. Raising
+		// The announce hold, for the same reason in the same shape. Changing
 		// AMIGACD_CD_DELAY_DEFAULT only reaches a card with NO config: every
-		// machine that has booted this core once carries a stored 8, which is
-		// the value measured on 2026-10-03 to lose the boot read -- 1 of 8
-		// against 11 of 11 at 12 s and above. Leaving it stored would ship the
-		// fix to nobody, which is the third time this asymmetry has bitten:
-		// chip RAM and the floppy count below are the other two.
+		// machine that has booted this core carries a stored hold, and leaving
+		// it there ships the fix to nobody. That is the third time this
+		// asymmetry has bitten -- chip RAM and the floppy count below are the
+		// other two.
 		//
-		// This DOES overwrite a deliberate 8. There is nothing in the file to
-		// tell a user who chose 8 from a user who was given it, and shipping
-		// the known-bad value to everyone is worse than overriding the handful
-		// who picked it on purpose -- who can set 0..15 again, and for whom
-		// /tmp/akiko_boot_delay overrides without a rebuild. Any OTHER stored
-		// value is the user's and is left alone.
-		if (minimig_config.cd_mount_delay == AMIGACD_CD_DELAY_LEGACY)
+		// Both values this core has handed out are cleared: 8, which lost the
+		// boot read, and 14, which replaced it and turned out to break Banshee
+		// by letting the ROM build its idle animation before the disc boots.
+		// Neither was ever chosen by anyone, and a CD32 needs no hold at all --
+		// see minimig_config.h for the measurements and the reference run.
+		//
+		// This DOES overwrite a deliberate 8 or 14. Nothing in the file tells a
+		// chosen value from a handed-out one, and shipping a known-bad default
+		// to everyone is worse than overriding the few who picked it: they can
+		// set 0..15 again, and /tmp/akiko_boot_delay overrides without a
+		// rebuild. Any OTHER stored value is the user's and is left alone.
+		if (minimig_config.cd_mount_delay == AMIGACD_CD_DELAY_LEGACY
+		    || minimig_config.cd_mount_delay == AMIGACD_CD_DELAY_LEGACY2)
 		{
 			printf("AmigaCD: clearing the CD announce hold %us -> %us "
 			       "(a CD32 needs none; see minimig_config.h)\n",
