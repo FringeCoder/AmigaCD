@@ -203,38 +203,89 @@ def cmd_mem(p, args):
     return 0
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", default=None, help="root@ADDRESS of the MiSTer")
-    ap.add_argument("--settle", type=int, default=4,
-                    help="seconds to wait for each peek reply before giving up (default 4)")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("calibrate", help="check the byte order against Kickstart")
-    r = sub.add_parser("read", help="dump longwords from an address")
-    r.add_argument("address")
-    r.add_argument("--count", type=int, default=4, help="longwords, rounded up to 4")
-    m = sub.add_parser("mem", help="free chip RAM and the largest contiguous block")
-    m.add_argument("--chunks", action="store_true",
-                   help="list every free chunk and the gap held above it")
-    args = ap.parse_args()
+# exec.library structure offsets, from exec/execbase.i and exec/tasks.i. Named
+# here rather than inlined because getting one wrong produces a plausible walk
+# of nothing, which is the expensive kind of mistake over a 1 Hz peek.
+EB_THISTASK   = 0x114
+EB_MEMLIST    = 0x142
+EB_RESOURCES  = 0x150
+EB_DEVICES    = 0x15E
+EB_INTRS      = 0x16C
+EB_LIBS       = 0x17A
+EB_PORTS      = 0x188
+EB_TASKREADY  = 0x196
+EB_TASKWAIT   = 0x1A4
+LN_SUCC       = 0x00
+LN_NAME       = 0x0A
+TC_SPLOWER    = 0x3A
+TC_SPUPPER    = 0x3E
 
-    p = Peek(args.host or default_host(), args.settle)
 
-    if args.cmd == "calibrate":
-        return 0 if calibrate(p) else 1
+def _name_at(p, ptr, limit=40):
+    """The NUL-terminated string at `ptr`, read four bytes at a time."""
+    if not (0 < ptr < CHIP_TOP):
+        return ""
+    out = bytearray()
+    while len(out) < limit:
+        word = p.long(ptr + len(out))
+        for sh in (24, 16, 8, 0):
+            c = (word >> sh) & 0xff
+            if c == 0:
+                return out.decode("latin-1", "replace")
+            out.append(c)
+    return out.decode("latin-1", "replace")
 
-    if not calibrate(p):
-        return 1
+
+def _walk(p, head, limit=40):
+    """[(node address, name)] for an exec list, head first."""
+    out = []
+    node = p.long(head)
+    while 0 < node < CHIP_TOP and len(out) < limit:
+        succ = p.long(node + LN_SUCC)
+        if not succ:
+            break                       # the tail node has no successor
+        out.append((node, _name_at(p, p.long(node + LN_NAME))))
+        node = succ
+    return out
+
+
+def cmd_who(p, args):
+    """Name what lives in an address range, by walking exec's own lists.
+
+    The free list says where the holes are; it cannot say who made them. Every
+    library, device, resource, port and task is a node at a known address, and a
+    task also owns its stack, so anything that lands in the range can be named.
+    An allocation nobody here claims is a plain AllocMem with no owner recorded
+    anywhere -- a screen, a buffer, a loaded segment -- and that absence is
+    itself the answer worth having.
+    """
+    lo = int(args.start, 0)
+    hi = int(args.end, 0) if args.end else lo + 0x10000
+    print("looking for anything inside $%08X-$%08X" % (lo, hi))
     print()
-    return cmd_read(p, args) or 0 if args.cmd == "read" else cmd_mem(p, args)
 
+    eb = p.long(4)
+    if not (0 < eb < CHIP_TOP):
+        print("ExecBase is not in chip RAM; the peek cannot reach it.")
+        return 1
 
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except RuntimeError as e:
-        sys.exit("error: %s" % e)
+    for label, off in (("library", EB_LIBS), ("device", EB_DEVICES),
+                       ("resource", EB_RESOURCES), ("port", EB_PORTS),
+                       ("task ready", EB_TASKREADY), ("task waiting", EB_TASKWAIT)):
+        for addr, name in _walk(p, eb + off):
+            inside = lo <= addr < hi
+            extra = ""
+            if label.startswith("task"):
+                slo, shi = p.long(addr + TC_SPLOWER), p.long(addr + TC_SPUPPER)
+                if 0 < slo < shi < CHIP_TOP:
+                    stack_in = not (shi <= lo or slo >= hi)
+                    extra = "  stack $%08X-$%08X%s" % (slo, shi,
+                                                       "  <== IN RANGE" if stack_in else "")
+                    inside = inside or stack_in
+            print("  %-12s $%08X  %-28s%s%s"
+                  % (label, addr, name[:28], "  <== IN RANGE" if lo <= addr < hi else "",
+                     extra))
+    return 0
 
 
 def cmd_map(p, args):
@@ -269,3 +320,44 @@ def cmd_map(p, args):
     print()
     print("%d allocated blocks, %.1f KB total"
           % (len(used), sum(s for _, s in used) / 1024.0))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--host", default=None, help="root@ADDRESS of the MiSTer")
+    ap.add_argument("--settle", type=int, default=4,
+                    help="seconds to wait for each peek reply before giving up (default 4)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("calibrate", help="check the byte order against Kickstart")
+    r = sub.add_parser("read", help="dump longwords from an address")
+    r.add_argument("address")
+    r.add_argument("--count", type=int, default=4, help="longwords, rounded up to 4")
+    sub.add_parser("map", help="the allocated blocks, largest first")
+    w = sub.add_parser("who", help="name what lives in an address range")
+    w.add_argument("start")
+    w.add_argument("end", nargs="?")
+    m = sub.add_parser("mem", help="free chip RAM and the largest contiguous block")
+    m.add_argument("--chunks", action="store_true",
+                   help="list every free chunk and the gap held above it")
+    args = ap.parse_args()
+
+    p = Peek(args.host or default_host(), args.settle)
+
+    if args.cmd == "calibrate":
+        return 0 if calibrate(p) else 1
+
+    if not calibrate(p):
+        return 1
+    print()
+    # One place that knows every command, so adding one cannot leave it
+    # registered-but-unreachable the way `map` was.
+    handlers = {"read": cmd_read, "mem": cmd_mem, "map": cmd_map, "who": cmd_who}
+    return handlers[args.cmd](p, args) or 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except RuntimeError as e:
+        sys.exit("error: %s" % e)
