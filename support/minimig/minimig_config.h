@@ -187,7 +187,7 @@ typedef struct
 // also loses the boot read -- so this moves away from both edges rather than
 // trading one for the other. Overridable without a rebuild: milliseconds into
 // /tmp/akiko_boot_delay, then reload the core.
-// 0 since 2026-10-08: a CD32 needs no hold at all, and holding breaks titles.
+// 0 since 2026-10-08: a CD32 needs no hold at all.
 //
 // The hold was added because Flink failed when the disc was announced at t=0 --
 // the ROM allocated its CD structures in an order that fragmented chip RAM and
@@ -196,15 +196,31 @@ typedef struct
 // making the ROM take a different path. With that fixed, Flink boots to
 // GAMEPLAY at a 0 ms hold, which is the case it was failing in.
 //
-// Holding is also what BREAKS Banshee: at 14 s the ROM builds its idle
-// animation first, boots the disc without releasing it, and bans.exe cannot get
-// its 1731 KB contiguous -- "not enough memory available" on a 2 MB machine with
-// 1728 KB free. At 0 ms it runs.
-//
 // Checked against a reference rather than argued: Copperline, configured as the
 // same stock CD32 with the same ROMs and the same CHDs, boots both Flink and
-// Banshee with the disc in the tray at power-on and no hold of any kind. Five
-// titles boot at 0 here -- Chuck Rock, Flink, Banshee, Diggers, Lotus Trilogy.
+// Banshee with the disc in the tray at power-on and no hold of any kind.
+//
+// BANSHEE IS NOT THIS SETTING, and an earlier version of this comment said it
+// was. Banshee needs 1731 KB contiguous and a 2 MB machine has about 1728 KB
+// free, so it only runs when the disc is in the tray AT POWER-ON: the ROM boots
+// it straight from the boot block and never builds a DOS environment. Give the
+// same machine the same disc LATE -- which is the only thing a MiSTer can do,
+// because the OSD mounts after the core has started -- and the ROM mounts it as
+// a data volume and runs bans.exe from an AmigaDOS shell instead, where the
+// console and its structures cost more than the margin:
+//
+//     bans.exe: not enough memory available
+//     bans.exe failed returncode 10
+//
+// Measured on this core at a 0 ms hold on 2026-10-08, and measured on
+// Copperline the same afternoon with `--insert-cd-after 20`, chip 2M and no
+// fast RAM: the same two lines, at the same prompt. A real CD32 fails this disc
+// the same way we do, so there is nothing to fix at this setting -- the fix is
+// a disc that is present from reset (or fast RAM, which is what the user did).
+//
+// What DOES boot at 0 is the late-mount route for titles that fit: Chuck Rock
+// reaches its loader in 13 s (lba 14 then 12), and Flink reads its game data
+// and starts CD audio. Neither needs a hold.
 //
 // The row stays, because a hold is still the only lever if some title ever needs
 // one, and /tmp/akiko_boot_delay still overrides without a rebuild.

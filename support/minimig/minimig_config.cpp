@@ -1340,10 +1340,9 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		// other two.
 		//
 		// Both values this core has handed out are cleared: 8, which lost the
-		// boot read, and 14, which replaced it and turned out to break Banshee
-		// by letting the ROM build its idle animation before the disc boots.
-		// Neither was ever chosen by anyone, and a CD32 needs no hold at all --
-		// see minimig_config.h for the measurements and the reference run.
+		// boot read, and 14, which replaced it. Neither was ever chosen by
+		// anyone, and a CD32 needs no hold at all -- see minimig_config.h for
+		// the measurements and the reference run.
 		//
 		// This DOES overwrite a deliberate 8 or 14. Nothing in the file tells a
 		// chosen value from a handed-out one, and shipping a known-bad default
