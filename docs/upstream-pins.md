@@ -5,7 +5,7 @@ against. Re-verify line numbers after moving off these.
 
 | Repo | Branch | Commit | Date |
 |---|---|---|---|
-| `kblood/Main_MiSTer-cd32-cdtv` | `amiga-console` | `52625a4` "AmigaCD: add Save settings to the console OSD" | 2026-06-14 |
+| `kblood/Main_MiSTer-cd32-cdtv` | `amiga-console` | `52625a4` "AmigaCD: add Save settings to the console OSD" -- all branches re-checked 2026-10-09, nothing new to take | 2026-06-14 |
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
@@ -138,6 +138,36 @@ conflict. `syntax_check.sh` and `tests/` pass; the ARM build is CI's.
   NeXT series on 2026-10-01. They add `support/{falcon,sun}/` and a few
   `user_io.cpp` dispatch lines; none touch Minimig paths, so a later take stays
   textual.
+
+### `kblood/Main_MiSTer-cd32-cdtv`, all 29 branches: nothing to take
+
+`amiga-console` is still `52625a4` and is an ancestor of our `master`. The
+other branches carry 96 commits that are neither in our tree nor in
+`MiSTer-devel/Main_MiSTer`. 16 of those match one of our commits by patch-id or
+subject, or are already cited in these docs. The rest are what
+`sync-2026-08-24-assessment.md` found: staging for the upstream PRs that reached
+us through `Main_MiSTer`, plus diagnostics. Only two branches moved after that
+assessment:
+
+- **`dotc-cdtv-stch-playstart-mvp` `5e0f2ea` (2026-09-01)**: a forward-port of
+  `4964847` / upstream `2c410aa` (play-start STCH, the DotC map-of-Britain park)
+  onto his `cd32-native-mvp` line. `2c410aa` is an ancestor of our `master`, and
+  `stch_playstart_pending` with its drain is in `cdtv_cd.cpp`. Already have it.
+- **`hybris-chipset-trace` (to 2026-08-26)**: instruments for the Hybris
+  cycle-diff work. `chipset_trace.cpp` drains `rtl/chipset_bus_trace.v` over UIO
+  class `0xF600`, plus a `cpu_trace` marker arm, a `MINIMIG_DEBUG` INI byte,
+  `/tmp/minimig_dbg` runtime knobs and an OSD Debug page. **None of it is
+  portable here**, for two reasons:
+  - our core has neither the trace ring nor `dbg_config` in `userio.v`;
+  - `015bc67` defines `UIO_MM2_DBG 0xFA`, and **`0xFA` is already
+    `UIO_MM2_FLPEX01`** in this tree, MiSTer Floppy's first command. Taken as is,
+    every debug-byte push would be decoded as a floppy command.
+
+  `668218a` (any `minimig*` name is Minimig) is the one general fix, and our
+  `is_minimig()` already prefix-matches, `amigacd*` included.
+
+If the Hybris instruments are ever wanted, they need a different UIO opcode and
+the RTL half in the core repo first.
 
 ### `Anime0t4ku/Main_MiSTer_Physical_Disc` -> `dc0c4c9`, no re-extract
 
