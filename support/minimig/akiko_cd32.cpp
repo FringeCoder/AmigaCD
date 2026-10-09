@@ -1910,6 +1910,19 @@ static void akiko_nvram_dump(uint8_t *out_1024)
 static uint32_t  nvr_verify_due_at_ms = 0;        // 0 = no verify pending
 static char      nvr_verify_path[1024];
 
+// A load that does not verify is sent again, a few times, before the slot is
+// given up on. On a core whose bridge clears its NVRAM address counter with
+// the CD32 reset (before RTL 2026-10-09), a load sent on the first poll after
+// a power-on with the disc in the config lands entirely on address 0, and
+// the BRAM keeps its .mif image. The same load half a second later, with the
+// CPU out of reset, lands. Only retried while the guest has not written the
+// NVRAM yet: after that, BRAM holds the game's own data and a reload would
+// overwrite it.
+#define AKIKO_NVRAM_LOAD_RETRIES   5
+#define AKIKO_NVRAM_RETRY_GAP_MS   500
+static int       nvr_retry_left       = 0;
+static uint32_t  nvr_retry_at_ms      = 0;        // 0 = no retry scheduled
+
 static bool akiko_nvram_load_from_path(const char *path)
 {
 	struct stat st;
@@ -1958,6 +1971,17 @@ static bool akiko_nvram_load_from_path(const char *path)
 // broken load).
 static void akiko_nvram_verify_load_pending(void)
 {
+	if (nvr_retry_at_ms && CheckTimer(nvr_retry_at_ms)) {
+		nvr_retry_at_ms = 0;
+		if (akiko_read_status() & AKIKO_STATUS_NVR_DIRTY) {
+			akiko_diag("[akiko] NVR load retry abandoned: the game has written NVRAM since");
+			cd_save_load_failed = true;
+			return;
+		}
+		akiko_diag("[akiko] NVR load retry (%d left)", nvr_retry_left);
+		akiko_nvram_load_from_path(nvr_verify_path);
+		return;
+	}
 	if (!nvr_verify_due_at_ms) return;
 	if (!CheckTimer(nvr_verify_due_at_ms)) return;
 	nvr_verify_due_at_ms = 0;
@@ -2003,6 +2027,10 @@ static void akiko_nvram_verify_load_pending(void)
 		}
 	}
 	cd_save_load_failed = true;
+	if (nvr_retry_left > 0 && !(akiko_read_status() & AKIKO_STATUS_NVR_DIRTY)) {
+		nvr_retry_left--;
+		nvr_retry_at_ms = (uint32_t)GetTimer(AKIKO_NVRAM_RETRY_GAP_MS);
+	}
 }
 
 // Atomic save to a specific path: dump → write to .tmp → fsync → rename →
@@ -3495,6 +3523,8 @@ void akiko_cd32_poll(void)
 	// log line is more useful when correlated with the mount event).
 	if (cd_save_load_pending && mounted) {
 		cd_save_load_pending = false;
+		nvr_retry_left  = AKIKO_NVRAM_LOAD_RETRIES;
+		nvr_retry_at_ms = 0;
 		if (cd_save_path_active[0]) {
 			// One-shot legacy migration: if the per-game file doesn't
 			// exist but the legacy single-file save does, load the
