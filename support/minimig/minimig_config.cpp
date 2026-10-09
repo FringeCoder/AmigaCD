@@ -1245,6 +1245,7 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 				// A file that predates the field carries no preference, so it
 				// gets the current default rather than the old constant.
 				minimig_config.cd_speed = AMIGACD_CD_SPEED_DEFAULT;
+				minimig_config.cd_audio_buffer = AMIGACD_CD_AUDIO_BUFFER_DEFAULT;
 				result = 1;
 			}
 			else BootPrint("Cannot migrate configuration file\n");
@@ -1340,6 +1341,7 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		minimig_config.cdtv_drive.filename[0] = 0;
 		minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
 		minimig_config.cd_speed       = AMIGACD_CD_SPEED_DEFAULT;
+		minimig_config.cd_audio_buffer = AMIGACD_CD_AUDIO_BUFFER_DEFAULT;
 		BootPrintEx(">>> No config found. Using defaults. <<<");
 
 		// AmigaCD console variant: no saved CFG -> start as a CD32 with its

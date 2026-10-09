@@ -1002,8 +1002,8 @@ static constexpr unsigned rowhint_rows(uint32_t mask)
 #define AMIGACD_MAIN_MENUMASK     0x1FFFu
 #define AMIGACD_SETTINGS_MENUMASK 0xFFFu
 #define AMIGACD_CONFIGS_MENUMASK  0x0Fu
-#define AMIGACD_ADV_MENUMASK_SNAC 0x3FFu
-#define AMIGACD_ADV_MENUMASK      0xFFu
+#define AMIGACD_ADV_MENUMASK_SNAC 0x7FFu
+#define AMIGACD_ADV_MENUMASK      0x1FFu
 #define AMIGACD_DRIVES_MENUMASK   0x0Fu
 
 // The hint for the row the cursor is on, in the scrolling line at the bottom.
@@ -8956,8 +8956,9 @@ void HandleUI(void)
 			menustate = MENU_AMIGACD_ADVANCED1;
 			// The Drives row on Advanced, which moves with SNAC tenancy the
 			// same way every row below the port rows does -- and moved once
-			// more when CD Mount Delay went in above it.
-			menusub = (minimig_config.userport == mmup_snacpsx) ? 7 : 5;
+			// more when CD Mount Delay went in above it, and again for the CD32
+			// audio buffer.
+			menusub = (minimig_config.userport == mmup_snacpsx) ? 8 : 6;
 		}
 		else if (select || right || minus || plus)
 		{
@@ -9144,10 +9145,11 @@ void HandleUI(void)
 				/* 3 Port 2   */ "What the pad in SNAC port 2 is: off, pad, mouse, both at once, or a light gun.",
 				/* 4 Ethernet */ "The A2065 Zorro II Ethernet card. Off by default; the FPGA half is there either way.",
 				/* 5 CD delay */ "How long a disc already in the drive is held back at power-on. 8 s is measured; Off announces it at once, which fragments chip RAM and breaks Flink.",
-				/* 6 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
-				/* 7 Drives   */ "The MiSTer Floppy board: which real drive each df unit uses, and floppy turbo.",
-				/* 8 Write mgl*/ "Write an .mgl beside the mounted disc, so the MiSTer menu can launch straight into this core with it. Names the core running now.",
-				/* 9 back     */ "Back to the main page.",
+				/* 6 Audio buf*/ "How much CD audio is buffered. Normal (46 ms) is closest to the real drive. Large (186 ms) rides out longer MiSTer stalls; audio runs on that long after a pause.",
+				/* 7 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
+				/* 8 Drives   */ "The MiSTer Floppy board: which real drive each df unit uses, and floppy turbo.",
+				/* 9 Write mgl*/ "Write an .mgl beside the mounted disc, so the MiSTer menu can launch straight into this core with it. Names the core running now.",
+				/*10 back     */ "Back to the main page.",
 			};
 			static const char *const tips_plain[] =
 			{
@@ -9159,6 +9161,7 @@ void HandleUI(void)
 				tips_snac[7],
 				tips_snac[8],
 				tips_snac[9],
+				tips_snac[10],
 			};
 			static_assert(sizeof(tips_snac) / sizeof(tips_snac[0]) == rowhint_rows(AMIGACD_ADV_MENUMASK_SNAC),
 				"AmigaCD advanced page with SNAC: one hint per selectable row");
@@ -9169,7 +9172,7 @@ void HandleUI(void)
 				: amigacd_rowhint(tips_plain, sizeof(tips_plain) / sizeof(tips_plain[0]), menusub);
 		}
 		// User Port(0), MT32-pi(1)[, SNAC Port 1(2), Port 2(3)], Ethernet,
-		// CD Mount Delay, Fast-IDE, Drives, Write .mgl, Back
+		// CD Mount Delay, CD32 audio buffer, Fast-IDE, Drives, Write .mgl, Back
 		menumask = snac ? AMIGACD_ADV_MENUMASK_SNAC : AMIGACD_ADV_MENUMASK;
 		parentstate = menustate;
 		uint16_t osdMask = spi_uio_cmd16(UIO_GET_OSDMASK, 0);
@@ -9258,6 +9261,17 @@ void HandleUI(void)
 		}
 		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 5 : 3), 0);
 
+		// How much CD audio the FPGA buffers ahead of the speaker. Here and
+		// not on Settings because the large setting is a deviation from the
+		// machine: a real drive buffers nothing. Under the mount delay because
+		// both are about the drive, and without a spacer of its own because
+		// this page has exactly one line to spare (see the row budget below).
+		// Greyed off a CD32: the CDTV feeds the same FIFO but never sets it.
+		strcpy(s, " CD32 audio buffer: ");
+		strcat(s, (amigacd_cd_audio_buffer() == mmab_large) ? "Large" : "Normal");
+		OsdWrite(m++, s, menusub == (uint32_t)(snac ? 6 : 4),
+		         amigacd_system() != AMIGACD_SYS_CD32);
+
 		// Fast-IDE, which lives on MENU_MINIMIG_DISK1 -- a page this variant
 		// cannot open, and one that would drag in four IDE slot rows the CD and
 		// Hard Disk rows already cover. So it gets a row here rather than a
@@ -9281,12 +9295,12 @@ void HandleUI(void)
 			else if (!ide_on) strcat(s, "N/A (no IDE)");
 			else if (!(minimig_config.cpu & 2)) strcat(s, "N/A (68000)");
 			else strcat(s, (minimig_config.ide_cfg & 0x20) ? "Off" : "On");
-			OsdWrite(m++, s, menusub == (uint32_t)(snac ? 6 : 4), !ok);
+			OsdWrite(m++, s, menusub == (uint32_t)(snac ? 7 : 5), !ok);
 		}
 
 		// FDD Turbo moved to the Drives page, which is where the rest of the
 		// floppy hardware now lives. This row is the way in.
-		OsdWrite(m++, " Drives                   \x16", menusub == (uint32_t)(snac ? 7 : 5), 0);
+		OsdWrite(m++, " Drives                   \x16", menusub == (uint32_t)(snac ? 8 : 6), 0);
 
 		// Writes a .mgl beside the mounted disc so the MiSTer menu can launch
 		// straight into this core with it. It started as a + / - binding
@@ -9298,19 +9312,19 @@ void HandleUI(void)
 		// Greyed with no disc IMAGE, which includes the physical drive being
 		// selected: a disc in a real tray has no path to put in a file.
 		//
-		// Row budget: with SNAC as the tenant this page reaches fourteen rows
-		// before Back on line 15. Count that layout, not the one on screen,
-		// before adding anything here -- a spacer too many puts this row on
-		// the last line, where Back is drawn over it.
+		// Row budget: with SNAC as the tenant this page now fills every line
+		// before Back on line 15 -- this row is on line 14. Count that layout,
+		// not the one on screen, before adding anything here: one more line
+		// puts this row on the last line, where Back is drawn over it.
 		OsdWrite(m++, "", 0, 0);
 		{
 			const char *cdfile = minimig_config.hardfile[0].filename;
 			const int can_mgl = cdfile[0] && strcmp(cdfile, PHYSICAL_DISC_SENTINEL);
-			OsdWrite(m++, " Write .mgl for this disc", menusub == (uint32_t)(snac ? 8 : 6), !can_mgl);
+			OsdWrite(m++, " Write .mgl for this disc", menusub == (uint32_t)(snac ? 9 : 7), !can_mgl);
 		}
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 9 : 7), 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == (uint32_t)(snac ? 10 : 8), 0);
 
 		menustate = MENU_AMIGACD_ADVANCED2;
 		break;
@@ -9333,10 +9347,11 @@ void HandleUI(void)
 			int      snac     = (minimig_config.userport == mmup_snacpsx);
 			uint32_t eth_row  = snac ? 4 : 2;
 			uint32_t cd_row   = snac ? 5 : 3;
-			uint32_t ide_row  = snac ? 6 : 4;
-			uint32_t fdd_row  = snac ? 7 : 5;   // the Drives submenu row
-			uint32_t mgl_row  = snac ? 8 : 6;
-			uint32_t back_row = snac ? 9 : 7;
+			uint32_t cdda_row = snac ? 6 : 4;   // CD32 audio buffer
+			uint32_t ide_row  = snac ? 7 : 5;
+			uint32_t fdd_row  = snac ? 8 : 6;   // the Drives submenu row
+			uint32_t mgl_row  = snac ? 9 : 7;
+			uint32_t back_row = snac ? 10 : 8;
 
 			if (menusub == 0) // User Port: MT32-pi -> MiSTer Floppy -> PSX SNAC
 			{
@@ -9385,6 +9400,18 @@ void HandleUI(void)
 				d = minus ? (d + AMIGACD_CD_DELAY_MAX) % (AMIGACD_CD_DELAY_MAX + 1)
 				          : (d + 1) % (AMIGACD_CD_DELAY_MAX + 1);
 				minimig_config.cd_mount_delay = (unsigned char)d;
+				menustate = MENU_AMIGACD_ADVANCED1;
+			}
+			else if (menusub == cdda_row) // CD32 audio buffer: Normal <-> Large
+			{
+				// Two values, so -/+ and SELECT all just flip it. Takes effect
+				// at the next PLAY: the FIFO is resized as a play starts, never
+				// under one. Re-checked rather than trusting the greying.
+				if (amigacd_system() == AMIGACD_SYS_CD32)
+				{
+					minimig_config.cd_audio_buffer =
+						(amigacd_cd_audio_buffer() == mmab_large) ? mmab_normal : mmab_large;
+				}
 				menustate = MENU_AMIGACD_ADVANCED1;
 			}
 			else if (menusub == ide_row && select) // Fast-IDE

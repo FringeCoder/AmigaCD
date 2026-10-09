@@ -161,6 +161,16 @@ typedef struct
 	// exactly as written and cd_speed arrives as 0 -- mmcd_fast, the shipped
 	// rate -- which is the one value that changes nothing.
 	uint8_t         cd_speed;
+
+	// CD32 audio buffer depth. See mm_cdAudioBuffer below.
+	//
+	// Lands at offset 7282, in the tail padding cd_speed left before the
+	// struct's 4-byte alignment, so sizeof(mm_configTYPE) is unchanged and a
+	// file written before this field existed loads through the current-layout
+	// branch with a zero here -- mmab_normal, the behaviour it always had.
+	// Read through amigacd_cd_audio_buffer(), never directly: it is a byte
+	// from a file.
+	uint8_t         cd_audio_buffer;
 } mm_configTYPE;
 
 // Seconds. Kept here because the menu, the config loader and akiko all need it.
@@ -262,7 +272,38 @@ enum mm_cdSpeed
 // and which one you want is a preference about loading times.
 #define AMIGACD_CD_SPEED_DEFAULT mmcd_drive
 
+// How much CD audio the core buffers ahead of the speaker.
+//
+// A real CD32 buffers nothing: the drive clocks audio straight off the disc.
+// Here a software feeder fills a FIFO in the FPGA (rtl/cdda.v), and any stall
+// in the MiSTer main loop longer than what that FIFO holds is a gap in the
+// music.
+//
+// mmab_normal is the depth the core has always had, ~46 ms, and is the closest
+// to the machine: what the guest is told is playing is at most that far ahead
+// of what it hears.
+//
+// mmab_large is ~186 ms. It survives four times the stall, at the cost of
+// audio that keeps sounding for up to that long after a PAUSE, and of the
+// per-frame subcode stream running that far ahead of the speaker. The SUBQ
+// position and the end-of-play notification are corrected for the depth, so
+// games that time themselves off those still see the audible position.
+enum mm_cdAudioBuffer
+{
+	mmab_normal = 0,
+	mmab_large  = 1,
+	mmab_count
+};
+#define AMIGACD_CD_AUDIO_BUFFER_DEFAULT mmab_normal
+
+
 extern mm_configTYPE minimig_config;
+
+static inline int amigacd_cd_audio_buffer(void)
+{
+	return (minimig_config.cd_audio_buffer < mmab_count)
+	     ? (int)minimig_config.cd_audio_buffer : (int)mmab_normal;
+}
 
 // sys_suffix gives a machine its own config file so the System row can leave
 // one machine and arrive at another without losing either one's settings.
