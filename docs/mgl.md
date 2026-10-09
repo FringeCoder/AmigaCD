@@ -17,28 +17,73 @@ With a disc image mounted, select **Write .mgl for this disc** on the
 Advanced page. That writes an `.mgl` beside the disc, named after it, and toasts the
 filename.
 
-It is worth preferring over writing one by hand for one reason: the OSD knows
+**The file carries the whole machine.** Every setting the OSD saves -- system,
+CPU, chip/fast RAM, Kickstart and extended ROM, the disc, the hard disks,
+the user port, CD speed, CD32 audio buffer, the save state slot, all of it --
+goes into an `<amigacd_config>` block in the file. Launching it gives that
+machine regardless of what the startup config on the card says, and leaves
+the startup config untouched.
+
+**The disc is in the drive at power-on.** The file names the disc in its
+settings, not as a `<file index="4">` mounted a couple of seconds after the core
+starts. That is the authentic route, and for some titles the only one that
+works: a disc that arrives late sends the CD32 ROM down a path that costs chip
+RAM, and Banshee and Super Stardust then stop with "not enough memory" -- on a
+real CD32 too. Mounted floppies are written as ordinary `<file>` items.
+
+It is also worth preferring over writing one by hand because the OSD knows
 which core is *running*. `<rbf>` is filled from `get_rbf_dir()` and
-`get_rbf_name()`, so it names the exact build you are using — which is the part
+`get_rbf_name()`, so it names the exact build you are using -- which is the part
 of a hand-written file that goes stale at the next deploy (see below). After a
-deploy, press + again and the file is correct once more.
+deploy, press the row again and the file is correct once more.
 
-The disc path is written in whichever form reads back to the same file:
-relative to the core's home directory when the disc lives under it, absolute
-when it does not.
+**An existing file is edited, not replaced.** The `<rbf>` text and the
+`<amigacd_config>` block are rewritten, and a CD `<file index="4">` line is
+removed (it would remount the disc late); a `<reset/>`, another `<file>`, a
+comment -- anything else you added by hand -- stays. The toast says which of
+three things happened: `Wrote` for a new file, `Updated` for an edited one,
+`Already current` when nothing changed.
 
-**An existing file is edited, not replaced.** Only the text between the `<rbf>`
-tags changes; a `<reset/>`, a second `<file>`, a comment — anything you added by
-hand stays. The toast says which of three things happened: `Wrote` for a new
-file, `Updated` for an edited one, `Already current` when it already names this
-core.
+**Save settings keeps it current.** While a game launched from a file with a
+settings block is running, Save settings on the main page updates that block
+as well as the startup config.
 
-The row greys out when there is no disc image mounted — including when the
+The row greys out when there is no disc image mounted -- including when the
 **physical drive** is selected, since a real disc in a tray has no path to put
 in a file.
 
 Move the result into `/media/fat/_Console/` to have it appear on the main
 menu's front page; nothing in the file depends on where it lives.
+
+## The settings block
+
+```xml
+<mistergamedescription>
+    <rbf>_Test/amigacd</rbf>
+    <amigacd_config version="1">
+        <setting name="cpu" value="35"/>
+        <setting name="hdf0_path" value="games/AmigaCD32/Banshee (1994).chd"/>
+        <setting name="cd_audio_buffer" value="1"/>
+        ...
+    </amigacd_config>
+</mistergamedescription>
+```
+
+One element per setting, named after the field of `mm_configTYPE` in
+`support/minimig/minimig_config.h` it sets (`hdf0_path` is
+`hardfile[0].filename`, `snac0` is `snac[0]`, `extrom` is the extended ROM).
+Numbers are decimal or `0x` hex; paths are XML-escaped (`&amp;`, `&quot;`).
+
+A setting the file does not name keeps the startup config's value, so a block
+can be cut down by hand to just what a game needs -- say only
+`cd_audio_buffer`. A name this build does not know, or a value that does not
+fit, is skipped and the rest still applies. The machine facts the startup
+config is corrected for (chip RAM and floppy count per system) are corrected
+for a file's settings in the same way.
+
+The block is read once, at the launch. MiSTer's own `.mgl` scanner ignores it,
+so a file with a block still launches on a build without this support -- it
+just gets the startup config.
 
 ## The file
 
@@ -117,10 +162,10 @@ Two ways to live with that:
 
 ## What is not supported
 
-- **Choosing the machine.** CD32, CDTV, A500 and A1200 come from the saved
-  config, not from the `.mgl` — the format carries files and resets, and
-  nothing else. An `.mgl` for a CDTV title needs the CDTV profile already
-  saved.
+- **Settings outside the config.** The MT32-pi page's synth, ROM and
+  soundfont, the volume, and MiSTer.ini video options are not part of the
+  machine config and are not carried. Everything the OSD's Save settings
+  stores is.
 - **The full Minimig OSD.** Only the AmigaCD console variant learned the CD and
   hard disk indices. A stock Minimig core still handles floppies only.
 - **Recording the launch as "recent".** A game launched by `.mgl` does not

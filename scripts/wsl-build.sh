@@ -33,6 +33,8 @@ CHANGED=(
     menu.cpp
     support/minimig/akiko_cd32.cpp
     support/minimig/cdtv_cd.cpp
+    support/minimig/mgl_cfg.cpp
+    support/minimig/minimig_config.cpp
     support/physical_disc/physical_disc.cpp
     support/physical_disc/physical_disc_acoustic.cpp
 )

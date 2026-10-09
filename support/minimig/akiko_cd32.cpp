@@ -100,6 +100,20 @@ static void akiko_diag(const char *fmt, ...);
 #define AKIKO_CDDA_BYTES       2352      // raw red-book audio frame
 #define AKIKO_STATUS_CDDA_REQ  (1u << 8) // hps_ext.v:167, cdda_req
 
+// The same class with io_din[0] set is the FIFO's control word (bit 0 = large
+// buffer, bit 1 = flush), and a read on either returns its diagnostics behind a
+// 0xCDDA signature: underruns, starves, fill, flags. See rtl/cdda.v.
+//
+// A core built before the control word existed decodes 0xF201 as the SAMPLE
+// stream, so a control write to it would land in the FIFO as one stray
+// half-frame and swap left and right for the rest of the play. Every control
+// write is therefore gated on having seen the signature first.
+#define AKIKO_CDDA_CTL_ADDR    0xF201
+#define AKIKO_CDDA_CTL_BIG     0x0001
+#define AKIKO_CDDA_CTL_FLUSH   0x0002
+#define AKIKO_CDDA_SIG         0xCDDA
+#define AKIKO_CDDA_FRAMES      588       // stereo frames per sector
+
 // Status-poll cmd byte. Returns one 16-bit word; bit[11] = akiko_req,
 // bit[10] = akiko_sec_req (M4 PBX wants a sector pushed).
 #define AKIKO_STATUS_CMD             0x63
@@ -150,6 +164,9 @@ static void akiko_diag(const char *fmt, ...);
 // from ~12/min worst case to ~2/min, which matters for SD-card wear and
 // for the power-cut window during fsync.
 #define AKIKO_NVRAM_DIRTY_DEBOUNCE_MS 30000
+// How long a pending save may wait for CD audio to stop before it is written
+// anyway. See the dirty-debounce path in akiko_cd32_poll.
+#define AKIKO_NVRAM_AUDIO_DEFER_MAX_MS 300000
 // Minimum interval between two consecutive saves to disk. Even if the
 // BIOS keeps making distinct dirty-burst sequences, we won't write to SD
 // faster than once per N ms. Protects against pathological save loops.
@@ -352,6 +369,61 @@ static int32_t cd_cdda_q_end    = -1;   // SUBQ: play-end LBA for WinUAE end-cla
 static int32_t cd_cdda_lba_next = -1;
 static int32_t cd_cdda_lba_end  = -1;
 static drive_t *cd_cdda_drv     = NULL;
+
+// The last sector has been pushed, but with the large buffer there can be up
+// to ~186 ms of it still to play. Announcing the end now would tell the guest
+// the music had stopped while it can still hear it, so the end is held until
+// the FIFO is down to its last sector. Only ever set with the large buffer:
+// the normal one ends exactly as it always has.
+static bool    cd_cdda_draining = false;
+// The FIFO was told to use the large buffer for the current play. Set only
+// when the control write actually happened, i.e. on a core that has it.
+static bool    cd_cdda_big      = false;
+
+// What the CDDA FIFO reports about itself (rtl/cdda.v).
+typedef struct {
+	uint16_t underruns;   // starved sample periods after data had flowed (wraps)
+	uint16_t starves;     // data -> empty transitions (wraps)
+	uint16_t fill;        // frames held
+	uint16_t flags;       // bit 0 = large buffer, bit 1 = NTSC rate
+} cdda_stats_t;
+
+// Per-play measurements of the audio feed. The FIFO counts its own underruns;
+// these say where the time went when it does. Lines are rate-capped per play,
+// the summary at the end of a play is not.
+#define CDDA_MON_STALL_US     25000   // main loop gaps worth naming
+#define CDDA_MON_SLOW_READ_US 15000   // a single sector read this slow is news
+#define CDDA_MON_LINE_CAP     40
+typedef struct {
+	int64_t      last_poll_us;    // previous poll while streaming, 0 = not streaming
+	int64_t      last_push_us;    // start of the previous push
+	int64_t      worst_gap_since_push_us;
+	bool         continuous;      // the previous push belongs to this unbroken stream
+	bool         primed;          // the FIFO has been full once in this stream
+	bool         have_base;
+	cdda_stats_t base;
+	uint32_t     lines;
+	// summary
+	uint32_t     pushes;
+	uint32_t     stalls;
+	int64_t      max_poll_gap_us;
+	int64_t      max_push_gap_us;
+	int64_t      max_read_us;
+	uint32_t     underrun_events;
+	uint32_t     underrun_periods;
+	uint32_t     min_fill;
+	uint16_t     flags;           // last cdda_stats_t.flags seen
+} cdda_mon_t;
+static cdda_mon_t cdda_mon;
+// -1 not yet probed, 0 the core has no diagnostics, 1 it has.
+static int        cdda_core_diag = -1;
+
+// Defined beside the pump, used by the command handlers above it.
+static void    akiko_cdda_play_begin(void);
+static void    akiko_cdda_play_end(bool flush, const char *why);
+static int32_t cdda_buffered_sectors(void);
+static bool    akiko_cdda_streaming(void);
+static void    cdda_mon_poll(void);
 
 typedef enum {
 	CD_MEDIA_UNKNOWN = -1,
@@ -1140,6 +1212,10 @@ static void cmd_stop(const uint8_t *cmd)
 	// naturally over the next ~13 ms (588 stereo samples remaining at
 	// most). No need to flush — RTL just stops getting refills and the
 	// AUDIO_L/R outputs go to silence on FIFO empty.
+	// A drive told to stop stops: what the FIFO still holds is dropped rather
+	// than played out after the STOP (up to ~46 ms, or ~186 ms with the large
+	// buffer).
+	if (cd_cdda_lba_next >= 0 || cd_cdda_draining) akiko_cdda_play_end(true, "stopped");
 	cd_cdda_lba_next = -1;
 	cd_cdda_lba_end  = -1;
 	cd_cdda_drv      = NULL;
@@ -1450,6 +1526,24 @@ static void cmd_multi(const uint8_t *cmd)
 			// cd_playing/cd_cdda_lba_next/end broke CR2 by tearing down audio
 			// state — only cd_paused needs flipping here.)
 			cd_paused = 0;
+			// ...but the AUDIO has to stop. WinUAE's cdrom_command_multi calls
+			// cdaudiostop() for every MULTI, data reads included (akiko.cpp:
+			// 1052), because the head cannot be on the music and the data at
+			// once. Without this, clearing cd_paused above RESUMED the pump: a
+			// game that pauses its music to load (SSF2T between rounds) got the
+			// music back mid-load, and every prefetch refill -- a 128-sector
+			// CHD read, 30-65 ms measured -- starved the FIFO and stuttered it.
+			//
+			// Only the pump goes. cd_playing and the play-state machine are
+			// left exactly as they were, which is the line the CR2 regression
+			// above drew: tearing those down is what broke its boot.
+			if (cd_cdda_lba_next >= 0 || cd_cdda_draining) {
+				akiko_diag("[akiko] CDDA stopped by PLAY DATA at lba=%d", cd_cdda_lba_next);
+				akiko_cdda_play_end(true, "stopped by a data read");
+				cd_cdda_lba_next = -1;
+				cd_cdda_lba_end  = -1;
+				cd_cdda_drv      = NULL;
+			}
 			r[1] = 0x02;
 			// 2026-06-05 Deep Core counter-drift diagnostic: log the FPGA
 			// cdrom_sector_counter AT ARM TIME. If the BIOS issues successive
@@ -1545,6 +1639,7 @@ static void cmd_multi(const uint8_t *cmd)
 				(cd_cdda_lba_next <  (int32_t)e_lba);
 			cd_cdda_drv      = drv;
 			if (!same_range_inflight) {
+				akiko_cdda_play_begin();
 				cd_cdda_lba_next = (int32_t)s_lba;
 				cd_cdda_lba_end  = (int32_t)e_lba;
 				cd_cdda_q_pos    = (int32_t)s_lba;
@@ -1570,6 +1665,7 @@ static void cmd_multi(const uint8_t *cmd)
 			// 2 → 1 → emit "started", then we override with -3 below to
 			// also send the failure frame. Simpler: skip the "started"
 			// sequence entirely by going straight to -3.
+			if (cd_cdda_lba_next >= 0 || cd_cdda_draining) akiko_cdda_play_end(true, "replaced (invalid PLAY)");
 			cd_cdda_drv      = NULL;
 			cd_cdda_lba_next = -1;
 			cd_cdda_lba_end  = -1;
@@ -1646,6 +1742,19 @@ static void cmd_subq(const uint8_t *cmd)
 			// across the play range. WinUAE's qcode comes from the audio
 			// renderer's frame counter — same effect.
 			cur_lba = (uint32_t)cd_cdda_q_pos;
+			// With the large buffer the sector just pushed is up to 13
+			// sectors ahead of the one being heard. Report the audible one,
+			// which is what a drive's Q channel describes. The normal buffer
+			// reports exactly as before (cdda_buffered_sectors() is 0).
+			{
+				const int32_t behind = cdda_buffered_sectors();
+				if (behind > 0) {
+					const int32_t floor_lba = (int32_t)cd_play_start_lba;
+					int32_t audible = cd_cdda_q_pos - behind;
+					if (audible < floor_lba) audible = floor_lba;
+					cur_lba = (uint32_t)audible;
+				}
+			}
 			// WinUAE akiko.cpp:742-750 "end of disc position is not missed":
 			// within ~10 frames of the play end, clamp to the exact end so a
 			// game polling SUBQ for end-of-audio (DotC) actually sees it.
@@ -1801,6 +1910,19 @@ static void akiko_nvram_dump(uint8_t *out_1024)
 static uint32_t  nvr_verify_due_at_ms = 0;        // 0 = no verify pending
 static char      nvr_verify_path[1024];
 
+// A load that does not verify is sent again, a few times, before the slot is
+// given up on. On a core whose bridge clears its NVRAM address counter with
+// the CD32 reset (before RTL 2026-10-09), a load sent on the first poll after
+// a power-on with the disc in the config lands entirely on address 0, and
+// the BRAM keeps its .mif image. The same load half a second later, with the
+// CPU out of reset, lands. Only retried while the guest has not written the
+// NVRAM yet: after that, BRAM holds the game's own data and a reload would
+// overwrite it.
+#define AKIKO_NVRAM_LOAD_RETRIES   5
+#define AKIKO_NVRAM_RETRY_GAP_MS   500
+static int       nvr_retry_left       = 0;
+static uint32_t  nvr_retry_at_ms      = 0;        // 0 = no retry scheduled
+
 static bool akiko_nvram_load_from_path(const char *path)
 {
 	struct stat st;
@@ -1849,6 +1971,17 @@ static bool akiko_nvram_load_from_path(const char *path)
 // broken load).
 static void akiko_nvram_verify_load_pending(void)
 {
+	if (nvr_retry_at_ms && CheckTimer(nvr_retry_at_ms)) {
+		nvr_retry_at_ms = 0;
+		if (akiko_read_status() & AKIKO_STATUS_NVR_DIRTY) {
+			akiko_diag("[akiko] NVR load retry abandoned: the game has written NVRAM since");
+			cd_save_load_failed = true;
+			return;
+		}
+		akiko_diag("[akiko] NVR load retry (%d left)", nvr_retry_left);
+		akiko_nvram_load_from_path(nvr_verify_path);
+		return;
+	}
 	if (!nvr_verify_due_at_ms) return;
 	if (!CheckTimer(nvr_verify_due_at_ms)) return;
 	nvr_verify_due_at_ms = 0;
@@ -1894,6 +2027,10 @@ static void akiko_nvram_verify_load_pending(void)
 		}
 	}
 	cd_save_load_failed = true;
+	if (nvr_retry_left > 0 && !(akiko_read_status() & AKIKO_STATUS_NVR_DIRTY)) {
+		nvr_retry_left--;
+		nvr_retry_at_ms = (uint32_t)GetTimer(AKIKO_NVRAM_RETRY_GAP_MS);
+	}
 }
 
 // Atomic save to a specific path: dump → write to .tmp → fsync → rename →
@@ -2267,6 +2404,188 @@ static void akiko_push_audio_sector(const uint8_t *buf2352)
 	DisableIO();
 }
 
+static int64_t cdda_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+}
+
+// Read the FIFO's diagnostics. False on a core without them, which answers the
+// read with zeros. The signature is searched for in the first three words, as
+// minimig_ssdiag.cpp does, rather than assumed to be the first.
+static bool akiko_cdda_stats(cdda_stats_t *st)
+{
+	uint16_t w[7];
+	EnableIO();
+	spi8(UIO_DMA_READ);
+	spi32_w(AKIKO_CDDA_ADDR);
+	for (int i = 0; i < 7; i++) w[i] = spi_w(0);
+	DisableIO();
+
+	for (int i = 0; i < 3; i++) {
+		if (w[i] == AKIKO_CDDA_SIG) {
+			st->underruns = w[i + 1];
+			st->starves   = w[i + 2];
+			st->fill      = w[i + 3];
+			st->flags     = w[i + 4];
+			cdda_core_diag = 1;
+			return true;
+		}
+	}
+	cdda_core_diag = 0;
+	return false;
+}
+
+// Write the FIFO's control word. Refused unless the core has been seen to have
+// one -- see AKIKO_CDDA_CTL_ADDR for what an older core would do with it.
+static bool akiko_cdda_ctl(uint16_t w)
+{
+	if (cdda_core_diag != 1) return false;
+	EnableIO();
+	spi8(UIO_DMA_WRITE);
+	spi32_w(AKIKO_CDDA_CTL_ADDR);
+	spi_w(w);
+	DisableIO();
+	return true;
+}
+
+static void cdda_mon_summary(const char *why)
+{
+	if (!cdda_mon.pushes) return;
+	akiko_diag("[akiko] CDDA play %s: %u sectors, buffer=%s, rate=%s, underruns=%u (%u ms silent), "
+	           "stalls>%ums=%u, worst poll gap=%lld ms, worst push gap=%lld ms, "
+	           "slowest read=%lld ms, lowest fill=%u ms%s",
+	           why, cdda_mon.pushes, cd_cdda_big ? "large" : "normal",
+	           (cdda_core_diag != 1) ? "?" : (cdda_mon.flags & 2) ? "ntsc" : "pal",
+	           cdda_mon.underrun_events, cdda_mon.underrun_periods * 10u / 441u,
+	           CDDA_MON_STALL_US / 1000, cdda_mon.stalls,
+	           (long long)(cdda_mon.max_poll_gap_us / 1000),
+	           (long long)(cdda_mon.max_push_gap_us / 1000),
+	           (long long)(cdda_mon.max_read_us / 1000),
+	           (cdda_mon.min_fill == UINT32_MAX) ? 0u : cdda_mon.min_fill * 10u / 441u,
+	           (cdda_core_diag == 1) ? "" : " (core has no FIFO diagnostics: underruns not counted)");
+	memset(&cdda_mon, 0, sizeof(cdda_mon));
+	cdda_mon.min_fill = UINT32_MAX;
+}
+
+// A new play starts. Throw away what the FIFO still holds of the previous one --
+// a real drive that is told to play somewhere else stops playing where it was --
+// and set the buffer depth from the OSD. Probing the diagnostics first is what
+// makes the control write safe (akiko_cdda_ctl).
+static void akiko_cdda_play_begin(void)
+{
+	cdda_mon_summary("replaced");
+	memset(&cdda_mon, 0, sizeof(cdda_mon));
+	cdda_mon.min_fill = UINT32_MAX;
+	cd_cdda_draining = false;
+
+	cdda_stats_t st;
+	const bool large = amigacd_cd_audio_buffer() == mmab_large;
+	cd_cdda_big = false;
+	if (akiko_cdda_stats(&st)) {
+		akiko_cdda_ctl(AKIKO_CDDA_CTL_FLUSH | (large ? AKIKO_CDDA_CTL_BIG : 0));
+		cd_cdda_big = large;
+	}
+}
+
+// The play is over and nothing more will be pushed for it: STOP, a failed read,
+// or the natural end. A STOP silences what is buffered, as the drive would.
+static void akiko_cdda_play_end(bool flush, const char *why)
+{
+	if (flush) akiko_cdda_ctl(cd_cdda_big ? (AKIKO_CDDA_CTL_FLUSH | AKIKO_CDDA_CTL_BIG)
+	                                      : AKIKO_CDDA_CTL_FLUSH);
+	cd_cdda_draining = false;
+	cdda_mon_summary(why);
+}
+
+// Once per poll. A gap between two polls while audio streams is time the FIFO
+// has to cover on its own; naming the long ones is what ties a stutter to
+// whatever else the main loop was doing at that moment.
+static void cdda_mon_poll(void)
+{
+	const bool streaming = cd_cdda_lba_next >= 0 && !cd_paused;
+	if (!streaming) {
+		cdda_mon.last_poll_us = 0;
+		return;
+	}
+	const int64_t now = cdda_now_us();
+	if (cdda_mon.last_poll_us) {
+		const int64_t gap = now - cdda_mon.last_poll_us;
+		if (gap > cdda_mon.max_poll_gap_us) cdda_mon.max_poll_gap_us = gap;
+		if (gap > cdda_mon.worst_gap_since_push_us) cdda_mon.worst_gap_since_push_us = gap;
+		if (gap > CDDA_MON_STALL_US) {
+			cdda_mon.stalls++;
+			if (cdda_mon.lines++ < CDDA_MON_LINE_CAP)
+				akiko_diag("[akiko] CDDA main loop stall %lld ms at lba=%d",
+				           (long long)(gap / 1000), cd_cdda_lba_next);
+		}
+	}
+	cdda_mon.last_poll_us = now;
+}
+
+// After each push: timing, and the FIFO's own account of whether it ran dry
+// since the previous one.
+static void cdda_mon_push(uint32_t lba, int64_t t_read0, int64_t t_read1)
+{
+	const int64_t read_us = t_read1 - t_read0;
+	cdda_mon.pushes++;
+	if (read_us > cdda_mon.max_read_us) cdda_mon.max_read_us = read_us;
+	if (read_us > CDDA_MON_SLOW_READ_US && cdda_mon.lines++ < CDDA_MON_LINE_CAP)
+		akiko_diag("[akiko] CDDA slow read %lld ms at lba=%u", (long long)(read_us / 1000), lba);
+
+	int64_t push_gap = 0;
+	if (cdda_mon.continuous && cdda_mon.last_push_us) {
+		push_gap = t_read0 - cdda_mon.last_push_us;
+		if (push_gap > cdda_mon.max_push_gap_us) cdda_mon.max_push_gap_us = push_gap;
+	}
+	cdda_mon.last_push_us = t_read0;
+
+	cdda_stats_t st;
+	if (cdda_core_diag == 1 && akiko_cdda_stats(&st)) {
+		// The first push of a stream, or the first after a pause, only sets the
+		// baseline: the FIFO legitimately ran dry before it, so neither its
+		// fill nor its counters say anything about the feed.
+		if (cdda_mon.continuous && cdda_mon.have_base) {
+			if (cdda_mon.primed && st.fill < cdda_mon.min_fill) cdda_mon.min_fill = st.fill;
+			const uint16_t d_starve = (uint16_t)(st.starves - cdda_mon.base.starves);
+			const uint16_t d_under  = (uint16_t)(st.underruns - cdda_mon.base.underruns);
+			if (d_starve) {
+				cdda_mon.underrun_events  += d_starve;
+				cdda_mon.underrun_periods += d_under;
+				if (cdda_mon.lines++ < CDDA_MON_LINE_CAP)
+					akiko_diag("[akiko] CDDA UNDERRUN %u ms silent at lba=%u: push gap %lld ms, "
+					           "read %lld ms, worst poll gap %lld ms",
+					           d_under * 10u / 441u, lba, (long long)(push_gap / 1000),
+					           (long long)(read_us / 1000),
+					           (long long)(cdda_mon.worst_gap_since_push_us / 1000));
+			}
+		}
+		cdda_mon.base = st;
+		cdda_mon.have_base = true;
+		cdda_mon.flags = st.flags;
+	}
+	cdda_mon.worst_gap_since_push_us = 0;
+	cdda_mon.continuous = true;
+}
+
+// Sectors still in the FIFO, for the large buffer's position correction. Zero
+// with the normal buffer, which reports positions exactly as it always has.
+static int32_t cdda_buffered_sectors(void)
+{
+	if (!cd_cdda_big) return 0;
+	cdda_stats_t st;
+	if (!akiko_cdda_stats(&st)) return 0;
+	return st.fill / AKIKO_CDDA_FRAMES;
+}
+
+// True while CD audio is being fed. Used to keep slow housekeeping (the NVRAM
+// save) out of the window where a stall is a gap in the music.
+static bool akiko_cdda_streaming(void)
+{
+	return (cd_cdda_lba_next >= 0 && !cd_paused) || cd_cdda_draining;
+}
+
 // Build the deinterleaved 96-byte subchannel for `lba`: all zero except the
 // Q channel (bytes 12..23), per WinUAE getsub regenerate
 // (blkdev_cdimage.cpp:336). Track-relative MSF carries no pre-gap; absolute
@@ -2334,10 +2653,46 @@ static void akiko_push_subcode(const uint8_t *d96)
 // one sector. Returns true if it pushed (caller treats as one bridge
 // action consumed and returns from poll). Handles natural end-of-play
 // by emitting playend_notify(1) via the cd_audio_timeout state machine.
+// The natural end, once the audio has actually been heard to the end.
+static void akiko_cdda_natural_end(void)
+{
+	// WinUAE cd_qcode parity: report the exact play-end so a SUBQ-polling
+	// game (DotC) sees end-of-audio; q_end kept for the clamp, cd_playing
+	// stays 1 so cmd_subq still answers.
+	cd_cdda_q_pos = cd_cdda_q_end;
+	// Advance the play-state machine through -1 → -2 → emit
+	// playend_notify(1). cd_audio_play_until_ms wall-clock fallback
+	// is no longer needed since we just hit natural end.
+	cd_audio_play_until_ms = 0;
+	cd_audio_timeout = -1;
+	akiko_cdda_play_end(false, "ended");
+}
+
 static bool akiko_cdda_pump(void)
 {
+	// Large buffer, everything pushed: wait for the FIFO to play down to its
+	// last sector before announcing the end. Ahead of the pause test because
+	// the FIFO goes on playing through a pause either way. Checked every 2 ms
+	// at most -- the end is a sector (13 ms) wide, and the read would
+	// otherwise be an SPI transaction on every poll.
+	if (cd_cdda_draining) {
+		static int64_t next_check_us = 0;
+		const int64_t now = cdda_now_us();
+		if (now < next_check_us) return false;
+		next_check_us = now + 2000;
+		cdda_stats_t st;
+		if (!akiko_cdda_stats(&st) || st.fill < AKIKO_CDDA_FRAMES) {
+			akiko_diag("[akiko] CDDA large buffer drained, play ends");
+			akiko_cdda_natural_end();
+		}
+		return false;
+	}
 	if (cd_cdda_lba_next < 0) return false;
-	if (cd_paused) return false;
+	if (cd_paused) {
+		cdda_mon.continuous = false;   // the FIFO may run dry; that is not an underrun
+		cdda_mon.primed     = false;
+		return false;
+	}
 	if (!cd_cdda_drv) {
 		// Drive vanished — abort the pump rather than spin trying to
 		// re-acquire (we'd risk reading from a swapped CD).
@@ -2345,6 +2700,7 @@ static bool akiko_cdda_pump(void)
 		cd_cdda_lba_end  = -1;
 		cd_audio_timeout = -3;
 		akiko_diag("[akiko] CDDA pump abort: drive gone");
+		akiko_cdda_play_end(false, "aborted (drive gone)");
 		return false;
 	}
 	// The head has to reach the audio too. akiko_arm_seek charges a trip when
@@ -2360,13 +2716,17 @@ static bool akiko_cdda_pump(void)
 		cd_ready_at_us = 0;
 	}
 
-	if (!akiko_audio_fifo_ready()) return false;
+	if (!akiko_audio_fifo_ready()) {
+		cdda_mon.primed = true;        // past the ramp-up: low fill from here is news
+		return false;
+	}
 
 	uint8_t buf[AKIKO_CDDA_BYTES];
 	uint32_t lba = (uint32_t)cd_cdda_lba_next;
 	// Audio moves the head like anything else does, so a data read that follows
 	// a track pays for the distance from where the music stopped.
 	cd_head_lba = (int32_t)lba;
+	const int64_t t_read0 = cdda_now_us();
 	if (!cd_read_audio_sector(cd_cdda_drv, lba, buf)) {
 		// Read failure — push silence so the FIFO doesn't underrun at the
 		// boundary, but tear down so we don't loop here forever. WinUAE
@@ -2378,8 +2738,10 @@ static bool akiko_cdda_pump(void)
 		cd_cdda_lba_end  = -1;
 		cd_cdda_drv      = NULL;
 		cd_audio_timeout = -3;
+		akiko_cdda_play_end(false, "aborted (read failed)");
 		return true;
 	}
+	const int64_t t_read1 = cdda_now_us();
 
 	akiko_push_audio_sector(buf);
 	cd_cdda_lba_next++;
@@ -2397,6 +2759,8 @@ static bool akiko_cdda_pump(void)
 		akiko_push_subcode(sub_intlv);
 	}
 
+	cdda_mon_push(lba, t_read0, t_read1);
+
 	if ((lba & 0xff) == 0) {
 		int32_t remaining = cd_cdda_lba_end - cd_cdda_lba_next;
 		(void)remaining;
@@ -2406,18 +2770,14 @@ static bool akiko_cdda_pump(void)
 	if (cd_cdda_lba_next >= cd_cdda_lba_end) {
 		akiko_dbg("CDDA done at lba=%u\n", lba);
 		akiko_diag("[akiko] CDDA pump natural end at lba=%u", lba);
-		// WinUAE cd_qcode parity: report the exact play-end so a SUBQ-polling
-		// game (DotC) sees end-of-audio; q_end kept for the clamp, cd_playing
-		// stays 1 so cmd_subq still answers.
-		cd_cdda_q_pos    = cd_cdda_q_end;
 		cd_cdda_lba_next = -1;
 		cd_cdda_lba_end  = -1;
 		cd_cdda_drv      = NULL;
-		// Advance the play-state machine through -1 → -2 → emit
-		// playend_notify(1). cd_audio_play_until_ms wall-clock fallback
-		// is no longer needed since we just hit natural end.
-		cd_audio_play_until_ms = 0;
-		cd_audio_timeout = -1;
+		// The normal buffer ends here, as it always has. The large one still
+		// holds up to ~186 ms of unplayed audio, so the end waits for it (see
+		// the top of this function).
+		if (cd_cdda_big) cd_cdda_draining = true;
+		else             akiko_cdda_natural_end();
 	}
 	return true;
 }
@@ -2974,6 +3334,10 @@ void akiko_cd32_init(void)
 	cd_cdda_lba_next = -1;
 	cd_cdda_lba_end  = -1;
 	cd_cdda_drv      = NULL;
+	cd_cdda_draining = false;
+	cd_cdda_big      = false;
+	// A core load may have brought a different core with it.
+	cdda_core_diag   = -1;
 	cd_media_level   = CD_MEDIA_UNKNOWN;
 	cd_media_push_pending = false;
 	cd_media_event   = false;
@@ -3056,6 +3420,8 @@ static inline bool cd32_active(void)
 
 void akiko_cd32_poll(void)
 {
+	cdda_mon_poll();
+
 	// Hold the disc genuinely ABSENT until the boot settle expires, not merely
 	// unannounced. Delaying only the unsolicited push was not enough: the guest
 	// also QUERIES media status, cd_media_present() kept answering "present",
@@ -3118,6 +3484,7 @@ void akiko_cd32_poll(void)
 		cd_media_event   = false;
 		cd_data_lba_base = -1;
 		akiko_prefetch_invalidate();
+		if (cd_cdda_lba_next >= 0 || cd_cdda_draining) akiko_cdda_play_end(true, "disc changed");
 		cd_cdda_lba_next = -1;
 		cd_cdda_lba_end  = -1;
 		cd_cdda_drv      = NULL;
@@ -3156,6 +3523,8 @@ void akiko_cd32_poll(void)
 	// log line is more useful when correlated with the mount event).
 	if (cd_save_load_pending && mounted) {
 		cd_save_load_pending = false;
+		nvr_retry_left  = AKIKO_NVRAM_LOAD_RETRIES;
+		nvr_retry_at_ms = 0;
 		if (cd_save_path_active[0]) {
 			// One-shot legacy migration: if the per-game file doesn't
 			// exist but the legacy single-file save does, load the
@@ -3473,8 +3842,21 @@ void akiko_cd32_poll(void)
 			// user intent, matches arcade pattern) OR the 30s debounce
 			// expiring as a safety net for sessions where the user never
 			// reopens OSD before power-off.
-			const bool throttle_expired = rx_idle &&
-				(now_ms - nvr_dirty_seen_at) >= AKIKO_NVRAM_DIRTY_DEBOUNCE_MS;
+			// Not while CD audio is playing, unless it has been deferred for
+			// AKIKO_NVRAM_AUDIO_DEFER_MAX_MS already. The dump and the fsync
+			// behind it block this loop for longer than the audio FIFO lasts
+			// (the dump alone is ~50 ms against ~46 ms of buffer), so a save
+			// landing mid-track was a guaranteed gap in the music. The guest
+			// cannot tell: its NVRAM is in the FPGA, this only decides when the
+			// card gets a copy. Music is rarely continuous for minutes, so the
+			// save lands in the next silence; the cap is for the game that
+			// loops one track forever. The OSD-open trigger is not deferred --
+			// the user is about to reset or swap.
+			const uint32_t dirty_for = now_ms - nvr_dirty_seen_at;
+			const bool audio_holds = akiko_cdda_streaming() &&
+				dirty_for < AKIKO_NVRAM_AUDIO_DEFER_MAX_MS;
+			const bool throttle_expired = rx_idle && !audio_holds &&
+				dirty_for >= AKIKO_NVRAM_DIRTY_DEBOUNCE_MS;
 			const bool fire = osd_open_edge || throttle_expired;
 			// Min-interval cooldown still applies — protects against
 			// pathological save loops regardless of trigger.
@@ -3489,7 +3871,15 @@ void akiko_cd32_poll(void)
 				// explicit clear-dirty SPI write is needed (and would
 				// in fact corrupt byte 0 under the new write-as-load
 				// bridge semantics).
-				akiko_nvram_save_to_disk();
+				{
+					const int64_t t0 = cdda_now_us();
+					const bool during_audio = akiko_cdda_streaming();
+					akiko_nvram_save_to_disk();
+					const int64_t t1 = cdda_now_us();
+					if (during_audio)
+						akiko_diag("[akiko] NVR save during CD audio took %lld ms",
+						           (long long)((t1 - t0) / 1000));
+				}
 				nvr_dirty_seen_at = 0;
 				nvr_last_save_at  = now_ms;
 			}
@@ -3872,9 +4262,14 @@ bool akiko_cd32_state_load(const void *buf, int len)
 	// LBAs are meaningless anyway and there is nothing better to do than aim
 	// them at the disc that is actually in.
 	cd_cdda_drv = s.cdda_active ? cd_find_drive() : NULL;
+	cd_cdda_draining = false;
 	if (!cd_cdda_drv) {
 		cd_cdda_lba_next = -1;
 		cd_cdda_lba_end  = -1;
+	} else {
+		// The FIFO's depth is not part of the saved machine; set it again
+		// for the play being resumed.
+		akiko_cdda_play_begin();
 	}
 
 	// The prefetch windows hold sectors from wherever the drive was before the
