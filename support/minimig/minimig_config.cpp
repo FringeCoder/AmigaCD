@@ -25,6 +25,7 @@
 #include "cdtv_cd.h"
 #include "minimig_a2065.h"
 #include "../arcade/mra_loader.h"
+#include "mgl_cfg.h"
 #include <string>
 #include <unistd.h>
 
@@ -688,6 +689,124 @@ static void mgl_replace_path(std::string &xml, size_t tag_start, size_t &tag_end
 	tag_end += ins.size();
 }
 
+// ---- Settings inside a .mgl ----
+//
+// Every field of mm_configTYPE, by name, for the <amigacd_config> block that
+// "Write .mgl for this disc" puts in the file and that a launch from that file
+// applies (mgl_cfg.h has the format). The names are the struct's, so a file
+// edited by hand can be read against this header.
+//
+// The ext ROM is not here: it shares the kickstart buffer, after the
+// kickstart's own NUL, so it travels as a separate "extrom" setting.
+#define MMF(n, f, t) { n, offsetof(mm_configTYPE, f), sizeof(((mm_configTYPE *)0)->f), t }
+#define MMHF(p, f)   MMF(p "_cfg", f.cfg, MGLCFG_U8), MMF(p "_reserved", f.reserved, MGLCFG_U8), \
+                     MMF(p "_path", f.filename, MGLCFG_STR)
+static constexpr mglcfg_field mm_cfg_fields[] =
+{
+	MMF("ext_cfg2",          ext_cfg2,            MGLCFG_U16),
+	MMF("kickstart",         kickstart,           MGLCFG_STR),
+	MMF("label",             label,               MGLCFG_STR),
+	MMF("ext_cfg",           ext_cfg,             MGLCFG_U16),
+	MMF("memory",            memory,              MGLCFG_U8),
+	MMF("chipset",           chipset,             MGLCFG_U8),
+	MMF("floppy_speed",      floppy.speed,        MGLCFG_U8),
+	MMF("floppy_drives",     floppy.drives,       MGLCFG_U8),
+	MMF("floppy_ext0",       floppy.extDrives[0], MGLCFG_U8),
+	MMF("floppy_ext1",       floppy.extDrives[1], MGLCFG_U8),
+	MMF("floppy_ext2",       floppy.extDrives[2], MGLCFG_U8),
+	MMF("floppy_ext3",       floppy.extDrives[3], MGLCFG_U8),
+	MMF("disable_ar3",       disable_ar3,         MGLCFG_U8),
+	MMF("ide_cfg",           ide_cfg,             MGLCFG_U8),
+	MMF("scanlines",         scanlines,           MGLCFG_U8),
+	MMF("audio",             audio,               MGLCFG_U8),
+	MMHF("hdf0",             hardfile[0]),
+	MMHF("hdf1",             hardfile[1]),
+	MMHF("hdf2",             hardfile[2]),
+	MMHF("hdf3",             hardfile[3]),
+	MMF("cpu",               cpu,                 MGLCFG_U8),
+	MMF("autofire",          autofire,            MGLCFG_U8),
+	MMF("info",              info,                MGLCFG_STR),
+	MMF("userport",          userport,            MGLCFG_U32),
+	MMF("snac0",             snac[0],             MGLCFG_U8),
+	MMF("snac1",             snac[1],             MGLCFG_U8),
+	MMF("ss_slot",           ss_slot,             MGLCFG_U8),
+	MMHF("cd32_drive",       cd32_drive),
+	MMHF("cdtv_drive",       cdtv_drive),
+	MMF("a2065_mode",        a2065_mode,          MGLCFG_U8),
+	MMF("cd_mount_delay",    cd_mount_delay,      MGLCFG_U8),
+	MMF("cd_speed",          cd_speed,            MGLCFG_U8),
+	MMF("cd_audio_buffer",   cd_audio_buffer,     MGLCFG_U8),
+};
+#undef MMHF
+#undef MMF
+static constexpr int mm_cfg_nfields = sizeof(mm_cfg_fields) / sizeof(mm_cfg_fields[0]);
+static_assert(sizeof(((mm_configTYPE *)0)->userport) == 4, "userport is written as a 32-bit value");
+
+// "All settings" has to stay true when the struct grows. The table must walk
+// the struct in order, without overlaps, from the end of id/version to the
+// end, and the only bytes it may skip are the struct's padding: one byte of
+// tail padding today. A field added to the struct and not to the table shows
+// up here as missing coverage and stops the build, instead of quietly being
+// left out of every .mgl.
+static constexpr size_t mm_cfg_uncovered(int i = 0, size_t cursor = offsetof(mm_configTYPE, ext_cfg2))
+{
+	return (i == mm_cfg_nfields)
+		? sizeof(mm_configTYPE) - cursor
+		: (mm_cfg_fields[i].off < cursor)
+			? (size_t)1 << 20                  // out of order or overlapping
+			: (mm_cfg_fields[i].off - cursor) + mm_cfg_uncovered(i + 1, mm_cfg_fields[i].off + mm_cfg_fields[i].size);
+}
+static_assert(mm_cfg_uncovered() == 1,
+	"mm_cfg_fields must name every field of mm_configTYPE, in struct order: "
+	"a field was added to the struct (or the table) without the other");
+
+int minimig_mgl_config_block(char *out, size_t outsz, const char *indent)
+{
+	// What minimig_cfg_save() stores is what a file carries.
+	minimig_config.a2065_mode = a2065_cfg_get();
+	const mglcfg_extra extra[] = { { "extrom", minimig_get_extrom() } };
+	return mglcfg_format(out, outsz, &minimig_config, mm_cfg_fields, mm_cfg_nfields, extra, 1, indent);
+}
+
+// Apply the launching .mgl's <amigacd_config>, if there is one, over the config
+// just loaded. Once per process: only the boot load is a launch from the file;
+// the Configs page and the System row load other files on purpose.
+static void minimig_mgl_config_apply()
+{
+	static bool done = false;
+	if (done) return;
+	done = true;
+
+	mgl_struct *m = mgl_get();
+	if (!m || !m->xml_path[0]) return;
+
+	FILE *f = fopen(m->xml_path, "rb");
+	if (!f) return;
+	static char xml[64 * 1024];
+	const size_t n = fread(xml, 1, sizeof(xml) - 1, f);
+	const bool whole = feof(f);
+	fclose(f);
+	xml[n] = 0;
+	if (!whole) { printf("MGL config: %s too large, ignored\n", m->xml_path); return; }
+
+	char extrom[sizeof(minimig_config.kickstart)];
+	snprintf(extrom, sizeof(extrom), "%s", minimig_get_extrom());
+
+	int unknown = 0, bad = 0;
+	const int applied = mglcfg_apply(xml, &minimig_config, mm_cfg_fields, mm_cfg_nfields, &unknown, &bad);
+	if (applied < 0) return;   // a plain .mgl: files and resets only
+
+	// The kickstart setting rewrites the whole buffer the ext ROM lives in, so
+	// it is put back: from the file when it names one, else as it was.
+	char mgl_extrom[sizeof(minimig_config.kickstart)];
+	if (mglcfg_get(xml, "extrom", mgl_extrom, sizeof(mgl_extrom))) { unknown--; minimig_set_extrom(mgl_extrom); }
+	else minimig_set_extrom(extrom);
+
+	memcpy(minimig_config.id, "MNMGCFG0", sizeof(minimig_config.id));
+	printf("MGL config: %d settings applied from %s (%d unknown, %d bad)\n",
+	       applied, m->xml_path, unknown, bad);
+}
+
 int minimig_mgl_save()
 {
 	mgl_struct *m = mgl_get();
@@ -768,9 +887,28 @@ int minimig_mgl_save()
 		}
 	}
 
+	// A file that carries its own settings is the game's config: Save settings
+	// while it is running updates it as well, or the next launch would quietly
+	// bring back the old values. A plain .mgl (no block) is not given one --
+	// that is what Write .mgl is for.
+	if (xml.find("<amigacd_config") != std::string::npos)
+	{
+		static char block[48 * 1024];
+		static char buf[64 * 1024];
+		if (minimig_mgl_config_block(block, sizeof(block), "\t") > 0 && xml.size() < sizeof(buf))
+		{
+			memcpy(buf, xml.c_str(), xml.size() + 1);
+			if (mglcfg_put_block(buf, sizeof(buf), block) > 0)
+			{
+				xml = buf;
+				dirty = true;
+			}
+		}
+	}
+
 	if (!dirty)
 	{
-		printf("MGL save: no floppy deltas (path=%s)\n", path);
+		printf("MGL save: no deltas (path=%s)\n", path);
 		return 0;
 	}
 
@@ -1350,10 +1488,18 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		{
 			amigacd_apply_system(AMIGACD_SYS_CD32);
 			BootPrintEx(">>> AmigaCD: defaulting to CD32. <<<");
+			// A .mgl carrying its own settings wins over the defaults too.
+			if (!num && !sys_suffix) minimig_mgl_config_apply();
 		}
 	}
 	else if (is_amigacd())
 	{
+		// Settings carried by the launching .mgl go on top of the startup
+		// config, and BEFORE the corrections below: those are facts about the
+		// machine, and a file written by an older build can carry the same
+		// stale values a config on the card can.
+		if (!num && !sys_suffix) minimig_mgl_config_apply();
+
 		// A loaded config carries whatever chip RAM was last persisted, and
 		// until now nothing ever corrected it: amigacd_apply_system() runs only
 		// in the no-config branch above, and mounting a CD image

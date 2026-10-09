@@ -326,6 +326,10 @@ int amigacd_switch_system(int from_sys, int to_sys);
 // "Save settings" row calls.
 int amigacd_cfg_save_current(void);
 int minimig_mgl_save();
+
+// The <amigacd_config> block for a .mgl: every setting of minimig_config as it
+// stands now. Returns its length, or -1 if it does not fit. See mgl_cfg.h.
+int minimig_mgl_config_block(char *out, size_t outsz, const char *indent);
 const char* minimig_get_cfg_info(int num, int label);
 
 void minimig_reset();

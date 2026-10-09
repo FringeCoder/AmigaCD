@@ -70,6 +70,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "support/minimig/minimig_ssdiag.h"
 #include "support/minimig/akiko_cd32.h"        // akiko_cd32_disc_info for the CD row
 #include "support/minimig/mgl_rbf.h"             // rewriting an .mgl's <rbf> in place
+#include "support/minimig/mgl_cfg.h"             // the settings block in an .mgl
 #include "profiling.h"
 #include "str_util.h"
 #include "osd_rowguard.h"                       // the per-paint cursor/menumask guard
@@ -1106,36 +1107,48 @@ static int amigacd_write_mgl(char *out, size_t outsz)
 	char full[1024];
 	snprintf(full, sizeof(full), "%s", getFullPath(out));
 
+	// Every setting, the disc among them, goes into the file's
+	// <amigacd_config> block (support/minimig/mgl_cfg.h). Launching the file
+	// then gives this machine exactly, whatever the startup config says --
+	// and with the disc in the drive at power-on, as on a real CD32. That
+	// matters beyond convenience: the late mount a <file index="4"> makes is
+	// the route on which Banshee and Super Stardust run out of chip RAM, on a
+	// real CD32 as well as here. So no CD <file> line is written, and one
+	// already in the file is removed, or it would remount the disc late.
+	static char block[48 * 1024];
+	if (minimig_mgl_config_block(block, sizeof(block), "\t") < 0) return MGL_FAILED;
+	(void)discpath;
+
 	// An existing file is EDITED, not replaced.
 	//
 	// Replacing it is what this used to do, and it threw away whatever the user
 	// had added -- a <reset/>, a second <file> for a save volume, a comment --
 	// silently, on a keypress whose whole purpose is to fix a path after a
 	// deploy. Which is exactly when someone would press it on a file they had
-	// tuned by hand.
+	// tuned by hand. Only <rbf>, the settings block and the CD line change.
 	FILE *ex = fopen(full, "r");
 	if (ex)
 	{
-		static char xml[8192];
+		static char xml[64 * 1024];
 		size_t n = fread(xml, 1, sizeof(xml) - 1, ex);
 		const int truncated = !feof(ex);
 		fclose(ex);
 		xml[n] = 0;
 
 		// A file too big for the buffer is left alone rather than written back
-		// short. 8 KB is orders of magnitude more than any .mgl needs, so this
-		// is a guard against something that is not one.
+		// short.
 		if (truncated) return MGL_FAILED;
 
-		const int changed = mgl_rewrite_rbf(xml, sizeof(xml), rbfval);
-		if (!changed)
-		{
-			// Either it already names this core, or there is no <rbf> element
-			// to edit. The first is the common case and is not a failure; the
-			// second means the file is not one of ours, and editing a file we
-			// do not understand is worse than declining.
-			return strstr(xml, "<rbf>") ? MGL_CURRENT : MGL_FAILED;
-		}
+		// No <rbf> element means the file is not one of ours, and editing a
+		// file we do not understand is worse than declining.
+		if (!strstr(xml, "<rbf>")) return MGL_FAILED;
+
+		int changed = mgl_rewrite_rbf(xml, sizeof(xml), rbfval) > 0;
+		changed |= mgl_remove_file_index(xml, 4) > 0;
+		const int put = mglcfg_put_block(xml, sizeof(xml), block);
+		if (put < 0) return MGL_FAILED;
+		changed |= put;
+		if (!changed) return MGL_CURRENT;
 
 		FILE *w = fopen(full, "w");
 		if (!w) return MGL_FAILED;
@@ -1148,11 +1161,16 @@ static int amigacd_write_mgl(char *out, size_t outsz)
 	FILE *f = fopen(full, "w");
 	if (!f) return MGL_FAILED;
 
-	// delay="2" is the floor docs/mgl.md gives: the core has to be up before
-	// the mount lands. index 4 is the CD.
 	fprintf(f, "<mistergamedescription>\n");
 	fprintf(f, "\t<rbf>%s</rbf>\n", rbfval);
-	fprintf(f, "\t<file delay=\"2\" type=\"f\" index=\"4\" path=\"%s\"/>\n", discpath);
+	// Floppies are media rather than settings and are not in the config, so
+	// any that are mounted go in as ordinary <file> items (index = drive).
+	for (int i = 0; i < 4; i++)
+	{
+		if (!(df[i].status & DSK_INSERTED) || !df[i].name[0]) continue;
+		fprintf(f, "\t<file delay=\"2\" type=\"f\" index=\"%d\" path=\"%s\"/>\n", i, df[i].name);
+	}
+	fputs(block, f);
 	fprintf(f, "</mistergamedescription>\n");
 
 	int ok = !ferror(f);
