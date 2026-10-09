@@ -399,6 +399,7 @@ typedef struct {
 	int64_t      last_push_us;    // start of the previous push
 	int64_t      worst_gap_since_push_us;
 	bool         continuous;      // the previous push belongs to this unbroken stream
+	bool         primed;          // the FIFO has been full once in this stream
 	bool         have_base;
 	cdda_stats_t base;
 	uint32_t     lines;
@@ -411,6 +412,7 @@ typedef struct {
 	uint32_t     underrun_events;
 	uint32_t     underrun_periods;
 	uint32_t     min_fill;
+	uint16_t     flags;           // last cdda_stats_t.flags seen
 } cdda_mon_t;
 static cdda_mon_t cdda_mon;
 // -1 not yet probed, 0 the core has no diagnostics, 1 it has.
@@ -2423,10 +2425,11 @@ static bool akiko_cdda_ctl(uint16_t w)
 static void cdda_mon_summary(const char *why)
 {
 	if (!cdda_mon.pushes) return;
-	akiko_diag("[akiko] CDDA play %s: %u sectors, buffer=%s, underruns=%u (%u ms silent), "
+	akiko_diag("[akiko] CDDA play %s: %u sectors, buffer=%s, rate=%s, underruns=%u (%u ms silent), "
 	           "stalls>%ums=%u, worst poll gap=%lld ms, worst push gap=%lld ms, "
 	           "slowest read=%lld ms, lowest fill=%u ms%s",
 	           why, cdda_mon.pushes, cd_cdda_big ? "large" : "normal",
+	           (cdda_core_diag != 1) ? "?" : (cdda_mon.flags & 2) ? "ntsc" : "pal",
 	           cdda_mon.underrun_events, cdda_mon.underrun_periods * 10u / 441u,
 	           CDDA_MON_STALL_US / 1000, cdda_mon.stalls,
 	           (long long)(cdda_mon.max_poll_gap_us / 1000),
@@ -2512,10 +2515,11 @@ static void cdda_mon_push(uint32_t lba, int64_t t_read0, int64_t t_read1)
 
 	cdda_stats_t st;
 	if (cdda_core_diag == 1 && akiko_cdda_stats(&st)) {
-		if (st.fill < cdda_mon.min_fill) cdda_mon.min_fill = st.fill;
 		// The first push of a stream, or the first after a pause, only sets the
-		// baseline: the FIFO legitimately ran dry before it.
+		// baseline: the FIFO legitimately ran dry before it, so neither its
+		// fill nor its counters say anything about the feed.
 		if (cdda_mon.continuous && cdda_mon.have_base) {
+			if (cdda_mon.primed && st.fill < cdda_mon.min_fill) cdda_mon.min_fill = st.fill;
 			const uint16_t d_starve = (uint16_t)(st.starves - cdda_mon.base.starves);
 			const uint16_t d_under  = (uint16_t)(st.underruns - cdda_mon.base.underruns);
 			if (d_starve) {
@@ -2531,6 +2535,7 @@ static void cdda_mon_push(uint32_t lba, int64_t t_read0, int64_t t_read1)
 		}
 		cdda_mon.base = st;
 		cdda_mon.have_base = true;
+		cdda_mon.flags = st.flags;
 	}
 	cdda_mon.worst_gap_since_push_us = 0;
 	cdda_mon.continuous = true;
@@ -2657,6 +2662,7 @@ static bool akiko_cdda_pump(void)
 	if (cd_cdda_lba_next < 0) return false;
 	if (cd_paused) {
 		cdda_mon.continuous = false;   // the FIFO may run dry; that is not an underrun
+		cdda_mon.primed     = false;
 		return false;
 	}
 	if (!cd_cdda_drv) {
@@ -2682,7 +2688,10 @@ static bool akiko_cdda_pump(void)
 		cd_ready_at_us = 0;
 	}
 
-	if (!akiko_audio_fifo_ready()) return false;
+	if (!akiko_audio_fifo_ready()) {
+		cdda_mon.primed = true;        // past the ramp-up: low fill from here is news
+		return false;
+	}
 
 	uint8_t buf[AKIKO_CDDA_BYTES];
 	uint32_t lba = (uint32_t)cd_cdda_lba_next;
