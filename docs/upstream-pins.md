@@ -5,18 +5,20 @@ against. Re-verify line numbers after moving off these.
 
 | Repo | Branch | Commit | Date |
 |---|---|---|---|
-| `kblood/Main_MiSTer-cd32-cdtv` | `amiga-console` | `52625a4` "AmigaCD: add Save settings to the console OSD" | 2026-06-14 |
+| `kblood/Main_MiSTer-cd32-cdtv` | `amiga-console` | `52625a4` "AmigaCD: add Save settings to the console OSD" -- all branches re-checked 2026-10-09, nothing new to take | 2026-06-14 |
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
-| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `e6c7abd1` "Merge PR #17, stock LibCrypt" | 2026-10-01 |
+| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `dc0c4c9` "Merge PR #18, boot-launch" -- module files unchanged, see below | 2026-10-09 |
+| ^ previous pin, superseded 2026-10-09 | | `e6c7abd1` "Merge PR #17, stock LibCrypt" | 2026-10-01 |
 | ^ previous pin, superseded 2026-10-01 | | `bcdb16f` "Fix for NGCD identification" | 2026-09-18 |
 | ^ previous pin, superseded 2026-09-18 | | `f2963eb` "dvd fpga core support" | 2026-09-12 |
 | ^ previous pin, superseded 2026-09-14 | | `de40622` "Merge PR #9, remount on savestate" | 2026-08-23 |
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `57276f0c` "Change user_io_status_set value in video.cpp (#1335)" -- **partial take, see below** | 2026-10-01 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `42e6400` "input: Add X-Gunner lightgun support (#1348)" -- **partial take, see below** | 2026-10-09 |
+| ^ previous merge base, superseded 2026-10-09 | | `57276f0c` "Change user_io_status_set value in video.cpp (#1335)" | 2026-10-01 |
 | ^ previous merge base, superseded 2026-10-01 | | `5b3ae64` "N64: Improved CIC detection (#1318)" | 2026-09-18 |
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
@@ -90,6 +92,117 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-09: seven of eleven taken, and why the other four are not
+
+Eleven commits landed on `MiSTer-devel/Main_MiSTer` between `57276f0c` and
+`42e6400`. Seven are taken, all as `cherry-pick -x`, all applied without
+conflict. `syntax_check.sh` and `tests/` pass; the ARM build is CI's.
+
+### Taken
+
+- **`629c7ba` "Minimig: switch Direct Video to HDMI for RTG (#1346)"** -- ours by
+  subject. With `direct_video` on, a Minimig core that enables its RTG
+  framebuffer now leaves Direct Video for a normal HDMI mode and comes back when
+  RTG is off. Checked against this fork rather than assumed:
+  - it gates on `is_minimig()`, which here prefix-matches `minimig*` and
+    `amigacd*` and returns 1 or 2 -- both truthy -- so AmigaCD and MinimigCD get
+    it, not only stock Minimig;
+  - `get_video_info()` now reads `UIO_GET_FB_PAR` on every call for Minimig
+    instead of only on a CRC change. Its one periodic caller is the
+    `res_timer` block in `user_io_poll()`, every 500 ms: seven SPI words twice a
+    second, nowhere near the sector path;
+  - every `cfg.direct_video` / `cfg.vsync_adjust` reader left in `video.cpp` is
+    line-for-line upstream's, so the fork has no private reader the patch
+    missed. The eleven in `menu.cpp` match upstream's eleven, which also stay
+    on the raw setting.
+  - It also drops upstream's "Disabling vsync_adjust because of enabled direct
+    video" overwrite of `cfg.vsync_adjust`; `video_vsync_adjust()` masks it
+    instead, so the setting survives an RTG round trip.
+- **`c97c052` "video: fix crash on bad EDID extension count (#1341)"** -- a crash
+  on a malformed display, any core.
+- **`4360db7` "video: pad vertical blanking when vsync_adjust=2 lands on an
+  integer PLL multiplier (#1343)"** -- any core; applied before `629c7ba`, which
+  then rewrites its guard to `video_vsync_adjust()`.
+- **`756178e` "Terminal sized for VGA without scaler (fb_terminal=2)"** and
+  **`dc04c10` "Fix Win+F12 opening system settings for cores using F12
+  modifier"** -- small, menu-level, no Minimig interaction. Taken to keep
+  `video.cpp` / `menu.cpp` close to upstream so the next sync stays textual.
+- **`e55f03c` default main stick axes to stick 1** and **`42e6400` X-Gunner
+  lightgun** -- `input.cpp` only, additive.
+
+### Not taken, and why
+
+- `6ddadac` mac fast SCSI, `93033fe` Atari Falcon SCSI, `ebcdb4e` Sun family,
+  `d5f3844` Sun ss20 CD audio -- cores we do not build, same reasoning as the
+  NeXT series on 2026-10-01. They add `support/{falcon,sun}/` and a few
+  `user_io.cpp` dispatch lines; none touch Minimig paths, so a later take stays
+  textual.
+
+### `kblood/Main_MiSTer-cd32-cdtv`, all 29 branches: nothing to take
+
+`amiga-console` is still `52625a4` and is an ancestor of our `master`. The
+other branches carry 96 commits that are neither in our tree nor in
+`MiSTer-devel/Main_MiSTer`. 16 of those match one of our commits by patch-id or
+subject, or are already cited in these docs. The rest are what
+`sync-2026-08-24-assessment.md` found: staging for the upstream PRs that reached
+us through `Main_MiSTer`, plus diagnostics. Only two branches moved after that
+assessment:
+
+- **`dotc-cdtv-stch-playstart-mvp` `5e0f2ea` (2026-09-01)**: a forward-port of
+  `4964847` / upstream `2c410aa` (play-start STCH, the DotC map-of-Britain park)
+  onto his `cd32-native-mvp` line. `2c410aa` is an ancestor of our `master`, and
+  `stch_playstart_pending` with its drain is in `cdtv_cd.cpp`. Already have it.
+- **`hybris-chipset-trace` (to 2026-08-26)**: instruments for the Hybris
+  cycle-diff work. `chipset_trace.cpp` drains `rtl/chipset_bus_trace.v` over UIO
+  class `0xF600`, plus a `cpu_trace` marker arm, a `MINIMIG_DEBUG` INI byte,
+  `/tmp/minimig_dbg` runtime knobs and an OSD Debug page. **None of it is
+  portable here**, for two reasons:
+  - our core has neither the trace ring nor `dbg_config` in `userio.v`;
+  - `015bc67` defines `UIO_MM2_DBG 0xFA`, and **`0xFA` is already
+    `UIO_MM2_FLPEX01`** in this tree, MiSTer Floppy's first command. Taken as is,
+    every debug-byte push would be decoded as a floppy command.
+
+  `668218a` (any `minimig*` name is Minimig) is the one general fix, and our
+  `is_minimig()` already prefix-matches, `amigacd*` included.
+
+If the Hybris instruments are ever wanted, they need a different UIO opcode and
+the RTL half in the core repo first.
+
+### `Anime0t4ku/Main_MiSTer_Physical_Disc` -> `dc0c4c9`, no re-extract
+
+Two commits (`cc22b97` + its merge): `PHYSICAL_DISC_BOOT=1` launches the disc
+left in the drive at power-on. It lives entirely in
+`physical_disc_launch.cpp` (excluded, see "Syncing the physical_disc module")
+plus a `cfg` key with no reader without it. The four extracted files are
+**byte-identical** at `dc0c4c9`, checked with the diff below, so the pin moves
+and nothing on disk does. This tree already boots a disc at power-on its own
+way: the `.mgl` carries the disc as a setting (`ee8bb6b`).
+
+### `theshaneobrien/mister-disc-drive-support`: four new commits, nothing to lift
+
+Last looked at `1a42060` (2026-08-24). New on `physcd`, ignoring the upstream
+merge `fc44c31` (Release 20260907, already in this tree by our own syncs):
+
+- `470794e` "physcd: the shared ide-family seam" -- the interesting one, and it
+  is **convergence, not a fix for us**. It routes the physical drive into
+  `cdrom_read_raw_sector()` / `cdrom_read_track_raw()` in `ide_cdrom.cpp` so
+  Akiko, CDTV and ATAPI share one TOC adapter. That is the design
+  `load_physical_disc()` already has here. Its two "easy to get backwards"
+  conventions are both handled on our side: the 49-real-tracks-plus-lead-out
+  cap, and reusing `chd_last_partial_lba` as the running LBA across a partial
+  read. Its own commit says CD32/CDTV mounting is "not yet wired" there; we are
+  ahead on exactly the cores it names.
+- `254e49d` / `a629ac3` -- the "support log" (`physcd_log.txt`, written because
+  `cfg.cpp` sends stdout to `/dev/null` without `DEBUG=`). Built on their engine
+  and their state, so not portable as code. The **idea** stands for us too: a
+  tester on a normal box sees none of our `printf`s. Noted, not taken.
+- `9a8c513` "translate: an overlay toggle is not a video change" -- fixes their
+  translation overlay; this tree has no `overlay_present()`, so nothing to fix.
+
+`physcd-ra` (RetroAchievements line) is 107 commits beyond `physcd`, all overlay
+/ translation / RA work. Not reviewed commit by commit; nothing in it touches
+Amiga.
 
 ## Sync 2026-10-01: three of thirteen taken, and why the other ten are not
 
