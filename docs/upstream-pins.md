@@ -9,7 +9,8 @@ against. Re-verify line numbers after moving off these.
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
-| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `dc0c4c9` "Merge PR #18, boot-launch" -- module files unchanged, see below | 2026-10-09 |
+| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `554dbbc` "Merge PR #20, megacd-cdg" -- module files unchanged, see below | 2026-10-11 |
+| ^ previous pin, superseded 2026-10-11 | | `dc0c4c9` "Merge PR #18, boot-launch" | 2026-10-09 |
 | ^ previous pin, superseded 2026-10-09 | | `e6c7abd1` "Merge PR #17, stock LibCrypt" | 2026-10-01 |
 | ^ previous pin, superseded 2026-10-01 | | `bcdb16f` "Fix for NGCD identification" | 2026-09-18 |
 | ^ previous pin, superseded 2026-09-18 | | `f2963eb` "dvd fpga core support" | 2026-09-12 |
@@ -17,7 +18,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `42e6400` "input: Add X-Gunner lightgun support (#1348)" -- **partial take, see below** | 2026-10-09 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `738cb7a` "Release 20261010." -- **partial take, see below** | 2026-10-11 |
+| ^ previous merge base, superseded 2026-10-11 | | `42e6400` "input: Add X-Gunner lightgun support (#1348)" | 2026-10-09 |
 | ^ previous merge base, superseded 2026-10-09 | | `57276f0c` "Change user_io_status_set value in video.cpp (#1335)" | 2026-10-01 |
 | ^ previous merge base, superseded 2026-10-01 | | `5b3ae64` "N64: Improved CIC detection (#1318)" | 2026-09-18 |
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
@@ -92,6 +94,29 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-11: one of three taken, and that one only in part
+
+Three commits landed on `MiSTer-devel/Main_MiSTer` between `42e6400` and
+`738cb7a`.
+
+- **`c265709` "menu: adjust terminal OSD message"** -- taken in part, as
+  `fce5435`. The `vga_nag()` hunk (two fewer blank rows, the "or" lines
+  re-indented) applies cleanly. The rest of the commit is whitespace in
+  upstream's MiSTer Floppy menu, which reads `minimig_config.externalfloppy`;
+  this fork keeps external drives inside `floppy` (see "Main_MiSTer `5b3ae64`
+  is a PARTIAL take"), so that code does not exist here and the hunks have
+  nothing to land on.
+- `79787d3` "mac: add MacPPC7300 support (#1350)" -- not taken. A core we do
+  not build, and it sits on `6ddadac` mac fast SCSI, also not taken.
+- `738cb7a` "Release 20261010." -- a prebuilt binary in `releases/`; not taken.
+
+### `Anime0t4ku/Main_MiSTer_Physical_Disc` -> `554dbbc`, no re-extract
+
+Ten commits (PR #20): Mega CD CD+G subcode passthrough and a subcode log, in
+`support/megacd/`, `cfg.{cpp,h}` and `README.md`. None of the four extracted
+`support/physical_disc/` files changed, so the pin moves and nothing on disk
+does.
 
 ## Sync 2026-10-09: seven of eleven taken, and why the other four are not
 
