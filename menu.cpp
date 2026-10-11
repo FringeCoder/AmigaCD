@@ -1264,7 +1264,43 @@ static void mgl_selpath(char *selPath, size_t selPathSize)
 
 	if (p[0] == '/') snprintf(selPath, selPathSize, "%s", p);
 	else if (p[0] == '.' && p[1] == '.') snprintf(selPath, selPathSize, "%s/%s", getRootDir(), p);
-	else snprintf(selPath, selPathSize, "%s/%s", HomeDir(), p);
+	else
+	{
+		snprintf(selPath, selPathSize, "%s/%s", HomeDir(), p);
+
+		// Two other ways of writing a relative path are in use, and both used
+		// to resolve to <home>/<path>, miss, and mount nothing without a word
+		// -- the drive just read "* no disk *", which looks like the .mgl
+		// having been ignored:
+		//
+		//   * from the SD root ("games/Amiga/x.adf"), which is what a script
+		//     writes and what scripts/vamigats.sh wrote; and
+		//   * from games/Amiga, Minimig's home, which is how every .mgl written
+		//     for Minimig names its ADF -- and MENU_AMIGACD_MAIN1 keeps indices
+		//     0..3 as floppies precisely so those files work here.
+		//
+		// The home directory still wins when the file is there.
+		if (!FileExists(selPath, 0))
+		{
+			static const char *const prefix[] = { "", "games/Amiga/" };
+			char alt[1024];
+			for (size_t i = 0; i < sizeof(prefix) / sizeof(prefix[0]); i++)
+			{
+				snprintf(alt, sizeof(alt), "%s%s", prefix[i], p);
+				if (FileExists(alt, 0))
+				{
+					snprintf(selPath, selPathSize, "%s", alt);
+					break;
+				}
+			}
+		}
+	}
+
+	if (!FileExists(selPath, 0))
+	{
+		printf("MGL: %s not found\n", selPath);
+		Info("MGL: file not found", 4000);
+	}
 
 	// Same /tmp/ breadcrumbs the other MGL paths leave, so a script watching
 	// them sees an AmigaCD launch the way it sees every other core's.
