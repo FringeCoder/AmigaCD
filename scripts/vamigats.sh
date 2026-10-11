@@ -224,10 +224,18 @@ cmd_run() {
 
     # An MGL loads a core and mounts media in one step. type="f" index="0" is
     # df0 -- support/minimig/minimig_config.cpp parses exactly that.
+    #
+    # The path is ABSOLUTE. A relative one resolves against the core's home
+    # directory, not the SD root, so the root-relative form this used to write
+    # ("games/Amiga/x.adf") named a file that does not exist and the core
+    # booted to the insert-disk screen with nothing mounted (found 2026-10-11
+    # on hardware, tracing the .mgl state machine). PR #132 makes the binary
+    # fall back to the
+    # root-relative form; an absolute path works on binaries without it too.
     local MGL
     MGL="<mistergamedescription>
     <rbf>$CORE</rbf>
-    <file type=\"f\" index=\"0\" path=\"${REMOTE_DIR#/media/fat/}/$NAME.adf\"/>
+    <file type=\"f\" index=\"0\" path=\"$REMOTE_DIR/$NAME.adf\"/>
 </mistergamedescription>"
     printf '%s\n' "$MGL" | sshm "$H" "cat > '$REMOTE_MGL'" || return 1
 
