@@ -172,7 +172,6 @@
 // core type value should be unlikely to be returned by broken cores
 #define CORE_TYPE_UNKNOWN   0x55
 #define CORE_TYPE_8BIT      0xa4   // generic core
-#define CORE_TYPE_SHARPMZ   0xa7   // Sharp MZ Series
 #define CORE_TYPE_8BIT2     0xa8   // generic core using dual SDRAM
 
 #define EMU_NONE  0
@@ -294,7 +293,6 @@ void diskled_on();
 char is_minimig();
 char is_amigacd();
 char is_next();
-char is_sharpmz();
 char is_menu();
 char is_x86();
 char is_snes();
