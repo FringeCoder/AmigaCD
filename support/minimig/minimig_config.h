@@ -171,7 +171,25 @@ typedef struct
 	// Read through amigacd_cd_audio_buffer(), never directly: it is a byte
 	// from a file.
 	uint8_t         cd_audio_buffer;
+
+	// The floppy images in df0 and df1 when the config was saved, beside the
+	// hard disks and the CD, and mounted again when it loads. The paths are
+	// as InsertFloppy was given them -- root-relative from the file browser
+	// -- so any image it takes comes back: ADF, DMS, SCP, IPF. Empty means
+	// no disk. Filled from df[] at save time (minimig_floppy_snapshot), so
+	// every insert and eject path is covered without each having to say so.
+	//
+	// Appended, so the size changed (7284 -> 9332) and minimig_cfg_load has a
+	// branch for the old one. The first byte lands on the old layout's last
+	// padding byte; that branch clears both paths rather than trust it.
+	// Two, not four: this OSD has df0 and df1. A stock Minimig with df2/df3
+	// does not get those back.
+	char            floppy_path[2][1024];
 } mm_configTYPE;
+
+// The layout before floppy_path was appended. Every config written before
+// 2026-10-13 is this size.
+#define MM_CONFIG_SIZE_NO_FLOPPY_PATH 7284
 
 // Seconds. Kept here because the menu, the config loader and akiko all need it.
 //
@@ -326,6 +344,10 @@ int amigacd_switch_system(int from_sys, int to_sys);
 // "Save settings" row calls.
 int amigacd_cfg_save_current(void);
 int minimig_mgl_save();
+
+// A floppy's path in the form a .mgl <file> item resolves back to the same
+// image; see mgl_item_path in mgl_path.h.
+void minimig_mgl_floppy_path(const char *name, char *out, size_t outsz);
 
 // The <amigacd_config> block for a .mgl: every setting of minimig_config as it
 // stands now. Returns its length, or -1 if it does not fit. See mgl_cfg.h.

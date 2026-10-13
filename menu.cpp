@@ -1060,10 +1060,25 @@ static int amigacd_rowhint(const char *const *tips, unsigned n, uint32_t sub)
 // Returns one of MGL_WROTE / MGL_UPDATED / MGL_CURRENT, or 0 on a refusal, and
 // leaves the file's root-relative path in out[].
 enum { MGL_FAILED = 0, MGL_WROTE, MGL_UPDATED, MGL_CURRENT };
-static int amigacd_write_mgl(char *out, size_t outsz)
+// The image a .mgl is written beside and named after: the CD when there is
+// one, else the first mounted floppy -- an A500 or A1200 game is floppies
+// only, and refusing those left them the one machine with no .mgl at all.
+// Null when there is neither, or when the CD is the physical drive: a .mgl
+// cannot name a disc that is not a file, and its settings block would carry
+// the sentinel into a launch that has no drive.
+static const char *amigacd_mgl_anchor()
 {
 	const char *disc = minimig_config.hardfile[0].filename;
-	if (!disc[0] || !strcmp(disc, PHYSICAL_DISC_SENTINEL)) return 0;
+	if (disc[0]) return strcmp(disc, PHYSICAL_DISC_SENTINEL) ? disc : 0;
+	for (int i = 0; i < 4; i++)
+		if ((df[i].status & DSK_INSERTED) && df[i].name[0]) return df[i].name;
+	return 0;
+}
+
+static int amigacd_write_mgl(char *out, size_t outsz)
+{
+	const char *disc = amigacd_mgl_anchor();
+	if (!disc) return 0;
 
 	const char *rbf = get_rbf_name();
 	if (!rbf[0]) return 0;
@@ -1095,8 +1110,12 @@ static int amigacd_write_mgl(char *out, size_t outsz)
 	// think to look for it. Moving it into _Console/ afterwards puts it on the
 	// main menu's front page; nothing here depends on where it ends up.
 	snprintf(out, outsz, "%s", disc);
+	// An image inside a .zip gets its .mgl beside the zip: nothing can be
+	// written into one.
+	char *zip = strcasestr(out, ".zip/");
+	if (zip) zip[4] = 0;
 	char *ext = strrchr(out, '.');
-	if (ext) *ext = 0;
+	if (ext && !strchr(ext, '/')) *ext = 0;
 	strncat(out, ".mgl", outsz - strlen(out) - 1);
 
 	char rbfval[1024];
@@ -1145,6 +1164,12 @@ static int amigacd_write_mgl(char *out, size_t outsz)
 
 		int changed = mgl_rewrite_rbf(xml, sizeof(xml), rbfval) > 0;
 		changed |= mgl_remove_file_index(xml, 4) > 0;
+		// Floppy lines go the way of the CD line: the settings block now
+		// carries df0/df1 and mounts them at power-on, and a <file> line --
+		// which this row used to write -- would remount one two seconds into
+		// the boot, or after a swap bring the old disk back.
+		changed |= mgl_remove_file_index(xml, 0) > 0;
+		changed |= mgl_remove_file_index(xml, 1) > 0;
 		const int put = mglcfg_put_block(xml, sizeof(xml), block);
 		if (put < 0) return MGL_FAILED;
 		changed |= put;
@@ -1163,13 +1188,8 @@ static int amigacd_write_mgl(char *out, size_t outsz)
 
 	fprintf(f, "<mistergamedescription>\n");
 	fprintf(f, "\t<rbf>%s</rbf>\n", rbfval);
-	// Floppies are media rather than settings and are not in the config, so
-	// any that are mounted go in as ordinary <file> items (index = drive).
-	for (int i = 0; i < 4; i++)
-	{
-		if (!(df[i].status & DSK_INSERTED) || !df[i].name[0]) continue;
-		fprintf(f, "\t<file delay=\"2\" type=\"f\" index=\"%d\" path=\"%s\"/>\n", i, df[i].name);
-	}
+	// No floppy <file> lines: df0 and df1 are in the settings block, with
+	// the hard disks and the CD, and mounted at power-on.
 	fputs(block, f);
 	fprintf(f, "</mistergamedescription>\n");
 
@@ -9169,7 +9189,7 @@ void HandleUI(void)
 				/* 6 Audio buf*/ "How much CD audio is buffered. Normal (46 ms) is closest to the real drive. Large (186 ms) rides out longer MiSTer stalls; audio runs on that long after a pause.",
 				/* 7 Fast-IDE */ "Faster IDE transfers on a 68020. Not available on a CDTV, on a 68000, or with the IDE controller off.",
 				/* 8 Drives   */ "The MiSTer Floppy board: which real drive each df unit uses, and floppy turbo.",
-				/* 9 Write mgl*/ "Write an .mgl beside the mounted disc, so the MiSTer menu can launch straight into this core with it. Names the core running now.",
+				/* 9 Write mgl*/ "Write an .mgl beside the mounted CD, or beside the floppy when there is no CD, so the MiSTer menu can launch straight into this core with it and any floppies. Names the core running now.",
 				/*10 back     */ "Back to the main page.",
 			};
 			static const char *const tips_plain[] =
@@ -9339,8 +9359,7 @@ void HandleUI(void)
 		// puts this row on the last line, where Back is drawn over it.
 		OsdWrite(m++, "", 0, 0);
 		{
-			const char *cdfile = minimig_config.hardfile[0].filename;
-			const int can_mgl = cdfile[0] && strcmp(cdfile, PHYSICAL_DISC_SENTINEL);
+			const int can_mgl = amigacd_mgl_anchor() != 0;
 			OsdWrite(m++, " Write .mgl for this disc", menusub == (uint32_t)(snac ? 9 : 7), !can_mgl);
 		}
 

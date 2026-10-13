@@ -128,6 +128,31 @@ disks are HEAVY1/HEAVY2, so the first real one is the first proper test.**
 | A corrupt or encrypted DMS | The row shows empty; the log says why (`DMS: ...`). The `Info` toast is dropped while the menu is open (see `Info()`'s gate), so the log is where the reason is |
 | Swap DMS for DMS five or six times | No failure to open, and `/tmp` does not fill: the files are unlinked once open, so `ls /tmp/dms-*` should be empty |
 
+#### Floppies saved with the config, and in a `.mgl`
+
+The config now carries df0 and df1 (`floppy_path[2]`, appended to
+`mm_configTYPE`: 7284 -> 9332 bytes), next to the hard disks and the CD, and
+loading it mounts them again. The `.mgl` settings block carries them too
+(`floppy0_path`, `floppy1_path`), so a launch from a file has its floppies in
+at power-on, like its CD. Written 2026-10-13, not run on hardware.
+
+| Check | Pass |
+|---|---|
+| **An existing config, first start on this build** | Loads as before (log: `Pre floppy-path configuration file, migrating.`), every setting intact, no floppies. This is the one to do first: it is the migration |
+| A500 profile, a DMS in df0 and an ADF in df1, Save settings, cold-start the core | Both mounted again, the DMS with its padlock. The log says `Floppies: df0 <- ...` |
+| The config file's size afterwards | 9332 bytes |
+| Eject both, Save settings, cold start | Nothing mounted |
+| Save to a Configs slot with a disk in, change disks, load the slot | The slot's disks come back |
+| Switch System A500 -> A1200 -> A500 | Each machine gets back the disks it had |
+| Assign an external drive to df0 and Save | On restart df0 is the external drive, the image is not mounted, and the log says why |
+| Rename the saved disk on the card, cold start | That unit stays empty, the other still mounts. Nothing hangs |
+| A500, only a DMS mounted, no CD: `Advanced -> Write .mgl` | The row is not greyed. Writes `<name>.mgl` beside the `.dms`; the block has `floppy0_path`, and there is **no** `<file index="0">` line |
+| Launch that `.mgl` from the main menu, with different disks in the startup config | Boots with the file's DMS in df0 from power-on (no disk change a few seconds in), not the config's disks |
+| While running from it, swap df0 for another DMS and Save settings | The block's `floppy0_path` names the new disk |
+| An `.mgl` from before this build, with a block and `<file index="0">` lines | Write .mgl or Save settings removes those lines; the disk then comes from the block |
+| A plain hand-written `.mgl` (no block) with a floppy `<file>` line, run, swap, Save settings | The line names the new disk, relative to the home directory -- not `games/Amiga/...`, which reads back as `games/Amiga/games/Amiga/...` |
+| A DMS inside a `.zip`, Write .mgl | The `.mgl` lands beside the `.zip`, and launching it mounts the disk |
+
 ### 1c. The two new rows
 
 | Check | Pass |
