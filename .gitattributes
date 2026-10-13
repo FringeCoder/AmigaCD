@@ -44,3 +44,6 @@ Makefile text eol=lf
 *.rom  binary
 *.xlsx binary
 releases/** binary
+
+# DMS floppy archives (tests/data) are binary.
+*.dms  binary

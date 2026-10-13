@@ -7042,8 +7042,8 @@ void HandleUI(void)
 					fs_Options = SCANO_DIR;
 					fs_MenuSelect = MENU_MINIMIG_ADFFILE_SELECTED;
 					fs_MenuCancel = MENU_MINIMIG_MAIN1;
-					strcpy(fs_pFileExt, "ADF");
-					if (select) SelectFile(Selected_F[menusub], "ADF", fs_Options, fs_MenuSelect, fs_MenuCancel, 0);
+					strcpy(fs_pFileExt, "ADFDMS");
+					if (select) SelectFile(Selected_F[menusub], "ADFDMS", fs_Options, fs_MenuSelect, fs_MenuCancel, 0);
 					else if (recent_init(0)) menustate = MENU_RECENT1;
 				}
 			}
@@ -7788,8 +7788,8 @@ void HandleUI(void)
 		{
 			/* 0 CD        */ "Mount a CD image: ISO, CUE or CHD. Backspace, or A+B on a pad, ejects it. The ` key lists the discs you have used before.",
 			/* 1 Real CD   */ "Use a CD-ROM drive plugged into the MiSTer instead of an image. Select it again after changing the disc to re-read the TOC.",
-			/* 2 Floppy 0  */ "Mount an ADF, SCP or IPF in df0. Backspace or A+B ejects. Left and right assign a real drive on the MiSTer Floppy board instead.",
-			/* 3 Floppy 1  */ "Mount an ADF, SCP or IPF in df1. Backspace or A+B ejects. Left and right assign a real drive on the MiSTer Floppy board instead.",
+			/* 2 Floppy 0  */ "Mount an ADF, DMS, SCP or IPF in df0. Backspace or A+B ejects. Left and right assign a real drive on the MiSTer Floppy board instead.",
+			/* 3 Floppy 1  */ "Mount an ADF, DMS, SCP or IPF in df1. Backspace or A+B ejects. Left and right assign a real drive on the MiSTer Floppy board instead.",
 			/* 4 Hard Disk */ "Mount an HDF as the IDE0 slave. Turns the IDE controller on if it was off. Backspace or A+B ejects.",
 			/* 5 Hard Disk */ "Mount an HDF as the IDE1 master: the second volume software like AmigaVision keeps its settings on. Backspace or A+B ejects.",
 			/* 6 System    */ "The machine: CD32, CDTV, A500 or A1200. Each keeps its own settings, so switching away and back does not lose them.",
@@ -8244,8 +8244,9 @@ void HandleUI(void)
 					fs_MenuCancel = MENU_AMIGACD_MAIN1;
 					// IPF only when the CAPS decoder actually loaded, matching
 					// what upstream does -- otherwise the browser offers a format
-					// that cannot open.
-					const char *fext = caps_init() ? "ADFSCPIPF" : "ADFSCP";
+					// that cannot open. DMS needs nothing loaded: it is unpacked
+					// to an ADF at insert (support/minimig/dms.cpp).
+					const char *fext = caps_init() ? "ADFDMSSCPIPF" : "ADFDMSSCP";
 					strcpy(fs_pFileExt, fext);
 					if (select) SelectFile(Selected_F[fu], fext, fs_Options, fs_MenuSelect,
 					                       fs_MenuCancel, AMIGACD_RECENT_DF(fu));
@@ -8943,7 +8944,8 @@ void HandleUI(void)
 				snprintf(nm, sizeof(nm), "%s", p ? p + 1 : df[fu].name);
 				sprintf(s, "  df%d %.20s", fu, nm);
 				// Flux images are read-only by design (InsertFloppy omits
-				// DSK_WRITABLE), so the padlock is expected on SCP and IPF.
+				// DSK_WRITABLE), so the padlock is expected on SCP and IPF --
+				// and on DMS, which is unpacked to a copy that is not kept.
 				if (df[fu].status & DSK_FLUXMODE)    strcat(s, " \x1B");
 				if (!(df[fu].status & DSK_WRITABLE)) strcat(s, " \x17");
 			}

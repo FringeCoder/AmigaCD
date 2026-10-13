@@ -108,6 +108,26 @@ too. Both now open a chooser with a disk already in.
 | Assign `External Drive 0` with LEFT/RIGHT, then SELECT and **cancel** | The assignment is **still there**. It used to be cleared before the browser opened, so a cancelled press dropped it |
 | Assign an external drive, then actually pick an image | The image wins and the assignment goes |
 
+### 1b2. DMS floppy archives
+
+`.dms` now mounts on both floppy rows. It is unpacked at insert by
+`support/minimig/dms.cpp` into an unlinked `/tmp` file, which the drive then
+reads as an ADF. `tests/test_dms.cpp` covers the decoder on the host, but only
+SIMPLE/NOCOMP have been through it from a real encoder; QUICK, MEDIUM, DEEP and
+HEAVY are round-tripped against encoders written in the test. **Most real DMS
+disks are HEAVY1/HEAVY2, so the first real one is the first proper test.**
+
+| Check | Pass |
+|---|---|
+| The file browser on `Floppy 0` | Lists `.dms` files alongside ADF/SCP/IPF |
+| Mount a DMS game (most are HEAVY2) and boot it | It boots. The row shows the `.dms` name and a padlock |
+| Another, ideally one from a different packer era | Same. A checksum or CRC error in the log names the track it failed on |
+| A DMS inside a `.zip` | Mounts the same way |
+| DMS in df0 **and** df1 at once | Both read correctly. Each has its own temp file; a shared one would have emptied df0 when df1 was inserted |
+| A save to the disk, from a game that writes | Refused as write-protected, like an SCP/IPF. Writing to a DMS is deliberately unsupported |
+| A corrupt or encrypted DMS | The row shows empty; the log says why (`DMS: ...`). The `Info` toast is dropped while the menu is open (see `Info()`'s gate), so the log is where the reason is |
+| Swap DMS for DMS five or six times | No failure to open, and `/tmp` does not fill: the files are unlinked once open, so `ls /tmp/dms-*` should be empty |
+
 ### 1c. The two new rows
 
 | Check | Pass |
