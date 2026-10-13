@@ -1164,18 +1164,12 @@ static int amigacd_write_mgl(char *out, size_t outsz)
 
 		int changed = mgl_rewrite_rbf(xml, sizeof(xml), rbfval) > 0;
 		changed |= mgl_remove_file_index(xml, 4) > 0;
-		// The floppy lines follow what is mounted now, as the new-file
-		// branch below writes them. Left alone, a file written with one
-		// disk kept naming it after another was put in.
-		{
-			std::string sx(xml);
-			if (minimig_mgl_sync_floppies(sx))
-			{
-				if (sx.size() >= sizeof(xml)) return MGL_FAILED;
-				memcpy(xml, sx.c_str(), sx.size() + 1);
-				changed = 1;
-			}
-		}
+		// Floppy lines go the way of the CD line: the settings block now
+		// carries df0/df1 and mounts them at power-on, and a <file> line --
+		// which this row used to write -- would remount one two seconds into
+		// the boot, or after a swap bring the old disk back.
+		changed |= mgl_remove_file_index(xml, 0) > 0;
+		changed |= mgl_remove_file_index(xml, 1) > 0;
 		const int put = mglcfg_put_block(xml, sizeof(xml), block);
 		if (put < 0) return MGL_FAILED;
 		changed |= put;
@@ -1194,16 +1188,8 @@ static int amigacd_write_mgl(char *out, size_t outsz)
 
 	fprintf(f, "<mistergamedescription>\n");
 	fprintf(f, "\t<rbf>%s</rbf>\n", rbfval);
-	// Floppies are media rather than settings and are not in the config, so
-	// any that are mounted go in as ordinary <file> items (index = drive), in
-	// the path form a .mgl resolves back to the same image.
-	for (int i = 0; i < 4; i++)
-	{
-		if (!(df[i].status & DSK_INSERTED) || !df[i].name[0]) continue;
-		char fpath[1024];
-		minimig_mgl_floppy_path(df[i].name, fpath, sizeof(fpath));
-		fprintf(f, "\t<file delay=\"2\" type=\"f\" index=\"%d\" path=\"%s\"/>\n", i, fpath);
-	}
+	// No floppy <file> lines: df0 and df1 are in the settings block, with
+	// the hard disks and the CD, and mounted at power-on.
 	fputs(block, f);
 	fprintf(f, "</mistergamedescription>\n");
 
