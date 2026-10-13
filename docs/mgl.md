@@ -15,7 +15,9 @@ disks as well as the floppies.
 
 With a disc image mounted, select **Write .mgl for this disc** on the
 Advanced page. That writes an `.mgl` beside the disc, named after it, and toasts the
-filename.
+filename. With no CD -- an A500 or A1200 game on floppies -- it is written
+beside the first mounted floppy instead (ADF, DMS, SCP or IPF), and beside the
+`.zip` when that image is inside one.
 
 **The file carries the whole machine.** Every setting the OSD saves -- system,
 CPU, chip/fast RAM, Kickstart and extended ROM, the disc, the hard disks,
@@ -29,7 +31,13 @@ settings, not as a `<file index="4">` mounted a couple of seconds after the core
 starts. That is the authentic route, and for some titles the only one that
 works: a disc that arrives late sends the CD32 ROM down a path that costs chip
 RAM, and Banshee and Super Stardust then stop with "not enough memory" -- on a
-real CD32 too. Mounted floppies are written as ordinary `<file>` items.
+real CD32 too. Mounted floppies are written as ordinary `<file>` items, with
+the path in the form the `path` attribute is read back in (relative to the
+core's home directory when the image is under it, absolute otherwise). Until
+2026-10-13 they went in root-relative, `games/Amiga/x.adf`, which reads back
+as `games/Amiga/games/Amiga/x.adf` -- so no floppy written by this row, or by
+Save settings into a launching file, ever mounted again. A file carrying such
+a line is corrected the next time either one runs with that disk mounted.
 
 It is also worth preferring over writing one by hand because the OSD knows
 which core is *running*. `<rbf>` is filled from `get_rbf_dir()` and
@@ -38,8 +46,10 @@ of a hand-written file that goes stale at the next deploy (see below). After a
 deploy, press the row again and the file is correct once more.
 
 **An existing file is edited, not replaced.** The `<rbf>` text and the
-`<amigacd_config>` block are rewritten, and a CD `<file index="4">` line is
-removed (it would remount the disc late); a `<reset/>`, another `<file>`, a
+`<amigacd_config>` block are rewritten, the floppy `<file index="0">`/`"1"`
+lines are brought in line with what is mounted now, and a CD
+`<file index="4">` line is removed (it would remount the disc late); a
+`<reset/>`, another `<file>`, a
 comment -- anything else you added by hand -- stays. The toast says which of
 three things happened: `Wrote` for a new file, `Updated` for an edited one,
 `Already current` when nothing changed.
@@ -48,9 +58,14 @@ three things happened: `Wrote` for a new file, `Updated` for an edited one,
 settings block is running, Save settings on the main page updates that block
 as well as the startup config.
 
-The row greys out when there is no disc image mounted -- including when the
-**physical drive** is selected, since a real disc in a tray has no path to put
-in a file.
+The row greys out when there is neither a disc image nor a floppy mounted --
+and when the **physical drive** is selected, since a real disc in a tray has
+no path to put in a file.
+
+**A launch from a file ignores the floppies saved with the startup config.**
+Save settings remembers mounted floppies beside the config (`<cfg>.floppy`)
+and a normal start mounts them again; a `.mgl` describes its game, floppies
+included, so a disk from the config is not slipped in alongside it.
 
 Move the result into `/media/fat/_Console/` to have it appear on the main
 menu's front page; nothing in the file depends on where it lives.

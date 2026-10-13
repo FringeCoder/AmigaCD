@@ -26,6 +26,7 @@
 #include "minimig_a2065.h"
 #include "../arcade/mra_loader.h"
 #include "mgl_cfg.h"
+#include "floppy_persist.h"
 #include <string>
 #include <unistd.h>
 
@@ -631,11 +632,99 @@ static char* GetConfigurationName(int num, int chk, const char *sys_suffix)
 	return name+strlen(CONFIG_DIR)+1;
 }
 
+// ---- Mounted floppies, beside the config ----
+//
+// mm_configTYPE has no room for floppy paths, and growing it is not an option:
+// minimig_cfg_load dispatches on the file's exact size, and every config on
+// every card would need another migration branch. So the images mounted when
+// a config is saved go in a text file beside it, <cfg>.floppy, one
+// "dfN=<path>" line per unit (support/minimig/floppy_persist.h). A config with
+// no sidecar -- every config written before this -- loads exactly as before.
+//
+// Any image InsertFloppy takes: ADF, DMS, SCP, IPF. The path is stored as
+// InsertFloppy was given it, so the restore is the same call the browser made.
+
+static void floppy_sidecar_name(char *out, size_t sz, const char *cfgname)
+{
+	snprintf(out, sz, "%s.floppy", cfgname);
+}
+
+static void minimig_floppy_save(const char *cfgname)
+{
+	char name[256];
+	floppy_sidecar_name(name, sizeof(name), cfgname);
+
+	const char *paths[FLOPPY_UNITS] = {};
+	for (int i = 0; i < FLOPPY_UNITS; i++)
+		if (df[i].status & DSK_INSERTED) paths[i] = df[i].name;
+
+	static char text[FLOPPY_UNITS * (FLOPPY_PATH_MAX + 8)];
+	int len = floppy_list_format(text, sizeof(text), paths);
+	if (len > 0) FileSaveConfig(name, text, len);
+	else
+	{
+		// Nothing mounted is saved as no file, so an old list cannot come
+		// back. Only deleted when present: FileDelete logs a miss.
+		char full[300];
+		snprintf(full, sizeof(full), CONFIG_DIR "/%s", name);
+		if (FileExists(full, 0)) FileDeleteConfig(name);
+	}
+}
+
+// Remounts what minimig_floppy_save recorded for this config.
+//
+// Not on a launch from a .mgl. The file describes the game, floppies
+// included, and its <file> items mount after this; a sidecar disk left in a
+// drive the .mgl does not name would be a disk from some other game. Once the
+// .mgl has run (mgl->done), configs loaded from the OSD restore as usual.
+static void minimig_floppy_restore(const char *cfgname)
+{
+	mgl_struct *m = mgl_get();
+	if (m && m->xml_path[0] && !m->done)
+	{
+		printf("Floppies: launched from %s, saved floppies not restored\n", m->xml_path);
+		return;
+	}
+
+	char name[256], full[300];
+	floppy_sidecar_name(name, sizeof(name), cfgname);
+	snprintf(full, sizeof(full), CONFIG_DIR "/%s", name);
+	if (!FileExists(full, 0)) return;
+
+	static char text[FLOPPY_UNITS * (FLOPPY_PATH_MAX + 8) + 1];
+	int n = FileLoadConfig(name, text, sizeof(text) - 1);
+	if (n <= 0) return;
+	text[n] = 0;
+
+	static char paths[FLOPPY_UNITS][FLOPPY_PATH_MAX];
+	floppy_list_parse(text, paths);
+	for (int i = 0; i < FLOPPY_UNITS; i++)
+	{
+		if (!paths[i][0]) continue;
+		// An external drive on this unit wins, as it does in the OSD: the
+		// two cannot both drive one unit.
+		if (minimig_config.floppy.extDrives[i])
+		{
+			printf("Floppies: df%d has an external drive, %s not mounted\n", i, paths[i]);
+			continue;
+		}
+		printf("Floppies: df%d <- %s\n", i, paths[i]);
+		InsertFloppy(&df[i], paths[i]);
+		if (!(df[i].status & DSK_INSERTED)) printf("Floppies: df%d could not be mounted\n", i);
+	}
+}
+
 // The suffix for a machine, or null for the one that keeps the plain name.
 int minimig_cfg_save(int num, const char *sys_suffix)
 {
 	minimig_config.a2065_mode = a2065_cfg_get();
-	return FileSaveConfig(GetConfigurationName(num, 0, sys_suffix), &minimig_config, sizeof(minimig_config));
+	// GetConfigurationName returns a shared static; copy it before anything
+	// else can call it.
+	char cfgname[128];
+	snprintf(cfgname, sizeof(cfgname), "%s", GetConfigurationName(num, 0, sys_suffix));
+	int ok = FileSaveConfig(cfgname, &minimig_config, sizeof(minimig_config));
+	if (ok) minimig_floppy_save(cfgname);
+	return ok;
 }
 
 // ---- MGL surgical save ----
@@ -807,29 +896,33 @@ static void minimig_mgl_config_apply()
 	       applied, m->xml_path, unknown, bad);
 }
 
-int minimig_mgl_save()
+void minimig_mgl_floppy_path(const char *name, char *out, size_t outsz)
 {
-	mgl_struct *m = mgl_get();
-	if (!m || !m->xml_path[0]) return 0;
+	// HomeDir() and getFullPath() both return shared statics; copied first.
+	char home[1024], full[1024];
+	snprintf(home, sizeof(home), "%s", HomeDir());
+	snprintf(full, sizeof(full), "%s", getFullPath(name));
+	floppy_mgl_path(name, home, full, out, outsz);
+}
 
-	const char *path = m->xml_path;
-	FILE *f = fopen(path, "rb");
-	if (!f) { printf("MGL save: cannot read %s\n", path); return 0; }
-	fseek(f, 0, SEEK_END);
-	long sz = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	if (sz <= 0 || sz > (1 << 20)) { fclose(f); return 0; }
-	std::string xml((size_t)sz, '\0');
-	if (fread(&xml[0], 1, sz, f) != (size_t)sz) { fclose(f); return 0; }
-	fclose(f);
-
+// The <file type="f"> lines of a .mgl brought in line with df[]. Shared by the
+// save of a launching .mgl and by Write .mgl, so the two cannot disagree about
+// how a floppy is written. Returns whether anything changed.
+//
+// The path goes through minimig_mgl_floppy_path. It used to be df[].name as it
+// stood, which is root-relative when the image came from the file browser, and
+// a .mgl reads that back as HomeDir()/<it>: games/Amiga/games/Amiga/x.adf. So
+// a floppy written into a .mgl from the OSD never mounted again, ADF or not.
+bool minimig_mgl_sync_floppies(std::string &xml)
+{
 	bool dirty = false;
 
 	for (int slot = 0; slot < 4; slot++)
 	{
 		bool mounted = (df[slot].status & DSK_INSERTED) != 0;
-		const char *cur_c = df[slot].name;
-		std::string target = mounted ? (cur_c ? cur_c : "") : "";
+		char mglpath[FLOPPY_PATH_MAX] = "";
+		if (mounted) minimig_mgl_floppy_path(df[slot].name, mglpath, sizeof(mglpath));
+		std::string target = mglpath;
 
 		size_t found_start = std::string::npos;
 		size_t found_end   = std::string::npos;
@@ -881,11 +974,32 @@ int minimig_mgl_save()
 			int delay = (slot == 0) ? 2 : 0;
 			snprintf(buf, sizeof(buf),
 				"%s<file delay=\"%d\" type=\"f\" index=\"%d\" path=\"%s\"/>\n",
-				indent.c_str(), delay, slot, cur_c ? cur_c : "");
+				indent.c_str(), delay, slot, mglpath);
 			xml.insert(close, buf);
 			dirty = true;
 		}
 	}
+
+	return dirty;
+}
+
+int minimig_mgl_save()
+{
+	mgl_struct *m = mgl_get();
+	if (!m || !m->xml_path[0]) return 0;
+
+	const char *path = m->xml_path;
+	FILE *f = fopen(path, "rb");
+	if (!f) { printf("MGL save: cannot read %s\n", path); return 0; }
+	fseek(f, 0, SEEK_END);
+	long sz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if (sz <= 0 || sz > (1 << 20)) { fclose(f); return 0; }
+	std::string xml((size_t)sz, '\0');
+	if (fread(&xml[0], 1, sz, f) != (size_t)sz) { fclose(f); return 0; }
+	fclose(f);
+
+	bool dirty = minimig_mgl_sync_floppies(xml);
 
 	// A file that carries its own settings is the game's config: Save settings
 	// while it is running updates it as well, or the next launch would quietly
@@ -1241,6 +1355,9 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 	int result = 0;
 
 	const char *filename = GetConfigurationName(num, 1, sys_suffix);
+	// Kept for the floppy restore at the end; filename is a shared static.
+	char cfgname[128];
+	snprintf(cfgname, sizeof(cfgname), "%s", filename ? filename : "");
 
 	// load configuration data
 	int size;
@@ -1582,6 +1699,7 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		df[i].status = 0;
 		FileClose(&df[i].file);
 	}
+	if (cfgname[0]) minimig_floppy_restore(cfgname);
 
 	// print config to boot screen
 	char cfg_str[256];

@@ -128,6 +128,28 @@ disks are HEAVY1/HEAVY2, so the first real one is the first proper test.**
 | A corrupt or encrypted DMS | The row shows empty; the log says why (`DMS: ...`). The `Info` toast is dropped while the menu is open (see `Info()`'s gate), so the log is where the reason is |
 | Swap DMS for DMS five or six times | No failure to open, and `/tmp` does not fill: the files are unlinked once open, so `ls /tmp/dms-*` should be empty |
 
+#### Floppies saved with the config, and in a `.mgl`
+
+Save settings now writes the mounted floppies to `<cfg>.floppy` beside the
+config (`/media/fat/config/AmigaCD.cfg.floppy`, and the machine's own file
+alongside its config), and loading that config mounts them again. Written
+2026-10-13, not run on hardware.
+
+| Check | Pass |
+|---|---|
+| A500 profile, a DMS in df0 and an ADF in df1, Save settings, cold-start the core | Both mounted again, the DMS with its padlock. The log says `Floppies: df0 <- ...` |
+| `cat` the `.floppy` file | `df0=...` and `df1=...`, the paths as the browser gave them |
+| Eject both, Save settings | The `.floppy` file is gone, and a cold start mounts nothing |
+| Save to a Configs slot with a disk in, change disks, load the slot | The slot's disks come back |
+| Switch System A500 -> A1200 -> A500 | Each machine gets back the disks it had |
+| Assign an external drive to df0 and Save | On restart df0 is the external drive, the image is not mounted, and the log says why |
+| Rename the saved disk on the card, cold start | That unit stays empty, the other still mounts. Nothing hangs |
+| A500, only a DMS mounted, no CD: `Advanced -> Write .mgl` | The row is not greyed. Writes `<name>.mgl` beside the `.dms`, with `<file ... index="0" path="<name>.dms"/>` (relative, not `games/Amiga/...`) |
+| Launch that `.mgl` from the main menu | Boots with the DMS in df0. The `.floppy` disks are **not** added (log: `launched from ..., saved floppies not restored`) |
+| While running from it, swap df0 for another DMS and Save settings | The `.mgl`'s `index="0"` line now names the new disk, relative to the home directory |
+| A DMS inside a `.zip`, Write .mgl | The `.mgl` lands beside the `.zip`, and launching it mounts the disk |
+| An older `.mgl` with `path="games/Amiga/x.adf"` | Does not mount (the bug). Write .mgl with that disk in df0 corrects the line |
+
 ### 1c. The two new rows
 
 | Check | Pass |

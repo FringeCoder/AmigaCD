@@ -327,6 +327,15 @@ int amigacd_switch_system(int from_sys, int to_sys);
 int amigacd_cfg_save_current(void);
 int minimig_mgl_save();
 
+// A floppy's path in the form a .mgl <file> item resolves back to the same
+// image; see floppy_mgl_path in floppy_persist.h.
+void minimig_mgl_floppy_path(const char *name, char *out, size_t outsz);
+#ifdef __cplusplus
+#include <string>
+// Brings a .mgl's <file type="f"> lines in line with what is mounted.
+bool minimig_mgl_sync_floppies(std::string &xml);
+#endif
+
 // The <amigacd_config> block for a .mgl: every setting of minimig_config as it
 // stands now. Returns its length, or -1 if it does not fit. See mgl_cfg.h.
 int minimig_mgl_config_block(char *out, size_t outsz, const char *indent);
