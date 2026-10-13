@@ -36,6 +36,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../../menu.h"
 #include "scpfile.h"
 #include "ipffile.h"
+#include "dms.h"
+#include <vector>
+#include <unistd.h>
+#include <fcntl.h>
 
 unsigned char drives = 0; // number of active drives reported by FPGA (may change only during reset)
 adfTYPE *pdfx;            // drive select pointer
@@ -689,6 +693,67 @@ void HandleFDD(unsigned char c1, unsigned char c2)
 	}
 }
 
+// A DMS archive is unpacked once, at insert, into a /tmp file that the drive
+// then reads exactly as it reads an ADF -- ReadTrack, track counts and the
+// rest never learn the difference. /tmp is RAM on a MiSTer, and an image is
+// 880 KB.
+//
+// The file is unlinked as soon as it is open, so it lives exactly as long as
+// the descriptor: the FileClose that eject or the next insert already does
+// frees it, and nothing is left behind on a crash. Not the shared "vdsk"
+// shm_open name the other cores' converters use: it is one name opened with
+// O_TRUNC, so a DMS in df1 would have emptied the one already in df0.
+//
+// Read-only. Writing back would mean re-packing an archive, which nothing
+// here can do, and writing to the unpacked copy would be lost at eject while
+// looking saved. The padlock says so.
+static bool OpenDMS(adfTYPE* drive, const char* path)
+{
+	fileTYPE src;
+	if (!FileOpen(&src, path)) return false;   // a .dms inside a .zip works too
+
+	// A full-disk DMS is well under 1 MB; anything far past that is not one,
+	// and reading it whole would be the wrong thing to find out by doing.
+	if (src.size <= 0 || src.size > 4 * 1024 * 1024)
+	{
+		menu_debugf("DMS file: bad size %lld\n", (long long)src.size);
+		FileClose(&src);
+		return false;
+	}
+
+	std::vector<uint8_t> dms((size_t)src.size);
+	size_t got = 0;
+	while (got < dms.size())
+	{
+		int n = FileReadAdv(&src, dms.data() + got, (int)(dms.size() - got), -1);
+		if (n <= 0) break;
+		got += n;
+	}
+	FileClose(&src);
+	if (got != dms.size()) return false;
+
+	std::vector<uint8_t> adf;
+	int bad_track = -1;
+	dms_result r = dms_unpack(dms.data(), dms.size(), adf, &bad_track);
+	if (r != DMS_OK)
+	{
+		printf("DMS: %s: %s (track %d)\n", path, dms_strerror(r), bad_track);
+		char msg[96];
+		snprintf(msg, sizeof(msg), "DMS not loaded:\n%s", dms_strerror(r));
+		Info(msg, 4000);
+		return false;
+	}
+
+	char tmp[] = "/tmp/dms-XXXXXX";
+	int fd = mkstemp(tmp);
+	if (fd < 0) return false;
+	bool ok = write(fd, adf.data(), adf.size()) == (ssize_t)adf.size();
+	close(fd);
+	if (ok) ok = FileOpenEx(&drive->file, tmp, O_RDONLY) != 0;
+	unlink(tmp);
+	return ok;
+}
+
 // insert floppy image pointed to to by global <file> into <drive>
 void InsertFloppy(adfTYPE* drive, char* path)
 {
@@ -698,6 +763,7 @@ void InsertFloppy(adfTYPE* drive, char* path)
 	tmpFlux = NULL;
 
 	int writable = FileCanWrite(path);
+	bool dms = false;
 	char* fext = strrchr(path, '.');
 
 	if (fext) {
@@ -714,6 +780,10 @@ void InsertFloppy(adfTYPE* drive, char* path)
 		if (strcmp(tmp, "ipf") == 0) {
 			tmpFlux = new IPFFile();
 			menu_debugf("IPF file: \"%s\"\n", path);
+		}
+		else
+		if (strcmp(tmp, "dms") == 0) {
+			dms = true;
 		}
 	}
 	
@@ -741,11 +811,28 @@ void InsertFloppy(adfTYPE* drive, char* path)
 		return;
 	}
 
-	if (!FileOpenEx(&drive->file, path, writable ? O_RDWR | O_SYNC : O_RDONLY))
+	if (dms)
 	{
-		return;
+		menu_debugf("DMS file: \"%s\"\n", path);
+		writable = 0;
+		if (!OpenDMS(drive, path))
+		{
+			// Unlike an ADF that fails to open, a DMS can fail on its
+			// contents, so this is a path users will take. Show the drive
+			// empty rather than leave it claiming a disk it has not got.
+			drive->status = 0;
+			drive->name[0] = 0;
+			return;
+		}
 	}
-	menu_debugf("ADF file: \"%s\"\n", path);
+	else
+	{
+		if (!FileOpenEx(&drive->file, path, writable ? O_RDWR | O_SYNC : O_RDONLY))
+		{
+			return;
+		}
+		menu_debugf("ADF file: \"%s\"\n", path);
+	}
 
 	unsigned long tracks;
 

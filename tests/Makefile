@@ -30,7 +30,13 @@ TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_cryp
         replay_akiko_log \
         test_akiko_discfmt \
         test_mgl_rbf test_mgl_cfg test_cd_savename test_vadjust_info \
-        test_osd_rowguard
+        test_osd_rowguard \
+        test_dms
+
+# test_dms #includes support/minimig/dms.cpp rather than linking it -- its
+# encoders need the decoder's file-local window model and tables -- so dms.cpp
+# is deliberately NOT in SRC above. Adding it there would define dms_unpack
+# twice in that one binary.
 
 # Shell tests, run before the compiled ones because they need no compiler and
 # because of what they cover: prune_list() in scripts/deploy-core.sh is the only
