@@ -30,6 +30,16 @@ The run then:
    - `MiSTer_AmigaCD.elf` (the same build with symbols, for reading crash logs)
    - `SHA256SUMS`
 
+## The AmigaCD package
+
+FringeCoder/AmigaCD_MiSTer's release bundles this repository's latest release,
+together with the core and the latest FringeCoder/Menu_MiSTer release, into one
+package (`docs/releasing.md` there). It bundles the `MiSTer_AmigaCD` asset, so
+keep that name. A pre-release is not "latest" and is not bundled.
+
+`scripts/release-notes.py` is copied into both of those repositories. This
+copy is the canonical one, with the test. Change it here and copy it across.
+
 ## The changelog
 
 `scripts/release-notes.py <previous tag> <commit>` covers everything that

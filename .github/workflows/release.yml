@@ -132,6 +132,7 @@ jobs:
           set -euo pipefail
           prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)"
           echo "Previous release: ${prev:-none}"
+          # shellcheck disable=SC2016  # the backticks are Markdown, not expansions
           {
             if [ -n "$NOTES" ]; then printf '%s\n\n' "$NOTES"; fi
             python3 scripts/release-notes.py "$prev" "$GITHUB_SHA" --repo "$REPO"
