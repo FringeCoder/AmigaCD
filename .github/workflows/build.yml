@@ -18,6 +18,11 @@ on:
     branches: ['**']
   pull_request:
   workflow_dispatch:
+  # release.yml calls this to build what it publishes, so a release is the
+  # same build, from the same steps, as every CI run -- not a second copy of
+  # them that drifts. Being callable publishes nothing by itself; only
+  # release.yml does, and only when started by hand.
+  workflow_call:
 
 jobs:
   build:
