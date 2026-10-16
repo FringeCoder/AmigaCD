@@ -200,6 +200,7 @@ uint32_t user_io_status_mask(const char *opt);
 uint32_t user_io_hd_mask(const char *opt);
 uint32_t user_io_status_get(const char *opt, int ex = 0);
 void user_io_status_set(const char *opt, uint32_t value, int ex = 0);
+void user_io_status_resend();
 int user_io_status_save(const char *filename);
 void user_io_status_reset();
 

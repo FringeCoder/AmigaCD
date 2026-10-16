@@ -330,6 +330,7 @@ const char *config_button_turbo_choice_msg[] = { "A only", "B only", "A & B" };
 const char *joy_button_map[] = { "RIGHT", "LEFT", "DOWN", "UP", "BUTTON A", "BUTTON B", "BUTTON X", "BUTTON Y", "BUTTON L", "BUTTON R", "SELECT", "START", "KBD TOGGLE", "MENU", "    Stick 1: Tilt RIGHT", "    Stick 1: Tilt DOWN", "   Mouse emu X: Tilt RIGHT", "   Mouse emu Y: Tilt DOWN" };
 const char *joy_ana_map[] = { "    DPAD test: Press RIGHT", "    DPAD test: Press DOWN", "   Stick 1 Test: Tilt RIGHT", "   Stick 1 Test: Tilt DOWN", "   Stick 2 Test: Tilt RIGHT", "   Stick 2 Test: Tilt DOWN" };
 const char *config_stereo_msg[] = { "0%", "25%", "50%", "100%" };
+const char *config_dsnd_msg[] = { "Off", "Quiet", "Normal", "Loud" };
 const char *config_uart_msg[] = { "      None", "       PPP", "   Console", "      MIDI", "     Modem", "UDP", "SNI"};
 const char *config_midilink_mode[] = {"Local", "Local", "  USB", "  UDP", "-----", "-----", "  USB" };
 const char *config_afilter_msg[] = { "Internal","Custom" };
@@ -609,10 +610,24 @@ static const char *amigacd_ss_name()
 	return name;
 }
 
+// Whether the CPU byte can have Zorro III fast RAM: the 68030 and the
+// unthrottled 68020. The 68EC020 (68020 with bit 5, the stock-speed throttle)
+// has 24-bit addresses, and cpu_wrapper folds a Z3 size down to 8 MB of Z2
+// for it, as it does for the 68000 and 68010. Upstream e836aea's expression,
+// named, because the menus spell it out in five places.
+static int minimig_fast_z3(unsigned char cpu)
+{
+	return ((cpu & 0x23) != 0x23) && (cpu & 2);
+}
+
 static int minimig_ss_blocked()
 {
 	int fastram = ((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5);
-	return (fastram >= 4) || !(minimig_config.cpu & 0x03);
+	// The 68030 (CPU bits 10) is refused in RTL as well, since upstream
+	// e836aea/26eb46a: the state vector has no room for its MMU, the upper
+	// CACR bits, CAAR, MSP or ISP. See ss_supported in AmigaCD.sv.
+	int cpu = minimig_config.cpu & 0x03;
+	return (minimig_fast_z3(minimig_config.cpu) && fastram >= 4) || (cpu == 0) || (cpu == 2);
 }
 
 // Ask the core for a save, from either menu.
@@ -816,7 +831,7 @@ static const char *helptexts[] =
 	helptext_custom,
 	"                                Welcome to MiSTer! Use the cursor keys to navigate the menus. Use space bar or enter to select an item. Press Esc or F12 to exit the menus. Joystick emulation on the numeric keypad can be toggled with the numlock or scrlock key, while pressing Ctrl-Alt-0 (numeric keypad) toggles autofire mode.",
 	"                                Minimig can emulate an A600/A1200 IDE harddisk interface. The emulation can make use of Minimig-style hardfiles (complete disk images) or UAE-style hardfiles (filesystem images with no partition table).",
-	"                                Minimig's processor core can emulate a 68000 (cycle accuracy as A500/A600) or 68020 (maximum performance) processor with transparent cache.",
+	"                                Minimig's processor core can emulate a 68000 (cycle accuracy as A500/A600), a 68EC020 at A1200 speed, or a 68030 with MMU at 25, 33, 40 or 50MHz or at 56.7MHz with no speed limit, all with transparent cache. The 68030 has no FPU, and needs a core that offers it.",
 	"                                Minimig can make use of up to 2 megabytes of Chip RAM, up to 1.5 megabytes of Slow RAM (A500 Trapdoor RAM), and up to 384 megabytes of Fast RAM (8MB max for 68000 mode). To use the HRTmon feature you will need a file on the SD card named hrtmon.rom.",
 	"                                Backspace key (or B-hold + A on gamepad) to unmount",
 	"                                Backspace key (or B-hold + A on gamepad) to clear stored option. You have to reload the core to be able to use default value.",
@@ -7296,7 +7311,7 @@ void HandleUI(void)
 					minimig_config.hardfile[3].cfg)) ? "/HD" : "",
 				config_memory_chip_msg[minimig_config.memory & 0x03],
 				fastcfg ? "+" : "",
-				fastcfg ? config_memory_fast_msg[(minimig_config.cpu>>1) & 1][fastcfg] : "",
+				fastcfg ? config_memory_fast_msg[minimig_fast_z3(minimig_config.cpu)][fastcfg] : "",
 				((minimig_config.memory >> 2) & 0x03) ? "+" : "",
 				((minimig_config.memory >> 2) & 0x03) ? config_memory_slow_msg[(minimig_config.memory >> 2) & 0x03] : "",
 				(minimig_config.memory & 0x40) ? " HRT" : ""
@@ -7421,11 +7436,22 @@ void HandleUI(void)
 		// displace something.
 		m = 0;
 		strcpy(s, " CPU      : ");
-		strcat(s, config_cpu_msg[minimig_config.cpu & 0x03]);
+		// CPU byte (minimig_config.cpu), since upstream e836aea:
+		//   bits 1:0  00 68000, 01 68010, 10 68030, 11 68020
+		//   bit  5    68020: the stock-speed throttle (68EC020, A1200 speed,
+		//             24-bit addresses), i.e. CPU Turbo Off.
+		//             68030: with bits 7:6 the clock, see config_cpu030_msg.
+		//   bit  4    was this fork's D-Cache; the core no longer reads it.
+		// Upstream drops the unthrottled 68020 and moves such configs to the
+		// 68030 at 56.7MHz. This fork keeps it -- it is CPU Turbo On, the
+		// default since 4b4f604 -- and the RTL still runs it (cpucfg 011).
+		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
 		OsdWrite(m++, s, menusub == 0, 0);
-		strcpy(s, " D-Cache  : ");
-		strcat(s, (minimig_config.cpu & 16) ? "On" : "Off");
-		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
+		// The 68030's clock, on the line D-Cache had. Greyed for every other
+		// CPU, the way D-Cache was for the 68000.
+		strcpy(s, " CPU Clock:");
+		strcat(s, ((minimig_config.cpu & 0x03) == 0x02) ? config_cpu030_msg[(minimig_config.cpu & 0x20) ? 4 : ((minimig_config.cpu >> 6) & 3)] : " -");
+		OsdWrite(m++, s, menusub == 1, (minimig_config.cpu & 0x03) != 0x02);
 		// CPU CFG bit 5 read the other way up: set means the stock-speed throttle
 		// is engaged, so Turbo On is the bit CLEAR. Phrased as Turbo because that
 		// is the question being asked -- "faster than the real machine?" -- rather
@@ -7434,9 +7460,12 @@ void HandleUI(void)
 		// "CPU Turbo" and not just "Turbo": FDD Turbo is a few rows down on this
 		// same page, and two rows both called Turbo is a support question waiting
 		// to happen.
+		//
+		// The 68020 only. The 68030 has its own speed on the line above, and
+		// there bit 5 is part of the clock.
 		strcpy(s, " CPU Turbo: ");
 		strcat(s, (minimig_config.cpu & 0x20) ? "Off" : "On");
-		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
+		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03);
 		strcpy(s, " Chipset   : ");
 		strcat(s, config_chipset_msg[(minimig_config.chipset >> 2) & 7]);
 		OsdWrite(m++, s, menusub == 3, 0);
@@ -7444,7 +7473,7 @@ void HandleUI(void)
 		strcat(s, config_memory_chip_msg[minimig_config.memory & 0x03]);
 		OsdWrite(m++, s, menusub == 4, 0);
 		strcpy(s, " FastRAM   : ");
-		strcat(s, config_memory_fast_msg[(minimig_config.cpu >> 1) & 1][((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5)]);
+		strcat(s, config_memory_fast_msg[minimig_fast_z3(minimig_config.cpu)][((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5)]);
 		OsdWrite(m++, s, menusub == 5, 0);
 		strcpy(s, " SlowRAM   : ");
 		strcat(s, config_memory_slow_msg[(minimig_config.memory >> 2) & 0x03]);
@@ -7522,27 +7551,40 @@ void HandleUI(void)
 		{
 			if (menusub == 0)
 			{
-				// 68000 / 68010 / 68020. Upstream folded a fourth step in here for
-				// the stock-speed variant, which made the CPU row silently change
-				// Turbo; the Turbo row owns that bit instead, so this leaves it
-				// alone. Mask keeps bit 5 (Turbo) and bit 4 (D-Cache) untouched.
+				// 68000 -> 68010 -> 68020 -> 68030. Bits 2-4 (turbo chip/kick,
+				// the old D-Cache bit) are left alone. Bit 5 belongs to the
+				// Turbo row on the 68020 and is part of the clock on the
+				// 68030, so it is kept only while the CPU stays a 68020, and
+				// bits 7:5 are cleared otherwise: a 68020 is entered Turbo On,
+				// this fork's default, and a 68030 at 25MHz, as upstream's
+				// step order enters it.
+				static const unsigned char cpu_order[4] = { 0, 1, 3, 2 };
 				int cpu = minimig_config.cpu & 3;
-				if (minus) cpu = (cpu == 0) ? 3 : (cpu == 3) ? 1 : 0;
-				else       cpu = (cpu == 0) ? 1 : (cpu == 1) ? 3 : 0;
+				int at = (cpu == 0) ? 0 : (cpu == 1) ? 1 : (cpu == 3) ? 2 : 3;
+				cpu = cpu_order[(at + (minus ? 3 : 1)) & 3];
 
 				menustate = MENU_MINIMIG_CHIPSET1;
-				minimig_config.cpu = (minimig_config.cpu & 0xfc) | cpu;
+				minimig_config.cpu = (minimig_config.cpu & 0x1c) | cpu;
 				minimig_ConfigCPU(minimig_config.cpu);
 			}
-			else if (menusub == 1 && (minimig_config.cpu & 0x2))
+			else if (menusub == 1 && (minimig_config.cpu & 0x3) == 0x2)
 			{
+				// 68030 clock: 25, 33, 40, 50, 56.7MHz, as upstream's CPU
+				// steps order them. 33MHz is bit 5 on its own; the others are
+				// bits 7:6 = 00, 01, 10, 11 with bit 5 clear.
+				static const unsigned char clk_steps[5] = { 0x00, 0x20, 0x40, 0x80, 0xc0 };
+				static const unsigned char clk_order[4] = { 0, 2, 3, 4 };
+				int step = (minimig_config.cpu & 0x20) ? 1 : clk_order[(minimig_config.cpu >> 6) & 3];
+				step = (step + (minus ? 4 : 1)) % 5;
+
 				menustate = MENU_MINIMIG_CHIPSET1;
-				minimig_config.cpu ^= 16;
+				minimig_config.cpu = (minimig_config.cpu & 0x1f & ~0x20) | clk_steps[step];
 				minimig_ConfigCPU(minimig_config.cpu);
 			}
-			else if (menusub == 2 && (minimig_config.cpu & 0x2))
+			else if (menusub == 2 && (minimig_config.cpu & 0x3) == 0x3)
 			{
-				// Toggle stock-speed gate (CPU CFG bit 5).
+				// Toggle stock-speed gate (CPU CFG bit 5): 68EC020 at A1200
+				// speed when set, the unthrottled 68020 when clear.
 				minimig_config.cpu ^= 0x20;
 				menustate = MENU_MINIMIG_CHIPSET1;
 				minimig_ConfigCPU(minimig_config.cpu);
@@ -7596,19 +7638,11 @@ void HandleUI(void)
 			}
 			else if (menusub == 5)
 			{
+				static const int fast_up[8] = { 1, 2, 3, 7, 5, 0, 4, 6 };
+				static const int fast_dn[8] = { 5, 0, 1, 2, 6, 4, 7, 3 };
 				int c = (((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5));
-				if (minus)
-				{
-					c--;
-					if (c < 0) c = 5;
-					if (!(minimig_config.cpu & 2) && c > 3) c = 3;
-				}
-				else
-				{
-					c++;
-					if (c > 5) c = 0;
-					if (!(minimig_config.cpu & 2) && c > 3) c = 0;
-				}
+				c = minus ? fast_dn[c] : fast_up[c];
+				if (!minimig_fast_z3(minimig_config.cpu) && c > 3) c = minus ? 3 : 0;
 				minimig_config.memory = ((c << 4) & 0x30) | ((c << 5) & 0x80) | (minimig_config.memory & ~0xB0);
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
@@ -8363,7 +8397,7 @@ void HandleUI(void)
 			static const char *const tips[] =
 			{
 				/* 0 FastRAM  */ "Zorro II and Zorro III fast RAM. Z3 and 68000 both stop save states working, and grey those rows out when selected.",
-				/* 1 D-Cache  */ "The 68020's instruction cache. Faster, and only available when the CPU is an 020.",
+				/* 1 CPU      */ "The machine's 68020, or a 68030 at 25 to 56.7MHz. The 68030 has an MMU and no FPU; save states need the 68020.",
 				/* 2 CPU Turbo*/ "Run the 68020 at full speed rather than throttled to the stock rate. Only available when the CPU is an 020.",
 				/* 3 Main ROM */ "The Kickstart. Amiga Forever ROMs work as they are, encrypted, as long as ROM.KEY sits beside them.",
 				/* 4 Ext ROM  */ "The extended ROM, which a CD32 needs to boot a disc. Minus clears the pairing.",
@@ -8379,7 +8413,7 @@ void HandleUI(void)
 				"AmigaCD settings page: one hint per selectable row");
 			helptext_idx = amigacd_rowhint(tips, sizeof(tips) / sizeof(tips[0]), menusub);
 		}
-		// FastRAM(0), D-Cache(1), CPU Turbo(2), Main ROM(3), Ext ROM(4),
+		// FastRAM(0), CPU(1), CPU Turbo(2), Main ROM(3), Ext ROM(4),
 		// Save slot(5), Save state(6), Restore state(7), CD speed(8),
 		// Clear NVRAM(9), Video & Audio(10), Back(11) -- twelve rows, 0xFFF.
 		//
@@ -8395,21 +8429,30 @@ void HandleUI(void)
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " FastRAM  : ");
-		strcat(s, config_memory_fast_msg[(minimig_config.cpu >> 1) & 1][((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5)]);
+		strcat(s, config_memory_fast_msg[minimig_fast_z3(minimig_config.cpu)][((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5)]);
 		OsdWrite(m++, s, menusub == 0, 0);
 
-		// D-Cache = CPU byte bit4; only meaningful on 020 (grey out otherwise).
-		strcpy(s, " D-Cache  : ");
-		strcat(s, (minimig_config.cpu & 16) ? "ON" : "OFF");
+		// CPU, on the line D-Cache had: the core no longer reads that bit
+		// (upstream 26eb46a uses the data cache where the real CPU has one).
+		// The machine's own 68020, or a 68030 accelerator at one of its clocks
+		// -- the SX-32 Pro put one in a CD32, the Blizzards in an A1200. The
+		// 68000 machines (A500, CDTV) keep their 68000; greyed for them.
+		strcpy(s, " CPU      : ");
+		if ((minimig_config.cpu & 0x03) == 0x02)
+		{
+			strcat(s, "68030");
+			strcat(s, config_cpu030_msg[(minimig_config.cpu & 0x20) ? 4 : ((minimig_config.cpu >> 6) & 3)]);
+		}
+		else strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
 
 		// CPU Turbo = CPU byte bit5 read the other way up: the bit SET engages
-		// the stock-speed throttle, so Turbo On is the bit clear. Same 020-only
-		// gate as D-Cache above, and sat next to it because they are the two
-		// CPU settings on this page.
+		// the stock-speed throttle, so Turbo On is the bit clear. The 68020
+		// only: on the 68030 bit 5 is part of the clock, which the CPU row
+		// above sets.
 		strcpy(s, " CPU Turbo: ");
 		strcat(s, (minimig_config.cpu & 0x20) ? "OFF" : "ON");
-		OsdWrite(m++, s, menusub == 2, !(minimig_config.cpu & 0x2));
+		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03);
 
 		// No blank between the CPU rows and the ROMs. Row budget: this page
 		// draws fifteen lines before Back on line 15 -- eleven selectable, the
@@ -8561,34 +8604,36 @@ void HandleUI(void)
 		{
 			if (menusub == 0) // FastRAM cycle (mirrors CHIPSET2 menusub 5)
 			{
+				// Upstream e836aea's order, which adds 64M and 128M:
+				// none 2M 4M 8M 64M 128M 256M 384M.
+				static const int fast_up[8] = { 1, 2, 3, 7, 5, 0, 4, 6 };
+				static const int fast_dn[8] = { 5, 0, 1, 2, 6, 4, 7, 3 };
 				int fc = (((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5));
-				if (minus)
-				{
-					fc--;
-					if (fc < 0) fc = 5;
-					if (!(minimig_config.cpu & 2) && fc > 3) fc = 3;
-				}
-				else
-				{
-					fc++;
-					if (fc > 5) fc = 0;
-					if (!(minimig_config.cpu & 2) && fc > 3) fc = 0;
-				}
+				fc = minus ? fast_dn[fc] : fast_up[fc];
+				if (!minimig_fast_z3(minimig_config.cpu) && fc > 3) fc = minus ? 3 : 0;
 				minimig_config.memory = ((fc << 4) & 0x30) | ((fc << 5) & 0x80) | (minimig_config.memory & ~0xB0);
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 1) // D-Cache toggle (CPU bit4; 020 only)
+			else if (menusub == 1) // CPU: 68020, 68030 at 25/33/40/50/56.7MHz
 			{
+				// For the 68020 machines only; the A500 and CDTV keep their
+				// 68000. The 68020 is entered Turbo On, this fork's default;
+				// the 68030 clocks are upstream's steps in their order.
 				if (minimig_config.cpu & 0x2)
 				{
-					minimig_config.cpu ^= 16;
+					static const unsigned char steps[6] = { 0x03, 0x02, 0x22, 0x42, 0x82, 0xc2 };
+					static const unsigned char clk_at[4] = { 1, 3, 4, 5 };
+					int at = ((minimig_config.cpu & 3) == 3) ? 0 :
+					         (minimig_config.cpu & 0x20) ? 2 : clk_at[(minimig_config.cpu >> 6) & 3];
+					at = (at + (minus ? 5 : 1)) % 6;
+					minimig_config.cpu = (minimig_config.cpu & 0x1c) | steps[at];
 					minimig_ConfigCPU(minimig_config.cpu);
 				}
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
 			else if (menusub == 2) // CPU Turbo (CPU bit5 inverted; 020 only)
 			{
-				if (minimig_config.cpu & 0x2)
+				if ((minimig_config.cpu & 0x3) == 0x3)
 				{
 					minimig_config.cpu ^= 0x20;
 					minimig_ConfigCPU(minimig_config.cpu);
@@ -9881,17 +9926,19 @@ void HandleUI(void)
 		break;
 
 	case MENU_MINIMIG_VIDEO1:
-		menumask = 0x1fff;
+		menumask = 0x3fff;
 		parentstate = menustate;
 		helptext_idx = 0; // helptexts[HELPTEXT_VIDEO];
 
 		m = 0;
 		OsdSetTitle("Audio & Video");
 
+		// The page is full: Drive Sounds (upstream e836aea) took the blank that
+		// stood under TV Standard, as the per-mode position line further down
+		// took the one above Adjust. Fifteen lines and Back.
 		strcpy(s, " TV Standard   : ");
 		strcat(s, minimig_config.chipset & CONFIG_NTSC ? "NTSC" : "PAL");
 		OsdWrite(m++, s, menusub == 0, 0);
-		OsdWrite(m++, "", 0, 0);
 		strcpy(s, " Scandoubler FX: ");
 		strcat(s, config_scanlines_msg[minimig_config.scanlines & 7]);
 		OsdWrite(m++, s, menusub == 1, 0);
@@ -9924,6 +9971,9 @@ void HandleUI(void)
 		strcpy(s, " Paula Output  : ");
 		strcat(s, (minimig_get_extcfg() & 0x40000) ? "PWM" : "Normal");
 		OsdWrite(m++, s, menusub == 10, 0);
+		strcpy(s, " Drive Sounds  : ");
+		strcat(s, minimig_dsnd_loaded() ? config_dsnd_msg[(minimig_get_extcfg() >> 19) & 3] : "No file");
+		OsdWrite(m++, s, menusub == 11, 0);
 
 		// The separator that was here is spent on this instead. The page is
 		// exactly full -- fifteen lines and Back -- so the line had to come from
@@ -9940,9 +9990,9 @@ void HandleUI(void)
 			sprintf(s, "  %.29s", vinfo);
 			OsdWrite(m++, s, 0, 1);
 		}
-		OsdWrite(m++, minimig_get_adjust() ? " Finish screen adjustment" : " Adjust screen position (grid)", menusub == 11, 0);
+		OsdWrite(m++, minimig_get_adjust() ? " Finish screen adjustment" : " Adjust screen position (grid)", menusub == 12, 0);
 		for (; m < OsdGetSize() - 1; m++) OsdWrite(m);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 12, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 13, 0);
 
 		menustate = MENU_MINIMIG_VIDEO2;
 		break;
@@ -10028,6 +10078,15 @@ void HandleUI(void)
 				break;
 
 			case 11:
+				if (minimig_dsnd_loaded())
+				{
+					int mode = (minimig_get_extcfg() >> 19) & 3;
+					mode = (mode + (minus ? 3 : 1)) & 3;
+					minimig_set_extcfg((minimig_get_extcfg() & ~0x180000) | (mode << 19));
+				}
+				break;
+
+			case 12:
 				if (select)
 				{
 					menustate = MENU_NONE1;
@@ -10035,7 +10094,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 12:
+			case 13:
 				if (select) amigacd_video_back();
 				break;
 			}

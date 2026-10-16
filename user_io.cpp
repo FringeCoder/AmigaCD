@@ -660,30 +660,40 @@ void user_io_status_set(const char *opt, uint32_t value, int ex)
 
 	if (!is_st())
 	{
-		// Minimig keeps its extended config (MT-32, video, audio) in
-		// status[50:32], but cur_status never holds it -- minimig_set_extcfg()
-		// sends it directly -- so sending cur_status as it is cleared those
-		// settings in the core whenever any option was set (upstream c3dc8ed,
-		// #1352). Upstream sends the extended config in all of words 2-3.
-		// This core also reads status[55:51] -- the save and restore requests,
-		// the save slot and the test pattern -- which ARE in cur_status, so
-		// here only the extended config's own bits come from it.
-		const uint32_t ext_mask = MINIMIG_EXTCFG_STATUS_MASK;
-		uint32_t ext = is_minimig() ? minimig_get_extcfg() : 0;
-		spi_uio_cmd_cont(UIO_SET_STATUS2);
-		for (uint32_t i = 0; i < sizeof(cur_status); i += 2)
-		{
-			uint16_t w = (cur_status[i + 1] << 8) | cur_status[i];
-			if (is_minimig() && (i >> 2) == 1)
-			{
-				int sh = (i & 2) << 3;   // 0 for status[47:32], 16 for [63:48]
-				uint16_t m = (uint16_t)(ext_mask >> sh);
-				w = (w & ~m) | ((uint16_t)(ext >> sh) & m);
-			}
-			spi_w(w);
-		}
-		DisableIO();
+		// Words 2-3 (status[63:32]) for minimig come from minimig_status_hi():
+		// the extended config's own bits from it, everything else -- this
+		// core's save state, test pattern and A2065 bits -- from cur_status,
+		// and the drive sound volume moved to where this core reads it. See
+		// that function.
+		user_io_status_resend();
 	}
+}
+
+// Send all of cur_status to the core. Also what minimig_set_extcfg() uses, so
+// that a change to the extended config cannot write anything but its own bits
+// -- it used to send status[63:32] as the raw extended config, which since
+// upstream e836aea carries the drive sound volume in bits 19-20, i.e. on this
+// core's status[52:51]: picking "Quiet" would have requested a save state.
+void user_io_status_resend()
+{
+	if (is_st()) return;
+
+	uint32_t hi = 0;
+	if (is_minimig())
+	{
+		hi = ((uint32_t)(uint8_t)cur_status[7] << 24) | ((uint32_t)(uint8_t)cur_status[6] << 16) |
+		     ((uint32_t)(uint8_t)cur_status[5] << 8)  |  (uint32_t)(uint8_t)cur_status[4];
+		hi = minimig_status_hi(hi);
+	}
+
+	spi_uio_cmd_cont(UIO_SET_STATUS2);
+	for (uint32_t i = 0; i < sizeof(cur_status); i += 2)
+	{
+		uint16_t w = ((uint8_t)cur_status[i + 1] << 8) | (uint8_t)cur_status[i];
+		if (is_minimig() && (i >> 2) == 1) w = (uint16_t)(hi >> ((i & 2) << 3));   // [47:32], [63:48]
+		spi_w(w);
+	}
+	DisableIO();
 }
 
 int user_io_status_save(const char *filename)
