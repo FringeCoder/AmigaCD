@@ -377,6 +377,12 @@ void minimig_ConfigAutofire(unsigned char autofire, unsigned char mask);
 void minimig_set_extcfg(unsigned int ext_cfg);
 unsigned int minimig_get_extcfg();
 
+// The bits of status[63:32] that the extended config owns: status[50:32],
+// the highest being the 0x40000 toggle in the Amiga video/audio menu.
+// status[63:51] belongs to cur_status -- the AmigaCD core's save-state and
+// test-pattern requests, and the A2065 mode. See user_io_status_set().
+#define MINIMIG_EXTCFG_STATUS_MASK 0x0007FFFFu
+
 // AmigaCD console variant helpers (see minimig_config.cpp).
 void amigacd_default_rom_names(int sys, const char **main_name, const char **ext_name);
 // Both return 1 if the machine's default main ROM was found and selected, and

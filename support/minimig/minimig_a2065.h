@@ -39,7 +39,15 @@
 // every other core option. Minimig is excluded from the generic status-word
 // config load (user_io.cpp), so the mode is carried in mm_configTYPE instead,
 // via a2065_cfg_get()/a2065_cfg_set() at save and load.
-#define A2065_STATUS_OPT "[54:52]"
+//
+// [58:56] here, not upstream's [54:52]: the AmigaCD core reads status[51] as
+// the save request, [53:52] as the save slot and [54] as the restore request
+// (AmigaCD.sv), and the core never reads the A2065 mode from status at all --
+// a2065_ena comes from cpu_wrapper.v. In [54:52], selecting tap0 (mode 4)
+// held the restore request high, and modes 1-3 moved the save slot, every
+// time a config was loaded. [58:56] is unused by the core. A standing patch:
+// re-apply it at every upstream sync that touches this line.
+#define A2065_STATUS_OPT "[58:56]"
 
 int  a2065_get_iface(void);
 void a2065_set_iface(int mode);
