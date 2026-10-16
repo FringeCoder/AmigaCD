@@ -27,7 +27,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `26eb46a` -- **taken through `cbf17d2`, `26eb46a` (68030) owed; `430209e` not taken; real-floppy line kept out** -- see FringeCoder/AmigaCD_MiSTer#56 | 2026-10-16 |
+| ^ previous pin, superseded 2026-10-16 | | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
 | ^ **upstream has moved to `c1134ac` "Add real floppy drive support (#245)"** -- NOT taken, see below | | | 2026-09-17 |
 | ^ previous pin, superseded 2026-09-14 | | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
 | ^ our core's fork point | | `3ab91cd` "Release 20260220." | 2026-02-20 |
