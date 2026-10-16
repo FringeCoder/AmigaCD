@@ -972,9 +972,17 @@ static int akiko_drain_command(uint8_t *buf)
 	                                         // INCLUDING opcode, EXCLUDING chk.
 	int total;
 	if (payload_len < 0) {
-		// Unknown opcode — drain the full FPGA buffer so we don't leave stale
-		// bytes around for the next frame. The bridge clamps rd_ptr at 32.
-		total = AKIKO_CMD_MAX;
+		// Unknown opcode: one byte, matching the core, which frames it on
+		// its first byte (akiko.v expected_total_len, upstream cbf17d2 #263)
+		// as WinUAE does. The dispatcher answers it CH_ERR_BADCOMMAND.
+		//
+		// This used to drain the whole 32-byte buffer, because the core
+		// used to frame an unknown opcode only when that buffer was full --
+		// so a command channel that met one waited for bytes that never
+		// came. The two halves have to agree: an old core with this binary
+		// leaves 31 bytes behind; this core with an old binary drains 31
+		// bytes that belong to the next command.
+		total = 1;
 	} else {
 		total = payload_len + 1;             // +1 for trailing checksum byte
 	}
