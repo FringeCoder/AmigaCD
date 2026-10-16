@@ -1,0 +1,160 @@
+# Publish a GitHub release of MiSTer_AmigaCD, with a changelog. ON DEMAND ONLY.
+#
+# Started by hand from Actions -> release -> Run workflow, and by nothing else:
+# workflow_dispatch is its only trigger, so pushes, pull requests and the
+# ordinary build never publish anything. A release is a promise to whoever
+# downloads it; a build is not, and most builds are of branches nobody should
+# install.
+#
+# What it does, in order:
+#   guard    refuses anything but the default branch, works out the tag, and
+#            refuses a tag that already exists (a release is never replaced)
+#   build    build.yml itself, called, so what is published is the exact build
+#            every CI run does -- syntax check, cross-build, inspect, artifact
+#   publish  changelog from scripts/release-notes.py, then the tag and the
+#            release, with the binary attached
+#
+# docs/releasing.md has the how-to.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag, e.g. v20261016. Empty: v<today, UTC>. Must not exist yet.'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark as a pre-release (a build for testing, not for everyone)'
+        type: boolean
+        default: false
+      notes:
+        description: 'Optional text shown above the generated changelog'
+        required: false
+        default: ''
+
+# One release at a time: two at once would both see the same previous tag and
+# publish overlapping changelogs.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A release of a feature branch would ship whatever was half-done on it.
+      - name: Only from the default branch
+        env:
+          REF: ${{ github.ref_name }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$REF" != "$DEFAULT" ]; then
+            echo "::error::Releases are made from $DEFAULT only; this run is on $REF."
+            exit 1
+          fi
+
+      # Inputs come in through env, never ${{ }} inside the script, so a tag
+      # or note cannot inject shell.
+      - name: Work out the tag
+        id: tag
+        env:
+          TAG_IN: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${TAG_IN:-v$(date -u +%Y%m%d)}"
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9A-Za-z._-]+$'; then
+            echo "::error::Tag '$tag' must start with v and use only letters, digits, . _ -"
+            exit 1
+          fi
+          # Never replace a release: someone may already have installed it.
+          # A second release on the same day takes a suffix, e.g. v20261016.1.
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::Tag $tag already exists. Pass another, e.g. $tag.1"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag from $(git rev-parse --short HEAD)"
+
+  build:
+    needs: guard
+    uses: ./.github/workflows/build.yml
+
+  publish:
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    # The only job that can write: it creates the tag and the release.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The artifact build.yml uploaded in THIS run, so the binary is the one
+      # built from this commit, not a download of some earlier run's.
+      - name: Fetch the binary this run built
+        uses: actions/download-artifact@v4
+        with:
+          name: MiSTer_AmigaCD
+          path: dist-in
+
+      # Named as it is deployed (scripts/deploy-from-ci.sh, docs/deployment.md):
+      # MiSTer_AmigaCD beside MiSTer on the card. The .elf keeps symbols, for
+      # reading a crash log against.
+      - name: Stage release files
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp dist-in/MiSTer     dist/MiSTer_AmigaCD
+          cp dist-in/MiSTer.elf dist/MiSTer_AmigaCD.elf
+          chmod +x dist/MiSTer_AmigaCD
+          (cd dist && sha256sum MiSTer_AmigaCD MiSTer_AmigaCD.elf > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      # Since the newest earlier v* tag on this branch; the first release has
+      # none, and lists the most recent fifty changes instead.
+      - name: Write the changelog
+        env:
+          TAG: ${{ needs.guard.outputs.tag }}
+          NOTES: ${{ inputs.notes }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)"
+          echo "Previous release: ${prev:-none}"
+          {
+            if [ -n "$NOTES" ]; then printf '%s\n\n' "$NOTES"; fi
+            python3 scripts/release-notes.py "$prev" "$GITHUB_SHA" --repo "$REPO"
+            printf '\n### Install\n\n'
+            printf 'Copy `MiSTer_AmigaCD` to the root of the SD card, beside `MiSTer`, '
+            printf 'and see docs/deployment.md. `SHA256SUMS` lists the checksums; '
+            printf '`MiSTer_AmigaCD.elf` is the same build with symbols, for crash logs.\n\n'
+            printf 'Built from %s.\n' "$GITHUB_SHA"
+          } > dist/NOTES.md
+          cat dist/NOTES.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.guard.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "MiSTer_AmigaCD $TAG" \
+            --notes-file dist/NOTES.md \
+            "${args[@]}" \
+            dist/MiSTer_AmigaCD dist/MiSTer_AmigaCD.elf dist/SHA256SUMS

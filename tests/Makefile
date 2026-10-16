@@ -45,7 +45,7 @@ TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_cryp
 # without asking. It lives here rather than in a CI step of its own so that
 # `make -C tests` covers it too -- a delete rule that is only checked on a push
 # is checked after the push that broke it.
-SHELL_TESTS = test_deploy_core_prune.sh test_deploy_menu_check.sh
+SHELL_TESTS = test_deploy_core_prune.sh test_deploy_menu_check.sh test_release_notes.sh
 
 .PHONY: all clean shell-tests
 all: shell-tests $(addprefix $(BUILDDIR)/,$(TESTS))
