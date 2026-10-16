@@ -620,6 +620,17 @@ static int minimig_fast_z3(unsigned char cpu)
 	return ((cpu & 0x23) != 0x23) && (cpu & 2);
 }
 
+// The 68030 clock's entry in config_cpu030_msg, decoded the way the core does
+// it: speed = {bit 5, bits 7:6} (cpu_wrapper.v, cpu_cycles.v), 0 25MHz, 1 40,
+// 2 50, 3 56.7, 4 33, and 5-7 fall to the core's default, 25MHz. The menus
+// never write 5-7, but a hand-edited config can, and the row has to name the
+// clock the core will actually run.
+static int minimig_cpu030_clk(unsigned char cpu)
+{
+	int speed = ((cpu >> 3) & 4) | ((cpu >> 6) & 3);
+	return (speed > 4) ? 0 : speed;
+}
+
 static int minimig_ss_blocked()
 {
 	int fastram = ((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5);
@@ -7450,7 +7461,7 @@ void HandleUI(void)
 		// The 68030's clock, on the line D-Cache had. Greyed for every other
 		// CPU, the way D-Cache was for the 68000.
 		strcpy(s, " CPU Clock:");
-		strcat(s, ((minimig_config.cpu & 0x03) == 0x02) ? config_cpu030_msg[(minimig_config.cpu & 0x20) ? 4 : ((minimig_config.cpu >> 6) & 3)] : " -");
+		strcat(s, ((minimig_config.cpu & 0x03) == 0x02) ? config_cpu030_msg[minimig_cpu030_clk(minimig_config.cpu)] : " -");
 		OsdWrite(m++, s, menusub == 1, (minimig_config.cpu & 0x03) != 0x02);
 		// CPU CFG bit 5 read the other way up: set means the stock-speed throttle
 		// is engaged, so Turbo On is the bit CLEAR. Phrased as Turbo because that
@@ -7464,7 +7475,7 @@ void HandleUI(void)
 		// The 68020 only. The 68030 has its own speed on the line above, and
 		// there bit 5 is part of the clock.
 		strcpy(s, " CPU Turbo: ");
-		strcat(s, (minimig_config.cpu & 0x20) ? "Off" : "On");
+		strcat(s, ((minimig_config.cpu & 0x03) != 0x03) ? "-" : (minimig_config.cpu & 0x20) ? "Off" : "On");
 		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03);
 		strcpy(s, " Chipset   : ");
 		strcat(s, config_chipset_msg[(minimig_config.chipset >> 2) & 7]);
@@ -8441,7 +8452,7 @@ void HandleUI(void)
 		if ((minimig_config.cpu & 0x03) == 0x02)
 		{
 			strcat(s, "68030");
-			strcat(s, config_cpu030_msg[(minimig_config.cpu & 0x20) ? 4 : ((minimig_config.cpu >> 6) & 3)]);
+			strcat(s, config_cpu030_msg[minimig_cpu030_clk(minimig_config.cpu)]);
 		}
 		else strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
@@ -8451,7 +8462,7 @@ void HandleUI(void)
 		// only: on the 68030 bit 5 is part of the clock, which the CPU row
 		// above sets.
 		strcpy(s, " CPU Turbo: ");
-		strcat(s, (minimig_config.cpu & 0x20) ? "OFF" : "ON");
+		strcat(s, ((minimig_config.cpu & 0x03) != 0x03) ? "-" : (minimig_config.cpu & 0x20) ? "OFF" : "ON");
 		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03);
 
 		// No blank between the CPU rows and the ROMs. Row budget: this page

@@ -152,8 +152,9 @@ together** -- the comment there says what each mismatch does.
 ### Adapted (in its own PR, 2026-10-16): `e836aea` "Minimig: 68030 with its clocks, 68EC020, Fast RAM up to 384MB, drive sounds (#1360)"
 
 The host half of Minimig-AGA `26eb46a`, which goes into FringeCoder/AmigaCD_MiSTer
-in the paired PR; the two move together. Taken with `cherry-pick -x` and
-adapted in four places, each **a standing divergence**:
+in the paired PR; the two move together. Hand-ported (the conflicts were too
+wide for `cherry-pick -x` to record it honestly; the commit names `e836aea`)
+and adapted in four places, each **a standing divergence**:
 
 - **The unthrottled 68020 stays.** Upstream drops it from the CPU row and, on
   load, moves `cpu & 0x23 == 0x03` to the 68030 at 56.7MHz. Here that value is
