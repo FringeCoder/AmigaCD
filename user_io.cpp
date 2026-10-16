@@ -660,8 +660,28 @@ void user_io_status_set(const char *opt, uint32_t value, int ex)
 
 	if (!is_st())
 	{
+		// Minimig keeps its extended config (MT-32, video, audio) in
+		// status[50:32], but cur_status never holds it -- minimig_set_extcfg()
+		// sends it directly -- so sending cur_status as it is cleared those
+		// settings in the core whenever any option was set (upstream c3dc8ed,
+		// #1352). Upstream sends the extended config in all of words 2-3.
+		// This core also reads status[55:51] -- the save and restore requests,
+		// the save slot and the test pattern -- which ARE in cur_status, so
+		// here only the extended config's own bits come from it.
+		const uint32_t ext_mask = MINIMIG_EXTCFG_STATUS_MASK;
+		uint32_t ext = is_minimig() ? minimig_get_extcfg() : 0;
 		spi_uio_cmd_cont(UIO_SET_STATUS2);
-		for (uint32_t i = 0; i < sizeof(cur_status); i += 2) spi_w((cur_status[i + 1] << 8) | cur_status[i]);
+		for (uint32_t i = 0; i < sizeof(cur_status); i += 2)
+		{
+			uint16_t w = (cur_status[i + 1] << 8) | cur_status[i];
+			if (is_minimig() && (i >> 2) == 1)
+			{
+				int sh = (i & 2) << 3;   // 0 for status[47:32], 16 for [63:48]
+				uint16_t m = (uint16_t)(ext_mask >> sh);
+				w = (w & ~m) | ((uint16_t)(ext >> sh) & m);
+			}
+			spi_w(w);
+		}
 		DisableIO();
 	}
 }
