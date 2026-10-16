@@ -9,7 +9,8 @@ against. Re-verify line numbers after moving off these.
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
-| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `554dbbc` "Merge PR #20, megacd-cdg" -- module files unchanged, see below | 2026-10-11 |
+| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `e6e62b2` "Merge PR #23, megacd-cdg-psx-fixes" -- module files unchanged, see below | 2026-10-16 |
+| ^ previous pin, superseded 2026-10-16 | | `554dbbc` "Merge PR #20, megacd-cdg" | 2026-10-11 |
 | ^ previous pin, superseded 2026-10-11 | | `dc0c4c9` "Merge PR #18, boot-launch" | 2026-10-09 |
 | ^ previous pin, superseded 2026-10-09 | | `e6c7abd1` "Merge PR #17, stock LibCrypt" | 2026-10-01 |
 | ^ previous pin, superseded 2026-10-01 | | `bcdb16f` "Fix for NGCD identification" | 2026-09-18 |
@@ -18,7 +19,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `738cb7a` "Release 20261010." -- **partial take, see below** | 2026-10-11 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `e836aea` "Minimig: 68030 with its clocks..." -- **four of seven taken, see "Sync 2026-10-16"** | 2026-10-16 |
+| ^ previous merge base, superseded 2026-10-16 | | `738cb7a` "Release 20261010." | 2026-10-11 |
 | ^ previous merge base, superseded 2026-10-11 | | `42e6400` "input: Add X-Gunner lightgun support (#1348)" | 2026-10-09 |
 | ^ previous merge base, superseded 2026-10-09 | | `57276f0c` "Change user_io_status_set value in video.cpp (#1335)" | 2026-10-01 |
 | ^ previous merge base, superseded 2026-10-01 | | `5b3ae64` "N64: Improved CIC detection (#1318)" | 2026-09-18 |
@@ -94,6 +96,57 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-16: four of seven taken, three held back
+
+Seven commits landed on `MiSTer-devel/Main_MiSTer` between `738cb7a` and
+`e836aea`. Four are taken as `cherry-pick -x`; `syntax_check.sh` and `tests/`
+pass, and the ARM build is CI's.
+
+### Taken
+
+- **`00bdff0` "minimig: break the A2065/IDE deadlock (#1357)"** -- the host
+  half of a pair. `ide_wait_req()` services the A2065 mailbox while an IDE
+  transfer waits, and `INT_STATE` publishes the CMD ring read index. The core
+  half, `d241338` "A2065: apply CSR0 acknowledges in the mailbox; poll
+  INT_STATE before CSR_SHADOW (#256)", goes into FringeCoder/AmigaCD_MiSTer in
+  the same sync: one without the other is a protocol half-change.
+- `2ec7c0b` "Remove the legacy Sharp MZ support (#1353)" -- one conflict in
+  `user_io.h`, upstream context only (`is_falcon()`, which this fork does not
+  have). Resolved by dropping `is_sharpmz()` as the commit intends.
+- `2dd3662` "menu: show mounted file for S option" and `146a6df` "Saturn:
+  detect RAM cartridge via boot metadata (#1355)" -- generic, clean.
+
+### Held back, and why
+
+- **`c3dc8ed` "Minimig: keep the extended config when a core option is set
+  (#1352)" -- would break save states here.** It makes `user_io_status_set()`
+  send `minimig_get_extcfg()` in status words 2-3 instead of `cur_status`.
+  Upstream's core reads all of status[63:32] as the extended config; this
+  core does not: status[51] is the save request, [53:52] the slot, [54] the
+  restore request and [55] the test pattern (`AmigaCD.sv`), and the menu
+  raises them through `user_io_status_set()`. Taken as-is, those bits would
+  never reach the core. The bug it fixes is real here too -- setting the
+  A2065 option clears the extended config in the core -- so it wants a
+  version that merges the two, not a cherry-pick.
+- **`e836aea` "Minimig: 68030 with its clocks, 68EC020, Fast RAM up to 384MB,
+  drive sounds (#1360)"** -- re-encodes the `cpu` field and adds drive-sound
+  bits to the extended config, both of which the core must decode the same
+  way. Its RTL half is `26eb46a` in Minimig-AGA_MiSTer, which is not in our
+  core; taking the host half alone would send CPU values the core reads
+  differently. They move together or not at all.
+- `13f1de9` "PC-8801: let a floppy image grow (#1358)" -- a core we do not
+  build, and it sits on the PC-8801, Mac, Sun, Falcon and A3 SD service hooks,
+  none of which were taken. Same reasoning as `79787d3` below.
+
+### `Anime0t4ku/Main_MiSTer_Physical_Disc` -> `e6e62b2`, no re-extract
+
+Two commits (PR #23): Mega CD subcode alignment and a PSX region-change
+reset, in `support/megacd/` and `support/psx/`. None of the extracted
+`support/physical_disc/` files changed, so the pin moves and nothing on disk
+does.
+
+`kblood/Main_MiSTer-cd32-cdtv` `amiga-console`: nothing new since `52625a4`.
 
 ## Sync 2026-10-11: one of three taken, and that one only in part
 
