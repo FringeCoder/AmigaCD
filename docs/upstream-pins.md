@@ -28,7 +28,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
 | `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `26eb46a` -- **taken through `26eb46a` (68030 hand-ported in its own PR); `430209e` not taken; real-floppy line kept out** -- see FringeCoder/AmigaCD_MiSTer#56 and the 68030 PR | 2026-10-16 |
-| ^ previous pin, superseded 2026-10-16 | | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
+| ^ previous pin, superseded 2026-10-16 | | `c5ffbf9` "Fix Absolute Inebriation" -- partial take, floppy line still declined, see "Sync 2026-10-11" | 2026-10-11 |
+| ^ previous pin, superseded 2026-10-11 | | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
 | ^ **upstream has moved to `c1134ac` "Add real floppy drive support (#245)"** -- NOT taken, see below | | | 2026-09-17 |
 | ^ previous pin, superseded 2026-09-14 | | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
 | ^ our core's fork point | | `3ab91cd` "Release 20260220." | 2026-02-20 |
@@ -217,6 +218,56 @@ Ten commits (PR #20): Mega CD CD+G subcode passthrough and a subcode log, in
 `support/megacd/`, `cfg.{cpp,h}` and `README.md`. None of the four extracted
 `support/physical_disc/` files changed, so the pin moves and nothing on disk
 does.
+
+### `MiSTer-devel/Minimig-AGA_MiSTer` -> `c5ffbf9`, and a sweep of every core source
+
+Eight commits since `da7632e`, plus a merge. Taken in core PR #41, by
+`cherry-pick -x`:
+
+- **`7f93ed1`, `cfcc0dc`, `3c8a0ed`** (vanfanel), merged upstream as `c5ffbf9`
+  "Fix Absolute Inebriation". Denise applies OCS/ECS `BPLCON1` writes to the
+  live scroll state, Agnus exports which bus cycles are genuine bitplane DMA
+  and their fetch phase, and Denise gains a pending-copy path for OCS/ECS
+  LORES FMODE=0 off-grid fetches. AGA keeps the old load path. One conflict,
+  in `minimig.v`'s Agnus instance: our save-state replay renamed
+  `reg_address` to `reg_address_agnus`; ours kept, upstream's four new ports
+  added. The fork's delta against upstream in the four touched files is the
+  same before and after, apart from the floppy line below.
+  `denise_bitplanes.v` was byte-identical before and is again after.
+- **`8325735`** "readme: document A2065 Ethernet setup (#250)" -- into the core
+  README. The OSD path it names (System -> Ethernet) holds here: the row is on
+  `MENU_MINIMIG_CHIPSET1`, titled "System".
+
+Already here or declined:
+
+- `5fea457` chipdma_arb `minimig_idle` -- **settled**: taken as a design merge,
+  `faf9588`, core PR #36. The "owed to the core repo" note above is closed.
+- `c1134ac`, `e6d9262`, `a527fbb` -- the floppy line, still declined for the
+  reasons below.
+
+**Upstream's `cd32_cdtv` branch** (`0e1eed3`, 2026-08-20), not looked at
+before. Fourteen commits: kblood's PRs #217-#227 plus Sorgelig's cleanup and
+source reorganisation. None match a mainline commit by hash, patch-id or
+subject, so they were checked by content -- the share of each commit's added
+lines present in `cd32-native-mvp`. All of it arrived through `2ced823`
+"Merge Minimig-AGA_MiSTer b265a3b: the upstream CD32/CDTV line", which
+reworks some of it: the `hps_ext` status word is wider here, CDTV register
+routing goes through `cdtv_selack`, and the memory card, 32-bit CDTV DMA
+address, word-wide sector ingest and `bram.vhd` switch are all in. Nothing to
+take.
+
+**`RobSmithDev/Minimig-AGA_MiSTer`** `b5312c5`: tree-identical to upstream
+`c1134ac`, the squash of it. Nothing beyond the declined floppy line.
+
+**`kblood/Minimig-AGA-cd32-cdtv-native-akiko`**, the three branches no doc
+named:
+
+- `universe-chip-dma-slot-guard` -- `114ab43`, already in.
+- `cdtv-z3-dma-addr` -- the branch behind upstream #224-#227, already in.
+- `a1200-speed-5x` -- the stock-speed throttle is in, as upstream's corrected
+  `148931d` (T22 in the core's `core-accuracy-todo.md` benches it). Its last
+  commit, `38f3f55`, is a diagnostic build forcing the throttle on at divisor
+  5; not for a shipping core.
 
 ## Sync 2026-10-09: seven of eleven taken, and why the other four are not
 
