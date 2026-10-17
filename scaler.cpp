@@ -778,12 +778,12 @@ void screenshot_cb(void)
                     char msg[1024];
                     snprintf(msg, sizeof(msg), "Screen saved to\n%s", shown);
                     printf("%s\n", msg);
-                    Info(msg);
+                    if (cfg.screenshot_info) Info(msg);
                 }
                 else
                 {
                     printf("Screenshot saved\n");
-                    Info("Screenshot saved");
+                    if (cfg.screenshot_info) Info("Screenshot saved");
                 }
                 break;
 

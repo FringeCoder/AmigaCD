@@ -36,10 +36,8 @@
 const char *config_memory_chip_msg[] = { "512K", "1M",   "1.5M", "2M" };
 const char *config_memory_slow_msg[] = { "none", "512K", "1M",   "1.5M" };
 const char *config_memory_fast_msg[][8] = { { "none", "2M", "4M", "8M", "8M",    "8M",    "8M",   "8M" } ,
-											{ "none", "2M", "4M", "8M", "256M", "384M", "128M", "64M" } };
-
+											{ "none", "2M", "4M", "8M", "256M", "384M", "256M", "256M" } };
 const char *config_cpu_msg[] = { "68000", "68010", "68030", "68020" };
-const char *config_cpu030_msg[] = { " 25MHz", " 40MHz", " 50MHz", " 56.7MHz", " 33MHz" };
 const char *config_chipset_msg[] = { "OCS-A500", "OCS-A1000", "ECS", "---", "---", "---", "AGA", "---" };
 
 typedef struct
@@ -1583,7 +1581,14 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 	// still runs it (cpucfg 011: TG68K as a 68020, 32-bit, no cycle model).
 	// Taking the migration would turn every CD32 on a card into a 68030, which
 	// the save states refuse and cd32_active() did not recognise, on a load
-	// nobody asked to change anything. Not taken.
+	// nobody asked to change anything. Not taken -- nor upstream 60a868f's
+	// version of it, which sends the same configs to the 68030 no MMU.
+	//
+	// The FastRAM half of 60a868f is taken: the 64M and 128M Zorro III boards
+	// are gone from the core, and a config saved with either (memory bits 7
+	// and 5) opens with 256M, as upstream's does.
+	if (result && (minimig_config.memory & 0xa0) == 0xa0)
+		minimig_config.memory &= ~0x30;
 
 	if (!result) {
 		BootPrint("Can not open configuration file!\n");
