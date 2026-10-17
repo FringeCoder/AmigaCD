@@ -620,17 +620,6 @@ static int minimig_fast_z3(unsigned char cpu)
 	return ((cpu & 0x23) != 0x23) && (cpu & 2);
 }
 
-// The 68030 clock's entry in config_cpu030_msg, decoded the way the core does
-// it: speed = {bit 5, bits 7:6} (cpu_wrapper.v, cpu_cycles.v), 0 25MHz, 1 40,
-// 2 50, 3 56.7, 4 33, and 5-7 fall to the core's default, 25MHz. The menus
-// never write 5-7, but a hand-edited config can, and the row has to name the
-// clock the core will actually run.
-static int minimig_cpu030_clk(unsigned char cpu)
-{
-	int speed = ((cpu >> 3) & 4) | ((cpu >> 6) & 3);
-	return (speed > 4) ? 0 : speed;
-}
-
 static int minimig_ss_blocked()
 {
 	int fastram = ((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5);
@@ -842,7 +831,7 @@ static const char *helptexts[] =
 	helptext_custom,
 	"                                Welcome to MiSTer! Use the cursor keys to navigate the menus. Use space bar or enter to select an item. Press Esc or F12 to exit the menus. Joystick emulation on the numeric keypad can be toggled with the numlock or scrlock key, while pressing Ctrl-Alt-0 (numeric keypad) toggles autofire mode.",
 	"                                Minimig can emulate an A600/A1200 IDE harddisk interface. The emulation can make use of Minimig-style hardfiles (complete disk images) or UAE-style hardfiles (filesystem images with no partition table).",
-	"                                Minimig's processor core can emulate a 68000 (cycle accuracy as A500/A600), a 68EC020 at A1200 speed, or a 68030 with MMU at 25, 33, 40 or 50MHz or at 56.7MHz with no speed limit, all with transparent cache. The 68030 has no FPU, and needs a core that offers it.",
+	"                                Minimig's processor core can emulate a 68000 (cycle accuracy as A500/A600), a 68EC020 at A1200 speed, or a 68030 with or without MMU (maximum performance), all with transparent cache. The 68030 has no FPU, and needs a core that offers it.",
 	"                                Minimig can make use of up to 2 megabytes of Chip RAM, up to 1.5 megabytes of Slow RAM (A500 Trapdoor RAM), and up to 384 megabytes of Fast RAM (8MB max for 68000 mode). To use the HRTmon feature you will need a file on the SD card named hrtmon.rom.",
 	"                                Backspace key (or B-hold + A on gamepad) to unmount",
 	"                                Backspace key (or B-hold + A on gamepad) to clear stored option. You have to reload the core to be able to use default value.",
@@ -7487,17 +7476,20 @@ void HandleUI(void)
 		//   bits 1:0  00 68000, 01 68010, 10 68030, 11 68020
 		//   bit  5    68020: the stock-speed throttle (68EC020, A1200 speed,
 		//             24-bit addresses), i.e. CPU Turbo Off.
-		//             68030: with bits 7:6 the clock, see config_cpu030_msg.
+		//             68030: no MMU (upstream 60a868f; the clocks are gone).
 		//   bit  4    was this fork's D-Cache; the core no longer reads it.
 		// Upstream drops the unthrottled 68020 and moves such configs to the
 		// 68030 at 56.7MHz. This fork keeps it -- it is CPU Turbo On, the
 		// default since 4b4f604 -- and the RTL still runs it (cpucfg 011).
 		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
 		OsdWrite(m++, s, menusub == 0, 0);
-		// The 68030's clock, on the line D-Cache had. Greyed for every other
-		// CPU, the way D-Cache was for the 68000.
-		strcpy(s, " CPU Clock:");
-		strcat(s, ((minimig_config.cpu & 0x03) == 0x02) ? config_cpu030_msg[minimig_cpu030_clk(minimig_config.cpu)] : " -");
+		// The 68030's MMU, on the line its clock had (upstream 60a868f left
+		// the 68030 one clock and made "no MMU" bit 5). Upstream offers it as
+		// a fifth CPU, "68030 no MMU"; here it is a row of its own, the way
+		// bit 5 is CPU Turbo on the 68020, which keeps every row below where
+		// it was on a page with no line to spare. Greyed for every other CPU.
+		strcpy(s, " CPU MMU  : ");
+		strcat(s, ((minimig_config.cpu & 0x03) != 0x02) ? "-" : (minimig_config.cpu & 0x20) ? "Off" : "On");
 		OsdWrite(m++, s, menusub == 1, (minimig_config.cpu & 0x03) != 0x02);
 		// CPU CFG bit 5 read the other way up: set means the stock-speed throttle
 		// is engaged, so Turbo On is the bit CLEAR. Phrased as Turbo because that
@@ -7508,8 +7500,7 @@ void HandleUI(void)
 		// same page, and two rows both called Turbo is a support question waiting
 		// to happen.
 		//
-		// The 68020 only. The 68030 has its own speed on the line above, and
-		// there bit 5 is part of the clock.
+		// The 68020 only. On the 68030 bit 5 is the MMU row above.
 		strcpy(s, " CPU Turbo: ");
 		strcat(s, ((minimig_config.cpu & 0x03) != 0x03) ? "-" : (minimig_config.cpu & 0x20) ? "Off" : "On");
 		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03);
@@ -7600,11 +7591,10 @@ void HandleUI(void)
 			{
 				// 68000 -> 68010 -> 68020 -> 68030. Bits 2-4 (turbo chip/kick,
 				// the old D-Cache bit) are left alone. Bit 5 belongs to the
-				// Turbo row on the 68020 and is part of the clock on the
-				// 68030, so it is kept only while the CPU stays a 68020, and
-				// bits 7:5 are cleared otherwise: a 68020 is entered Turbo On,
-				// this fork's default, and a 68030 at 25MHz, as upstream's
-				// step order enters it.
+				// Turbo row on the 68020 and to the MMU row on the 68030, so
+				// it is cleared on every change of CPU, with the old clock
+				// bits 7:6: a 68020 is entered Turbo On, this fork's default,
+				// and a 68030 with its MMU, as upstream's step order enters it.
 				static const unsigned char cpu_order[4] = { 0, 1, 3, 2 };
 				int cpu = minimig_config.cpu & 3;
 				int at = (cpu == 0) ? 0 : (cpu == 1) ? 1 : (cpu == 3) ? 2 : 3;
@@ -7616,16 +7606,10 @@ void HandleUI(void)
 			}
 			else if (menusub == 1 && (minimig_config.cpu & 0x3) == 0x2)
 			{
-				// 68030 clock: 25, 33, 40, 50, 56.7MHz, as upstream's CPU
-				// steps order them. 33MHz is bit 5 on its own; the others are
-				// bits 7:6 = 00, 01, 10, 11 with bit 5 clear.
-				static const unsigned char clk_steps[5] = { 0x00, 0x20, 0x40, 0x80, 0xc0 };
-				static const unsigned char clk_order[4] = { 0, 2, 3, 4 };
-				int step = (minimig_config.cpu & 0x20) ? 1 : clk_order[(minimig_config.cpu >> 6) & 3];
-				step = (step + (minus ? 4 : 1)) % 5;
-
+				// 68030 MMU (CPU CFG bit 5): set is "68030 no MMU", whose MMU
+				// instructions take the F-line exception as on a 68020.
+				minimig_config.cpu ^= 0x20;
 				menustate = MENU_MINIMIG_CHIPSET1;
-				minimig_config.cpu = (minimig_config.cpu & 0x1f & ~0x20) | clk_steps[step];
 				minimig_ConfigCPU(minimig_config.cpu);
 			}
 			else if (menusub == 2 && (minimig_config.cpu & 0x3) == 0x3)
@@ -7685,11 +7669,21 @@ void HandleUI(void)
 			}
 			else if (menusub == 5)
 			{
-				static const int fast_up[8] = { 1, 2, 3, 7, 5, 0, 4, 6 };
-				static const int fast_dn[8] = { 5, 0, 1, 2, 6, 4, 7, 3 };
 				int c = (((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5));
-				c = minus ? fast_dn[c] : fast_up[c];
-				if (!minimig_fast_z3(minimig_config.cpu) && c > 3) c = minus ? 3 : 0;
+				// Upstream 60a868f's order: none 2M 4M 8M 256M 384M, the Zorro III
+				// sizes only where minimig_fast_z3() allows them.
+				if (minus)
+				{
+					c--;
+					if (c < 0) c = 5;
+					if (!minimig_fast_z3(minimig_config.cpu) && c > 3) c = 3;
+				}
+				else
+				{
+					c++;
+					if (c > 5) c = 0;
+					if (!minimig_fast_z3(minimig_config.cpu) && c > 3) c = 0;
+				}
 				minimig_config.memory = ((c << 4) & 0x30) | ((c << 5) & 0x80) | (minimig_config.memory & ~0xB0);
 				menustate = MENU_MINIMIG_CHIPSET1;
 			}
@@ -8444,7 +8438,7 @@ void HandleUI(void)
 			static const char *const tips[] =
 			{
 				/* 0 FastRAM  */ "Zorro II and Zorro III fast RAM. Z3 and 68000 both stop save states working, and grey those rows out when selected.",
-				/* 1 CPU      */ "The machine's 68020, or a 68030 at 25 to 56.7MHz. The 68030 has an MMU and no FPU; save states need the 68020.",
+				/* 1 CPU      */ "The machine's 68020, or a 68030 at full speed, with or without its MMU. No FPU; save states need the 68020.",
 				/* 2 CPU Turbo*/ "Run the 68020 at full speed rather than throttled to the stock rate. Only available when the CPU is an 020.",
 				/* 3 Main ROM */ "The Kickstart. Amiga Forever ROMs work as they are, encrypted, as long as ROM.KEY sits beside them.",
 				/* 4 Ext ROM  */ "The extended ROM, which a CD32 needs to boot a disc. Minus clears the pairing.",
@@ -8481,22 +8475,18 @@ void HandleUI(void)
 
 		// CPU, on the line D-Cache had: the core no longer reads that bit
 		// (upstream 26eb46a uses the data cache where the real CPU has one).
-		// The machine's own 68020, or a 68030 accelerator at one of its clocks
-		// -- the SX-32 Pro put one in a CD32, the Blizzards in an A1200. The
-		// 68000 machines (A500, CDTV) keep their 68000; greyed for them.
+		// The machine's own 68020, or a 68030 accelerator -- the SX-32 Pro put
+		// one in a CD32, the Blizzards in an A1200 -- with or without its MMU
+		// (upstream 60a868f: one clock, the maximum). The 68000 machines
+		// (A500, CDTV) keep their 68000; greyed for them.
 		strcpy(s, " CPU      : ");
-		if ((minimig_config.cpu & 0x03) == 0x02)
-		{
-			strcat(s, "68030");
-			strcat(s, config_cpu030_msg[minimig_cpu030_clk(minimig_config.cpu)]);
-		}
+		if ((minimig_config.cpu & 0x23) == 0x22) strcat(s, "68030 no MMU");
 		else strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
 
 		// CPU Turbo = CPU byte bit5 read the other way up: the bit SET engages
 		// the stock-speed throttle, so Turbo On is the bit clear. The 68020
-		// only: on the 68030 bit 5 is part of the clock, which the CPU row
-		// above sets.
+		// only: on the 68030 bit 5 is "no MMU", which the CPU row above sets.
 		strcpy(s, " CPU Turbo: ");
 		strcat(s, ((minimig_config.cpu & 0x03) != 0x03) ? "-" : (minimig_config.cpu & 0x20) ? "OFF" : "ON");
 		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03);
@@ -8651,28 +8641,35 @@ void HandleUI(void)
 		{
 			if (menusub == 0) // FastRAM cycle (mirrors CHIPSET2 menusub 5)
 			{
-				// Upstream e836aea's order, which adds 64M and 128M:
-				// none 2M 4M 8M 64M 128M 256M 384M.
-				static const int fast_up[8] = { 1, 2, 3, 7, 5, 0, 4, 6 };
-				static const int fast_dn[8] = { 5, 0, 1, 2, 6, 4, 7, 3 };
+				// Upstream 60a868f's order: none 2M 4M 8M 256M 384M.
 				int fc = (((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5));
-				fc = minus ? fast_dn[fc] : fast_up[fc];
-				if (!minimig_fast_z3(minimig_config.cpu) && fc > 3) fc = minus ? 3 : 0;
+				if (minus)
+				{
+					fc--;
+					if (fc < 0) fc = 5;
+					if (!minimig_fast_z3(minimig_config.cpu) && fc > 3) fc = 3;
+				}
+				else
+				{
+					fc++;
+					if (fc > 5) fc = 0;
+					if (!minimig_fast_z3(minimig_config.cpu) && fc > 3) fc = 0;
+				}
 				minimig_config.memory = ((fc << 4) & 0x30) | ((fc << 5) & 0x80) | (minimig_config.memory & ~0xB0);
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 1) // CPU: 68020, 68030 at 25/33/40/50/56.7MHz
+			else if (menusub == 1) // CPU: 68020, 68030, 68030 no MMU
 			{
 				// For the 68020 machines only; the A500 and CDTV keep their
 				// 68000. The 68020 is entered Turbo On, this fork's default;
-				// the 68030 clocks are upstream's steps in their order.
+				// the 68030 with and without its MMU are upstream 60a868f's
+				// last two steps, in their order.
 				if (minimig_config.cpu & 0x2)
 				{
-					static const unsigned char steps[6] = { 0x03, 0x02, 0x22, 0x42, 0x82, 0xc2 };
-					static const unsigned char clk_at[4] = { 1, 3, 4, 5 };
+					static const unsigned char steps[3] = { 0x03, 0x02, 0x22 };
 					int at = ((minimig_config.cpu & 3) == 3) ? 0 :
-					         (minimig_config.cpu & 0x20) ? 2 : clk_at[(minimig_config.cpu >> 6) & 3];
-					at = (at + (minus ? 5 : 1)) % 6;
+					         (minimig_config.cpu & 0x20) ? 2 : 1;
+					at = (at + (minus ? 2 : 1)) % 3;
 					minimig_config.cpu = (minimig_config.cpu & 0x1c) | steps[at];
 					minimig_ConfigCPU(minimig_config.cpu);
 				}
