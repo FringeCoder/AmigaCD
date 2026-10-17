@@ -52,6 +52,10 @@
 #       it mounted in df0, run it, take a screenshot, and pull the PNG back.
 #       SECONDS is how long to let it settle (default 12) -- the reference
 #       scripts use 9 for most tests.
+#       The .mgl pins the machine to the references' A500_OCS_1MB (68000, OCS,
+#       512K chip + 512K slow, one drive) and the Kickstart to
+#       $VAMIGATS_KICKSTART, root-relative, default games/Amiga/a500.rom --
+#       point it at a 1.3 image (see the note on 1.3 above).
 #
 #   ./scripts/vamigats.sh compare <vamigats-path> <test-dir>
 #       Print where our capture and the hardware photograph are, side by side.
@@ -78,6 +82,17 @@ GROUNDTRUTH="docs/reference/vamigats-groundtruth.tsv"
 REMOTE_DIR="${VAMIGATS_REMOTE_DIR:-/media/fat/games/Amiga}"
 REMOTE_MGL="${VAMIGATS_REMOTE_MGL:-/media/fat/_Test/vamigats.mgl}"
 CORE_RBF="${VAMIGATS_CORE:-}"
+# The Kickstart the .mgl's settings block names, root-relative as the core
+# stores it. vAmigaTS's references were taken with 1.3 (see above); the default
+# is the A500 quick-start preset's ROM, so point this at a 1.3 image if that is
+# not one.
+KICKSTART="${VAMIGATS_KICKSTART:-games/Amiga/a500.rom}"
+
+xml_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"; s="${s//\"/&quot;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"
+    printf '%s' "$s"
+}
 
 host() {
     local h="${MISTER_HOST:-}"
@@ -232,9 +247,37 @@ cmd_run() {
     # on hardware, tracing the .mgl state machine). PR #132 makes the binary
     # fall back to the
     # root-relative form; an absolute path works on binaries without it too.
+    #
+    # The <amigacd_config> block pins the machine (docs/mgl.md). Without it
+    # the core boots whatever profile was saved last -- a CD32 has no floppy
+    # drive, so a CD32-last card ran the test on the wrong machine with nothing
+    # in df0. vAmigaTS's references are A500_OCS_1MB, so: 68000 (cpu 0, which
+    # is also what makes amigacd_system() pick the A500 profile), OCS PAL
+    # without chipset turbo (chipset 0), 512K chip + 512K slow (memory 4), one
+    # drive at 1x, no CD, CDTV, IDE or hardfiles. extrom is cleared: it shares
+    # the kickstart buffer, and a CD32 profile's ext ROM would otherwise ride
+    # along. A setting not named here (video, audio, drive sounds) keeps the
+    # card's saved value.
+    local KS_XML; KS_XML="$(xml_escape "$KICKSTART")"
     local MGL
     MGL="<mistergamedescription>
     <rbf>$CORE</rbf>
+    <amigacd_config version=\"1\">
+        <setting name=\"cpu\" value=\"0\"/>
+        <setting name=\"chipset\" value=\"0\"/>
+        <setting name=\"memory\" value=\"4\"/>
+        <setting name=\"floppy_drives\" value=\"0\"/>
+        <setting name=\"floppy_speed\" value=\"0\"/>
+        <setting name=\"hdf0_cfg\" value=\"0\"/>
+        <setting name=\"hdf1_cfg\" value=\"0\"/>
+        <setting name=\"hdf2_cfg\" value=\"0\"/>
+        <setting name=\"hdf3_cfg\" value=\"0\"/>
+        <setting name=\"cd32_drive_cfg\" value=\"0\"/>
+        <setting name=\"cdtv_drive_cfg\" value=\"0\"/>
+        <setting name=\"ide_cfg\" value=\"0\"/>
+        <setting name=\"kickstart\" value=\"$KS_XML\"/>
+        <setting name=\"extrom\" value=\"\"/>
+    </amigacd_config>
     <file type=\"f\" index=\"0\" path=\"$REMOTE_DIR/$NAME.adf\"/>
 </mistergamedescription>"
     printf '%s\n' "$MGL" | sshm "$H" "cat > '$REMOTE_MGL'" || return 1
