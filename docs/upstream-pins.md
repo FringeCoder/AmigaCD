@@ -19,7 +19,7 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `e836aea` "Minimig: 68030 with its clocks..." -- **five of seven taken (one adapted), see "Sync 2026-10-16"** | 2026-10-16 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `e836aea` "Minimig: 68030 with its clocks..." -- **six of seven taken (two adapted), see "Sync 2026-10-16"** | 2026-10-16 |
 | ^ previous merge base, superseded 2026-10-16 | | `738cb7a` "Release 20261010." | 2026-10-11 |
 | ^ previous merge base, superseded 2026-10-11 | | `42e6400` "input: Add X-Gunner lightgun support (#1348)" | 2026-10-09 |
 | ^ previous merge base, superseded 2026-10-09 | | `57276f0c` "Change user_io_status_set value in video.cpp (#1335)" | 2026-10-01 |
@@ -27,7 +27,7 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `26eb46a` -- **taken through `cbf17d2`, `26eb46a` (68030) owed; `430209e` not taken; real-floppy line kept out** -- see FringeCoder/AmigaCD_MiSTer#56 | 2026-10-16 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `26eb46a` -- **taken through `26eb46a` (68030 hand-ported in its own PR); `430209e` not taken; real-floppy line kept out** -- see FringeCoder/AmigaCD_MiSTer#56 and the 68030 PR | 2026-10-16 |
 | ^ previous pin, superseded 2026-10-16 | | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
 | ^ **upstream has moved to `c1134ac` "Add real floppy drive support (#245)"** -- NOT taken, see below | | | 2026-09-17 |
 | ^ previous pin, superseded 2026-09-14 | | `809b955` "A2065: emulate the Commodore A2065 ZorroII Ethernet card" | 2026-07-26 |
@@ -98,10 +98,10 @@ the SNAC third tenant, and our OSD rows already exist.
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
 
-## Sync 2026-10-16: five of seven taken, one owed, one not taken
+## Sync 2026-10-16: six of seven taken, two of them adapted, one not taken
 
 Seven commits landed on `MiSTer-devel/Main_MiSTer` between `738cb7a` and
-`e836aea`. Four are taken as `cherry-pick -x`, one is adapted; `syntax_check.sh`
+`e836aea`. Four are taken as `cherry-pick -x`, two are adapted; `syntax_check.sh`
 and `tests/` pass, and the ARM build is CI's. The core side of the same sync is
 FringeCoder/AmigaCD_MiSTer#56.
 
@@ -149,18 +149,37 @@ the drive does not define (0xB-0xF), where it used to drain the full 32-byte
 buffer to match the core's old "frame on buffer full". **Both halves must ship
 together** -- the comment there says what each mismatch does.
 
-### Owed: `e836aea` "Minimig: 68030 with its clocks, 68EC020, Fast RAM up to 384MB, drive sounds (#1360)"
+### Adapted (in its own PR, 2026-10-16): `e836aea` "Minimig: 68030 with its clocks, 68EC020, Fast RAM up to 384MB, drive sounds (#1360)"
 
-Re-encodes the `cpu` field and adds drive-sound bits to the extended config,
-which the core must decode the same way; its RTL half is `26eb46a` in
-Minimig-AGA_MiSTer. The two move together. **Deferred to its own PR by
-decision, 2026-10-16**, because of the core half's size: about 6,000 lines
-over 28 files, 51 conflict hunks in 11 of this fork's files -- 18 in the
-TG68K kernel, and `cpu_wrapper`, `ddram_ctrl`, `sdram_ctrl` and
-`cpu_cache_new`, which are what save states are built on -- plus a 215-line
-top-level change to redo by hand in `AmigaCD.sv` (upstream's `Minimig.sv`).
-Its new status/extended-config bits must also be checked against status[51..58]
-above before it lands.
+The host half of Minimig-AGA `26eb46a`, which goes into FringeCoder/AmigaCD_MiSTer
+in the paired PR; the two move together. Hand-ported (the conflicts were too
+wide for `cherry-pick -x` to record it honestly; the commit names `e836aea`)
+and adapted in four places, each **a standing divergence**:
+
+- **The unthrottled 68020 stays.** Upstream drops it from the CPU row and, on
+  load, moves `cpu & 0x23 == 0x03` to the 68030 at 56.7MHz. Here that value is
+  CPU Turbo On, the CD32 and A1200 default since `4b4f604`, and the core still
+  runs it (cpucfg 011). The migration is not taken: it would have made every
+  CD32 on a card a 68030 on a load nobody asked to change anything. The System
+  page's CPU row cycles 68000/68010/68020/68030 and leaves bit 5 to the Turbo
+  row on the 68020; the 68030's clock gets the line D-Cache had (the core no
+  longer reads that bit). The AmigaCD Settings page, which has no CPU row,
+  gets one in D-Cache's place too: 68020 or 68030 at 25-56.7MHz, for the
+  68020 machines.
+- **The drive sound volume moves to status[60:59].** Upstream's core reads it
+  at status[52:51] -- ext bits 20:19 -- which here are the save state request
+  and slot. `minimig_status_compose()` (`minimig_status.h`) puts it at bit 27
+  of status[63:32], and `tests/test_minimig_status.cpp` pins every bit.
+- **`minimig_set_extcfg()` no longer writes status[63:32] itself.** Upstream
+  sends 0 and then the raw extended config; with the volume in bit 19 picking
+  "Quiet" would have requested a save state. It goes through
+  `user_io_status_resend()`, the same path as every other status write.
+- **`cd32_active()` and the save state guard know the 68030.** A CD32 with a
+  68030 is still a CD32 (`cpu & 2`, was `== 3`), and save states are refused
+  on it as the core refuses them -- the state vector has no room for the MMU.
+
+`drivesounds.bin` is looked for in `games/Amiga` (HomeDir() for the AmigaCD
+core too); the core's release package carries it there.
 
 ### Not taken
 - `13f1de9` "PC-8801: let a floppy image grow (#1358)" -- a core we do not

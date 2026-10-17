@@ -3421,7 +3421,10 @@ static void akiko_diag(const char *fmt, ...)
 static inline bool cd32_active(void)
 {
 	if (minimig_config.cd32_drive.cfg != 0) return true;
-	return (minimig_config.cpu & 0x03) == 3
+	// cpu & 2: the 68020 or, since upstream e836aea, a 68030 (bits 10) -- a
+	// CD32 with an accelerator is still a CD32. Was == 3, which on a 68030
+	// would have silenced Akiko on the machine that has it.
+	return (minimig_config.cpu & 0x02)
 	    && ((minimig_config.chipset >> 2) & 7) == 6
 	    && minimig_config.hardfile[0].cfg == 2;
 }

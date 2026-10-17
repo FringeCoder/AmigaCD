@@ -26,6 +26,7 @@ extern const char *config_memory_chip_msg[];
 extern const char *config_memory_slow_msg[];
 extern const char *config_memory_fast_msg[][8];
 extern const char *config_cpu_msg[];
+extern const char *config_cpu030_msg[];
 extern const char *config_chipset_msg[];
 
 typedef struct
@@ -376,12 +377,16 @@ void minimig_ConfigAutofire(unsigned char autofire, unsigned char mask);
 
 void minimig_set_extcfg(unsigned int ext_cfg);
 unsigned int minimig_get_extcfg();
+unsigned int minimig_core_extcfg();
+void minimig_dsnd_load();
+int minimig_dsnd_loaded();
 
-// The bits of status[63:32] that the extended config owns: status[50:32],
-// the highest being the 0x40000 toggle in the Amiga video/audio menu.
-// status[63:51] belongs to cur_status -- the AmigaCD core's save-state and
-// test-pattern requests, and the A2065 mode. See user_io_status_set().
-#define MINIMIG_EXTCFG_STATUS_MASK 0x0007FFFFu
+// MINIMIG_EXTCFG_STATUS_MASK and the drive sound placement: minimig_status.h.
+#include "minimig_status.h"
+
+// status[63:32] as this core wants it, from cur_status's copy: see
+// user_io_status_resend().
+unsigned int minimig_status_hi(unsigned int cur_hi);
 
 // AmigaCD console variant helpers (see minimig_config.cpp).
 void amigacd_default_rom_names(int sys, const char **main_name, const char **ext_name);
