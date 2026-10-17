@@ -19,7 +19,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `e836aea` "Minimig: 68030 with its clocks..." -- **six of seven taken (two adapted), see "Sync 2026-10-16"** | 2026-10-16 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `d3b8537` "Adds PCFX system support (#1365)" -- **three of four taken (one adapted), see "Sync 2026-10-17"** | 2026-10-17 |
+| ^ previous merge base, superseded 2026-10-17 | | `e836aea` "Minimig: 68030 with its clocks..." -- six of seven taken (two adapted), see "Sync 2026-10-16" | 2026-10-16 |
 | ^ previous merge base, superseded 2026-10-16 | | `738cb7a` "Release 20261010." | 2026-10-11 |
 | ^ previous merge base, superseded 2026-10-11 | | `42e6400` "input: Add X-Gunner lightgun support (#1348)" | 2026-10-09 |
 | ^ previous merge base, superseded 2026-10-09 | | `57276f0c` "Change user_io_status_set value in video.cpp (#1335)" | 2026-10-01 |
@@ -27,7 +28,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `26eb46a` -- **taken through `26eb46a` (68030 hand-ported in its own PR); `430209e` not taken; real-floppy line kept out** -- see FringeCoder/AmigaCD_MiSTer#56 and the 68030 PR | 2026-10-16 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `0bf2ab1` "68020/68030 fixes and the 68030 MMU bus error - #268" -- **all ten commits since `26eb46a` taken, see "Sync 2026-10-17"**; `430209e` and the real-floppy line still out -- FringeCoder/AmigaCD_MiSTer#58 | 2026-10-17 |
+| ^ previous pin, superseded 2026-10-17 | | `26eb46a` -- taken through `26eb46a` (68030 hand-ported in its own PR) -- FringeCoder/AmigaCD_MiSTer#56/#57 | 2026-10-16 |
 | ^ previous pin, superseded 2026-10-16 | | `c5ffbf9` "Fix Absolute Inebriation" -- partial take, floppy line still declined, see "Sync 2026-10-11" | 2026-10-11 |
 | ^ previous pin, superseded 2026-10-11 | | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
 | ^ **upstream has moved to `c1134ac` "Add real floppy drive support (#245)"** -- NOT taken, see below | | | 2026-09-17 |
@@ -98,6 +100,44 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-17: the 68030 simplification, and upstream's 68020/68030 fixes
+
+Upstream's reviewers asked for the 68030 to be cut back (Minimig-AGA #265,
+Main_MiSTer #1360), and both halves landed: the 68030 runs at its maximum clock
+only, a **68030 no MMU** variant is added (CPU byte bit 5, cpucfg[2] on the
+68030), and the 64M/128M Zorro III boards are gone. This fork follows it, as
+decided on 2026-10-17. The core side is FringeCoder/AmigaCD_MiSTer#58, on top
+of the timing work there.
+
+### Main_MiSTer `e836aea..d3b8537`: three of four taken
+
+- `601b90e` screenshot_info setting, `7b0073b` KEY_RO mapping -- clean
+  `cherry-pick -x`.
+- **`60a868f` "Minimig: 68030 at its maximum clock only, 68030 no MMU, no
+  64M/128M Fast RAM"** -- adapted. The System page has no free line, so the
+  CPU Clock row becomes **CPU MMU: On/Off** (live on the 68030 only, like CPU
+  Turbo on the 68020) instead of a fifth CPU step, and every row below keeps
+  its index; the AmigaCD Settings CPU row steps 68020 / 68030 / 68030 no MMU.
+  FastRAM follows upstream's list. The 64M/128M -> 256M load migration is
+  taken; the migration of the unthrottled 68020 (now to "68030 no MMU") stays
+  declined, as `e836aea`'s did -- it is this fork's CPU Turbo On default.
+- Not taken: `d3b8537` "Adds PCFX system support" -- a core we do not build,
+  and it sits on `ce432dc` FM Towns Marty, which was declined for the same
+  reason (see the 2026-10-01 sync).
+
+### Minimig-AGA `26eb46a..0bf2ab1`: all ten taken
+
+`a5f1637` (the core half of the above), and the TG68K and cpu_wrapper fixes:
+MOVES, the M bit of the status register, CHK/CHK2/CMP2/DIVU/DIVS flags, T0
+trace on change of flow, MOVEC CACR on the 68020, the chip long write when the
+low word does not follow, address error on an odd PC and the RTE format
+error, MOVES in user mode, and the 68030 MMU bus error with RTE continuation.
+Adaptations: `AmigaCD.sv` takes the 3-bit cpucfg; the save state path writes
+the new `a7_live` with A7 and restores the M bit's shadow (`preMmode`) with
+SR -- MSP/ISP are not in the vector, so a state saved with M set is wrong,
+which AmigaOS never does; save states stay refused on the 68030, with or
+without its MMU.
 
 ## Sync 2026-10-16: six of seven taken, two of them adapted, one not taken
 
