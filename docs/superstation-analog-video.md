@@ -31,8 +31,10 @@ colour on 60 Hz screens; without it they get NTSC colour.
 tri-states the analog video and audio pins (`av_dis`). It must be off for any
 analog output. On boards where the MCP23009 I/O expander is detected
 (`mcp_en`), the switch is ignored and the expander's mode bit decides instead.
-If composite and RGB both show a picture, whatever position the switch is in is
-the right one.
+On the SuperStation the switches are on the right side of the case. The
+working setup was confirmed with all four down. Whether down means off there,
+and whether those switches are wired to `SW[3:0]` at all, has not been checked:
+flipping SW3 and watching whether analog goes dark would settle both.
 
 ## When composite loses colour
 
