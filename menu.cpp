@@ -7479,7 +7479,7 @@ void HandleUI(void)
 		//             68030: no MMU (upstream 60a868f; the clocks are gone).
 		//   bit  4    was this fork's D-Cache; the core no longer reads it.
 		// Upstream drops the unthrottled 68020 and moves such configs to the
-		// 68030 at 56.7MHz. This fork keeps it -- it is CPU Turbo On, the
+		// 68030 no MMU (0x22, since 60a868f). This fork keeps it -- it is CPU Turbo On, the
 		// default since 4b4f604 -- and the RTL still runs it (cpucfg 011).
 		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
 		OsdWrite(m++, s, menusub == 0, 0);

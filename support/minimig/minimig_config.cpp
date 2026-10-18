@@ -827,6 +827,16 @@ int minimig_mgl_config_block(char *out, size_t outsz, const char *indent)
 	return mglcfg_format(out, outsz, &minimig_config, mm_cfg_fields, mm_cfg_nfields, extra, 1, indent);
 }
 
+// The 64M and 128M Zorro III boards are gone from the core (upstream 60a868f):
+// a memory byte holding either (bits 7 and 5) becomes 256M, as upstream's
+// does. Idempotent -- bit 5 is clear afterwards -- so it is safe on both paths
+// that can bring the removed sizes in: a config file and a .mgl.
+static void minimig_fold_removed_fastram()
+{
+	if ((minimig_config.memory & 0xa0) == 0xa0)
+		minimig_config.memory &= ~0x30;
+}
+
 // Apply the launching .mgl's <amigacd_config>, if there is one, over the config
 // just loaded. Once per process: only the boot load is a launch from the file;
 // the Configs page and the System row load other files on purpose.
@@ -862,6 +872,9 @@ static void minimig_mgl_config_apply()
 	else minimig_set_extrom(extrom);
 
 	memcpy(minimig_config.id, "MNMGCFG0", sizeof(minimig_config.id));
+	// A .mgl written by an e836aea-era build can carry a removed FastRAM size
+	// just as a config file can, and it is applied after the file's own fold.
+	minimig_fold_removed_fastram();
 	printf("MGL config: %d settings applied from %s (%d unknown, %d bad)\n",
 	       applied, m->xml_path, unknown, bad);
 }
@@ -1586,9 +1599,12 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 	//
 	// The FastRAM half of 60a868f is taken: the 64M and 128M Zorro III boards
 	// are gone from the core, and a config saved with either (memory bits 7
-	// and 5) opens with 256M, as upstream's does.
-	if (result && (minimig_config.memory & 0xa0) == 0xa0)
-		minimig_config.memory &= ~0x30;
+	// and 5) opens with 256M, as upstream's does. The fold is
+	// minimig_fold_removed_fastram(), run here and again at the end of
+	// minimig_mgl_config_apply(): a .mgl written by an e836aea-era build can
+	// carry the removed sizes too, and applied after this fold alone it
+	// reopened them.
+	if (result) minimig_fold_removed_fastram();
 
 	if (!result) {
 		BootPrint("Can not open configuration file!\n");
