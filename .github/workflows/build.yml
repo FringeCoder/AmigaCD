@@ -305,3 +305,12 @@ jobs:
       # sign of it is a machine that will not boot the thing you were testing.
       - name: Run native unit tests
         run: make -C tests
+
+      # The same compiled tests under ASan and UBSan. Some of what they guard is
+      # undefined behaviour that glibc happens to get right: mgl_rbf.cpp's
+      # memmove of a tail that overlaps itself passes every check above as
+      # memcpy too, and only a sanitiser sees the overlap (docs/state-todo.md
+      # U5). Every finding is fatal. Falsified 2026-10-19: that memmove -> memcpy
+      # fails here with memcpy-param-overlap and passes the step above.
+      - name: Run native unit tests under sanitizers
+        run: make -C tests sanitize

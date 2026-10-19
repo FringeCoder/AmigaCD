@@ -75,6 +75,7 @@ build/
 # tracked file ignores .gitignore -- so every `make -C tests` dirtied the tree
 # and one of them rode along in an unrelated commit.
 tests/build/
+tests/build-san/
 compile_commands.json
 
 # The clangd index, written by the editor and the language server, not by us.
