@@ -119,3 +119,40 @@ See "Still to do" in [`docs/integration-plan.md`](docs/integration-plan.md).
 | Comparing the core against real hardware | [`docs/vamigats.md`](docs/vamigats.md), [`docs/timing-probe.md`](docs/timing-probe.md) |
 | What still needs testing on a machine | [`docs/hardware-test-plan.md`](docs/hardware-test-plan.md) |
 | Open items that are not hardware verification | [`docs/state-todo.md`](docs/state-todo.md) |
+
+## Getting online over serial (PPP)
+
+The cardless way online: the Amiga's serial port (Paula) is wired to MiSTer's
+UART, and MiSTer's Linux runs the other end of a PPP link. It is much slower
+than the core's A2065 Ethernet card (see "Ethernet (A2065)" in
+[FringeCoder/AmigaCD_MiSTer](https://github.com/FringeCoder/AmigaCD_MiSTer)'s
+README) -- the port runs at 115200 or 230400 baud, about 11 or 23 KB/s before
+PPP's overhead -- but it needs nothing in the Ethernet menu and works on any
+MiSTer.
+
+On MiSTer, in the OSD:
+- open the core's system settings page (the one with "Define buttons" and
+  "Button/Key remap") and choose **UART mode**;
+- set **Connection** to **PPP** and **Baud** to 115200 or 230400 (the core
+  offers those two);
+- the choice is saved per core (`uartmode.AmigaCD` in MiSTer's config folder).
+  "Reset UART connection" restarts the Linux side if the link hangs.
+
+Choosing a mode makes the menu run MiSTer Linux's `uartmode` script
+(`user_io.cpp`, `SetUARTMode`), which starts the Linux end of the link. What
+that script runs, and the addresses it hands out, belong to the MiSTer Linux
+image rather than to this repository -- see the MiSTer documentation for its
+PPP mode. [`docs/timing-probe.md`](docs/timing-probe.md) shows how to check on
+the MiSTer which mode is active and what holds the serial device.
+
+On Amiga:
+- install a TCP/IP stack with PPP over `serial.device`: MiamiDX has PPP built
+  in; Roadshow or AmiTCP need a SANA-II PPP driver from Aminet;
+- set the serial device to the same baud as the OSD, 8N1, with RTS/CTS
+  hardware handshaking (the core wires RTS and CTS through);
+- dial with no phone number or modem init string (it is a direct link) and
+  let PPP negotiate the address.
+
+Not yet verified on this fork: which Amiga PPP stacks negotiate cleanly with
+MiSTer's end, and whether 230400 holds without overruns on a 68000. Record
+what works here.

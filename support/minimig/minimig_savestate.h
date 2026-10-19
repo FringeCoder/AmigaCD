@@ -30,11 +30,12 @@
 // Where the mask goes in a 1.3 payload: after the Kickstart fingerprint (one
 // word), the state vector and the 256 shadow entries (two per word). The
 // state vector width is `SS_STATE_W in the core's rtl/ss_state.vh, 2093 bits
-// as of 1.4, and this constant has to move with it -- tests/test_savestate_
-// format.cpp pins it, and the core's ss_ctrl_tb pins the same number from the
-// RTL side.
+// as of 1.4 and 2099 since SFC/DFC went into its padding (2026-10-18, same
+// word count, no version change), and this constant has to move with it --
+// tests/test_savestate_format.cpp pins it, and the core's ss_ctrl_tb pins the
+// same number from the RTL side.
 #define SS_KICK_META_WORDS   1u
-#define SS_STATE_WORDS       66u              // (2093 + 31) / 32
+#define SS_STATE_WORDS       66u              // (2099 + 31) / 32
 #define SS_SHADOW_ENTRIES    256u
 #define SS_MASK_WORDS        8u               // 256 bits
 #define SS_MASK_OFFSET_13    (SS_KICK_META_WORDS + SS_STATE_WORDS + SS_SHADOW_ENTRIES / 2u)
