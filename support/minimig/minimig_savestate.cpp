@@ -74,10 +74,40 @@ int ss_upgrade_13_to_14(uint32_t *win, uint32_t win_words)
 	for (uint32_t i = 0; i < SS_MASK_WORDS; i++) at[i] = 0xFFFFFFFFu;
 
 	win[1] = length + SS_MASK_WORDS;
-	win[3] = SS_VERSION;
+	win[3] = SS_VERSION_14;
 	win[4] = (uint32_t)(core_words + SS_MASK_WORDS);
 	win[6] = crc32_compute((const uint8_t *)&win[8], (int)((core_words + SS_MASK_WORDS) * 4));
 	// The host block moved with the tail; its own words and CRC are unchanged.
+	return 1;
+}
+
+int ss_upgrade_14_to_15(uint32_t *win, uint32_t win_words)
+{
+	if (!win || win_words < 8) return 0;
+	if (win[2] != SS_MAGIC || win[3] != SS_VERSION_14) return 0;
+
+	// The same bounds ss_header_parse applies, on the 1.4 numbers.
+	uint64_t core_words = win[4];
+	uint64_t host_words = win[5];
+	uint32_t length     = win[1];
+	if (length < SS_HEADER_TAIL_WORDS) return 0;
+	if (length > win_words - 2) return 0;
+	if (core_words + host_words != (uint64_t)length - SS_HEADER_TAIL_WORDS) return 0;
+	if (8u + core_words + host_words + SS_MMU_WORDS > win_words) return 0;
+	if (core_words < SS_MMU_OFFSET_14) return 0;
+	if (crc32_compute((const uint8_t *)&win[8], (int)(core_words * 4)) != win[6]) return 0;
+
+	// Open the MMU words at the end of the state section; everything after
+	// moves up. Zero is TC with translation off.
+	uint32_t *at   = &win[8 + SS_MMU_OFFSET_14];
+	uint64_t  tail = core_words + host_words - SS_MMU_OFFSET_14;
+	memmove(at + SS_MMU_WORDS, at, (size_t)(tail * 4));
+	for (uint32_t i = 0; i < SS_MMU_WORDS; i++) at[i] = 0;
+
+	win[1] = length + SS_MMU_WORDS;
+	win[3] = SS_VERSION;
+	win[4] = (uint32_t)(core_words + SS_MMU_WORDS);
+	win[6] = crc32_compute((const uint8_t *)&win[8], (int)((core_words + SS_MMU_WORDS) * 4));
 	return 1;
 }
 

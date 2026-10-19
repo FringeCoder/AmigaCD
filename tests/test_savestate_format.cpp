@@ -138,8 +138,13 @@ int main(void)
 
 		check("1.3 is refused as-is", !ss_header_parse(win, SS_MAX_WORDS, &h));
 		check("upgrade accepts a valid 1.3", ss_upgrade_13_to_14(win, SS_MAX_WORDS) == 1);
-		check("upgraded header parses", ss_header_parse(win, SS_MAX_WORDS, &h));
-		check("version is 1.4", h.version == SS_VERSION);
+		// A 1.4 image is not what the core reads (ss_header_parse wants 1.5),
+		// so this step is checked on the header words themselves.
+		h.length = win[1]; h.version = win[3]; h.core_words = win[4];
+		h.host_words = win[5]; h.core_crc32 = win[6]; h.host_crc32 = win[7];
+		check("version is 1.4", h.version == SS_VERSION_14);
+		check("core crc follows the insert",
+		      crc32_compute((const uint8_t *)&win[8], h.core_words * 4) == h.core_crc32);
 		check("core grew by the mask", h.core_words == core13 + SS_MASK_WORDS);
 		check("length grew by the mask", h.length == 6 + core13 + SS_MASK_WORDS + hostw);
 		check("mask word 0 is all ones", win[8 + SS_MASK_OFFSET_13] == 0xFFFFFFFFu);
@@ -152,7 +157,12 @@ int main(void)
 		check("host crc still matches",
 		      crc32_compute((const uint8_t *)&win[ss_host_block_offset(&h)], hostw * 4) == h.host_crc32);
 		check("a second upgrade is a no-op", ss_upgrade_13_to_14(win, SS_MAX_WORDS) == 0);
-		check("still parses after the no-op", ss_header_parse(win, SS_MAX_WORDS, &h));
+		check("still 1.4 after the no-op", win[3] == SS_VERSION_14);
+		// And on to 1.5, which the core reads: the 1.3 file takes both steps.
+		check("the 1.4 it became upgrades to 1.5", ss_upgrade_14_to_15(win, SS_MAX_WORDS) == 1);
+		check("a 1.3 file parses after both steps", ss_header_parse(win, SS_MAX_WORDS, &h));
+		check("mask now sits eight words further on",
+		      win[8 + SS_MASK_OFFSET_13 + SS_MMU_WORDS] == 0xFFFFFFFFu);
 
 		// Refusals leave the image alone.
 		build_window(win, core13); win[3] = SS_VERSION_13; win[9] ^= 1;
@@ -165,9 +175,61 @@ int main(void)
 		check("a payload shorter than the insert point is refused", ss_upgrade_13_to_14(win, SS_MAX_WORDS) == 0);
 
 		// The insert point is a number this test pins on purpose: it is
-		// KICK_META + STATE_WORDS + 128, and STATE_WORDS follows `SS_STATE_W
-		// in rtl/ss_state.vh. If that width changes, this fails first.
+		// KICK_META + the 1.3 state section + 128, a fixed historical layout.
 		check("mask offset is 1 + 66 + 128", SS_MASK_OFFSET_13 == 195u);
+	}
+
+	// ---- 1.4 -> 1.5: the MMU words --------------------------------------
+	//
+	// A 1.4 image with a host block. Eight zero words go in at the end of the
+	// 1.4 state section (SS_MMU_OFFSET_14), everything after moves up eight,
+	// the header follows, and the host block is where the new header says.
+	{
+		const uint32_t core14 = SS_MMU_OFFSET_14 + 300;   // past the insert point
+		const uint32_t hostw  = 3;
+		build_window(win, core14);
+		win[3] = SS_VERSION_14;
+		win[5] = hostw;
+		win[1] = 6 + core14 + hostw;
+		for (uint32_t i = 0; i < hostw; i++) win[8 + core14 + i] = 0x48430000 + i;
+		win[7] = crc32_compute((const uint8_t *)&win[8 + core14], hostw * 4);
+		win[6] = crc32_compute((const uint8_t *)&win[8], core14 * 4);
+
+		uint32_t before_at = win[8 + SS_MMU_OFFSET_14];
+		uint32_t last_core = win[8 + core14 - 1];
+
+		check("1.4 is refused as-is", !ss_header_parse(win, SS_MAX_WORDS, &h));
+		check("a 1.4 is not taken for a 1.3", ss_upgrade_13_to_14(win, SS_MAX_WORDS) == 0);
+		check("upgrade accepts a valid 1.4", ss_upgrade_14_to_15(win, SS_MAX_WORDS) == 1);
+		check("upgraded 1.4 parses", ss_header_parse(win, SS_MAX_WORDS, &h));
+		check("version is 1.5", h.version == SS_VERSION);
+		check("core grew by the MMU words", h.core_words == core14 + SS_MMU_WORDS);
+		check("length grew by the MMU words", h.length == 6 + core14 + SS_MMU_WORDS + hostw);
+		check("MMU word 0 is zero", win[8 + SS_MMU_OFFSET_14] == 0u);
+		check("MMU word 7 is zero", win[8 + SS_MMU_OFFSET_14 + 7] == 0u);
+		check("state word before the insert is untouched",
+		      win[8 + SS_MMU_OFFSET_14 - 1] == 0xA5A50000 + SS_MMU_OFFSET_14 - 1);
+		check("shadow's first word moved up eight", win[8 + SS_MMU_OFFSET_14 + 8] == before_at);
+		check("last core word moved up eight", win[8 + core14 + 8 - 1] == last_core);
+		check("host block at the new offset", win[ss_host_block_offset(&h)] == 0x48430000u);
+		check("host crc still matches",
+		      crc32_compute((const uint8_t *)&win[ss_host_block_offset(&h)], hostw * 4) == h.host_crc32);
+		check("a second 1.5 upgrade is a no-op", ss_upgrade_14_to_15(win, SS_MAX_WORDS) == 0);
+
+		build_window(win, core14); win[3] = SS_VERSION_14; win[9] ^= 1;
+		check("corrupt 1.4 is not upgraded", ss_upgrade_14_to_15(win, SS_MAX_WORDS) == 0);
+		check("and its version is untouched", win[3] == SS_VERSION_14);
+		build_window(win, core14); win[3] = SS_VERSION_14;
+		check("no room for the MMU words is refused", ss_upgrade_14_to_15(win, 8 + core14 + 3) == 0);
+		build_window(win, SS_MMU_OFFSET_14 - 1); win[3] = SS_VERSION_14;
+		win[6] = crc32_compute((const uint8_t *)&win[8], (SS_MMU_OFFSET_14 - 1) * 4);
+		check("a 1.4 shorter than its state section is refused", ss_upgrade_14_to_15(win, SS_MAX_WORDS) == 0);
+
+		// Pinned: the end of the 1.4 state section, and the current section
+		// length, which follows `SS_STATE_W in the core's rtl/ss_state.vh
+		// (2346 bits at 1.5). If the core's width changes, this fails first.
+		check("MMU insert point is 1 + 66", SS_MMU_OFFSET_14 == 67u);
+		check("state section is (2346 + 31) / 32 words", SS_STATE_WORDS == (2346u + 31u) / 32u);
 	}
 
 	if (failures) { printf("%d FAILURE(S)\n", failures); return 1; }
