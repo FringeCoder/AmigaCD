@@ -218,6 +218,9 @@ and adapted in four places, each **a standing divergence**:
 - **`cd32_active()` and the save state guard know the 68030.** A CD32 with a
   68030 is still a CD32 (`cpu & 2`, was `== 3`), and save states are refused
   on it as the core refuses them -- the state vector has no room for the MMU.
+  [Since 2026-10-19 only the 68030 with its MMU is refused; the 68030 no MMU
+  (`cpu & 0x23 == 0x22`) is allowed, as the core now carries the rest of its
+  CACR.]
 
 `drivesounds.bin` is looked for in `games/Amiga` (HomeDir() for the AmigaCD
 core too); the core's release package carries it there.
