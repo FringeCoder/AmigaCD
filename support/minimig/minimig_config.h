@@ -26,6 +26,8 @@ extern const char *config_memory_chip_msg[];
 extern const char *config_memory_slow_msg[];
 extern const char *config_memory_fast_msg[][8];
 extern const char *config_cpu_msg[];
+const char *minimig_cpu030_clock_msg(unsigned char cpu);
+unsigned char minimig_cpu030_clock_step(unsigned char cpu, int minus);
 extern const char *config_chipset_msg[];
 
 typedef struct

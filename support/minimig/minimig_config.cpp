@@ -827,14 +827,40 @@ int minimig_mgl_config_block(char *out, size_t outsz, const char *indent)
 	return mglcfg_format(out, outsz, &minimig_config, mm_cfg_fields, mm_cfg_nfields, extra, 1, indent);
 }
 
-// The 64M and 128M Zorro III boards are gone from the core (upstream 60a868f):
-// a memory byte holding either (bits 7 and 5) becomes 256M, as upstream's
-// does. Idempotent -- bit 5 is clear afterwards -- so it is safe on both paths
-// that can bring the removed sizes in: a config file and a .mgl.
-static void minimig_fold_removed_fastram()
+// Settings the core no longer has, folded onto the nearest it does, as
+// upstream's minimig_cfg_load() folds them (d49cd64). Idempotent, so it is
+// safe on both paths that can bring them in: a config file and a .mgl.
+//   - The 64M and 128M Zorro III boards (60a868f): a memory byte holding
+//     either (bits 7 and 5) becomes 256M.
+//   - The "68030 no MMU" (0x22, 60a868f): every 68030 has its MMU since
+//     ec1353dc, so it becomes the 68030 Fast.
+//   - The 68030 clock bits 7:6 mean something only as 40MHz (01) or 50MHz
+//     (10) on a 68030, and are cleared everywhere else.
+// NOT folded: the unthrottled 68020 (0x03), which upstream sends to the
+// 68030 Fast and this fork keeps as CPU Turbo On -- see minimig_cfg_load().
+static void minimig_fold_removed()
 {
 	if ((minimig_config.memory & 0xa0) == 0xa0)
 		minimig_config.memory &= ~0x30;
+	if ((minimig_config.cpu & 0x23) == 0x22)
+		minimig_config.cpu &= ~0x20;
+	if ((minimig_config.cpu & 0xe3) != 0x42 && (minimig_config.cpu & 0xe3) != 0x82)
+		minimig_config.cpu &= ~0xc0;
+}
+
+// The 68030's clock, CPU byte bits 7:6 (upstream d49cd64), for the menus.
+const char *minimig_cpu030_clock_msg(unsigned char cpu)
+{
+	return ((cpu & 0xc0) == 0x40) ? "40MHz" : ((cpu & 0xc0) == 0x80) ? "50MHz" : "Fast";
+}
+
+// One step of the 68030's clock in upstream's order, 40MHz -> 50MHz -> Fast.
+unsigned char minimig_cpu030_clock_step(unsigned char cpu, int minus)
+{
+	static const unsigned char clk[3] = { 0x40, 0x80, 0x00 };
+	int at = ((cpu & 0xc0) == 0x40) ? 0 : ((cpu & 0xc0) == 0x80) ? 1 : 2;
+	at = (at + (minus ? 2 : 1)) % 3;
+	return (cpu & 0x3f) | clk[at];
 }
 
 // Apply the launching .mgl's <amigacd_config>, if there is one, over the config
@@ -872,9 +898,9 @@ static void minimig_mgl_config_apply()
 	else minimig_set_extrom(extrom);
 
 	memcpy(minimig_config.id, "MNMGCFG0", sizeof(minimig_config.id));
-	// A .mgl written by an e836aea-era build can carry a removed FastRAM size
-	// just as a config file can, and it is applied after the file's own fold.
-	minimig_fold_removed_fastram();
+	// A .mgl written by an older build can carry a removed setting just as a
+	// config file can, and it is applied after the file's own fold.
+	minimig_fold_removed();
 	printf("MGL config: %d settings applied from %s (%d unknown, %d bad)\n",
 	       applied, m->xml_path, unknown, bad);
 }
@@ -1587,24 +1613,23 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		else printf("Wrong configuration file size: %d (expected: %u)\n", size, sizeof(minimig_config));
 	}
 
-	// Upstream e836aea moves a config with the unthrottled 68020 -- cpu bits
-	// 1:0 = 3 with bit 5 clear -- to the 68030 at 56.7MHz here, because its
-	// menu no longer offers that 68020. This fork does: it is CPU Turbo On,
-	// the default for the CD32 and A1200 profiles since 4b4f604, and the core
+	// Upstream d49cd64 moves a config with the unthrottled 68020 -- cpu bits
+	// 1:0 = 3 with bit 5 clear -- to the 68030 Fast here, because its menu no
+	// longer offers that 68020. This fork does: it is CPU Turbo On, the
+	// default for the CD32 and A1200 profiles since 4b4f604, and the core
 	// still runs it (cpucfg 011: TG68K as a 68020, 32-bit, no cycle model).
-	// Taking the migration would turn every CD32 on a card into a 68030, which
-	// the save states refuse and cd32_active() did not recognise, on a load
-	// nobody asked to change anything. Not taken -- nor upstream 60a868f's
-	// version of it, which sends the same configs to the 68030 no MMU.
+	// Taking the migration would turn every CD32 on a card into a 68030 on a
+	// load nobody asked to change anything. Not taken, as e836aea's and
+	// 60a868f's versions of it were not.
 	//
-	// The FastRAM half of 60a868f is taken: the 64M and 128M Zorro III boards
-	// are gone from the core, and a config saved with either (memory bits 7
-	// and 5) opens with 256M, as upstream's does. The fold is
-	// minimig_fold_removed_fastram(), run here and again at the end of
-	// minimig_mgl_config_apply(): a .mgl written by an e836aea-era build can
-	// carry the removed sizes too, and applied after this fold alone it
-	// reopened them.
-	if (result) minimig_fold_removed_fastram();
+	// The rest of it is: the "68030 no MMU" of 60a868f (0x22) is gone from
+	// the core (ec1353dc -- every 68030 has its MMU) and opens as the 68030
+	// Fast, and the clock bits 7:6 are kept only on a 68030 40MHz or 50MHz.
+	// So is the FastRAM half: a config saved with the removed 64M or 128M
+	// board (memory bits 7 and 5) opens with 256M. Both folds run here and
+	// again at the end of minimig_mgl_config_apply(): a .mgl written by an
+	// older build can carry the removed values too.
+	if (result) minimig_fold_removed();
 
 	if (!result) {
 		BootPrint("Can not open configuration file!\n");
