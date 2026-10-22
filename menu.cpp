@@ -623,11 +623,11 @@ static int minimig_fast_z3(unsigned char cpu)
 static int minimig_ss_blocked()
 {
 	int fastram = ((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5);
-	// The 68030 (CPU bits 10) is refused in RTL as well, since upstream
-	// e836aea/26eb46a: the state vector has no room for its MMU, the upper
-	// CACR bits, CAAR, MSP or ISP. See ss_supported in AmigaCD.sv.
+	// The 68030 is allowed, with or without its MMU, since format 1.5 put the
+	// MMU registers and the rest of CACR in the state (see ss_supported in
+	// AmigaCD.sv). The 68000 (fx68k) and Zorro III fast RAM stay refused.
 	int cpu = minimig_config.cpu & 0x03;
-	return (minimig_fast_z3(minimig_config.cpu) && fastram >= 4) || (cpu == 0) || (cpu == 2);
+	return (minimig_fast_z3(minimig_config.cpu) && fastram >= 4) || (cpu == 0);
 }
 
 // Ask the core for a save, from either menu.
@@ -8438,7 +8438,7 @@ void HandleUI(void)
 			static const char *const tips[] =
 			{
 				/* 0 FastRAM  */ "Zorro II and Zorro III fast RAM. Z3 and 68000 both stop save states working, and grey those rows out when selected.",
-				/* 1 CPU      */ "The machine's 68020, or a 68030 at full speed, with or without its MMU. No FPU; save states need the 68020.",
+				/* 1 CPU      */ "The machine's 68020, or a 68030 at full speed, with or without its MMU. No FPU. Save states work on both.",
 				/* 2 CPU Turbo*/ "Run the 68020 at full speed rather than throttled to the stock rate. Only available when the CPU is an 020.",
 				/* 3 Main ROM */ "The Kickstart. Amiga Forever ROMs work as they are, encrypted, as long as ROM.KEY sits beside them.",
 				/* 4 Ext ROM  */ "The extended ROM, which a CD32 needs to boot a disc. Minus clears the pairing.",

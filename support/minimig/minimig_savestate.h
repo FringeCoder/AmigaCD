@@ -24,21 +24,33 @@
 // 1.4. That is the only backward step this format has ever taken, and the
 // reason it could: the core's payload layout is fixed, so the insert point is
 // a constant.
-#define SS_VERSION    0x00010004u   // major 1, minor 4
+// 1.5 added the 68030's MMU registers to the core's state vector, which grew
+// the state section from 66 words to 74. The new fields are the top of the
+// vector, so the eight words are the END of the state section, and
+// ss_upgrade_14_to_15() inserts them as zeros -- TC zero, translation off,
+// which is the machine every 1.4 file describes (1.4 refused the 68030's MMU).
+// The core reads only 1.5; the host upgrades 1.3 to 1.4 to 1.5 in turn.
+#define SS_VERSION    0x00010005u   // major 1, minor 5
+#define SS_VERSION_14 0x00010004u   // the last layout without the MMU
 #define SS_VERSION_13 0x00010003u   // the last layout without a mask
 
 // Where the mask goes in a 1.3 payload: after the Kickstart fingerprint (one
 // word), the state vector and the 256 shadow entries (two per word). The
-// state vector width is `SS_STATE_W in the core's rtl/ss_state.vh, 2093 bits
-// as of 1.4 and 2099 since SFC/DFC went into its padding (2026-10-18, same
-// word count, no version change), and this constant has to move with it --
-// tests/test_savestate_format.cpp pins it, and the core's ss_ctrl_tb pins the
-// same number from the RTL side.
+// state vector width is `SS_STATE_W in the core's rtl/ss_state.vh: 2093 bits
+// at 1.3 and 1.4, 2099 and then 2106 as SFC/DFC and the upper CACR went into
+// its padding (no word count change), and 2346 at 1.5 with the MMU. These
+// constants describe the layouts they upgrade FROM, so they do not move with
+// the core any more; SS_STATE_WORDS is the current one, which does --
+// tests/test_savestate_format.cpp pins both.
 #define SS_KICK_META_WORDS   1u
-#define SS_STATE_WORDS       66u              // (2099 + 31) / 32
+#define SS_STATE_WORDS_14    66u              // 1.3 and 1.4: (2106 + 31) / 32
+#define SS_STATE_WORDS       74u              // 1.5: (2346 + 31) / 32
+#define SS_MMU_WORDS         (SS_STATE_WORDS - SS_STATE_WORDS_14)
 #define SS_SHADOW_ENTRIES    256u
 #define SS_MASK_WORDS        8u               // 256 bits
-#define SS_MASK_OFFSET_13    (SS_KICK_META_WORDS + SS_STATE_WORDS + SS_SHADOW_ENTRIES / 2u)
+#define SS_MASK_OFFSET_13    (SS_KICK_META_WORDS + SS_STATE_WORDS_14 + SS_SHADOW_ENTRIES / 2u)
+// Where the MMU words go in a 1.4 payload: the end of its state section.
+#define SS_MMU_OFFSET_14     (SS_KICK_META_WORDS + SS_STATE_WORDS_14)
 
 // 12 MB slot / 4 bytes per word. The slot grew from 4 MB when Zorro II fast
 // RAM joined the payload: 2 MB chip + 1.5 MB slow + 8 MB fast is 11.5 MB, and
@@ -68,6 +80,12 @@ typedef struct
 // was not a valid 1.3 file or would not fit (in which case it is untouched);
 // a 1.4 image is left alone and also returns 0.
 int ss_upgrade_13_to_14(uint32_t *win, uint32_t win_words);
+
+// Upgrades a 1.4 image in place to 1.5 by inserting the MMU words, all zero,
+// at the end of the state section. Same contract as above: 1 if upgraded, 0
+// (and untouched) otherwise. Run it after ss_upgrade_13_to_14() so a 1.3 file
+// takes both steps.
+int ss_upgrade_14_to_15(uint32_t *win, uint32_t win_words);
 
 // Validates magic, version, bounds and the core payload CRC. Returns false and
 // leaves *out untouched on any failure. A window the host memset and then

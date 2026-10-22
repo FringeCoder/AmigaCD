@@ -47,9 +47,22 @@ TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_cryp
 # is checked after the push that broke it.
 SHELL_TESTS = test_deploy_core_prune.sh test_deploy_menu_check.sh test_release_notes.sh
 
-.PHONY: all clean shell-tests
-all: shell-tests $(addprefix $(BUILDDIR)/,$(TESTS))
+.PHONY: all clean shell-tests compiled sanitize
+all: shell-tests compiled
+
+compiled: $(addprefix $(BUILDDIR)/,$(TESTS))
 	@for t in $(TESTS); do echo "== $$t"; $(BUILDDIR)/$$t || exit 1; done
+
+# The compiled tests again under AddressSanitizer and UndefinedBehaviorSanitizer,
+# in a build directory of their own. Some of what these tests guard is
+# undefined behaviour that glibc happens to get right -- mgl_rbf.cpp's memmove
+# of a tail that overlaps itself passes as memcpy too, and no ordinary check can
+# tell (docs/state-todo.md U5) -- and ASan's memcpy interceptor reports the
+# overlap itself. -fno-sanitize-recover makes every finding fatal, so a report
+# cannot scroll past in a green run.
+SAN_FLAGS = -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+sanitize:
+	@$(MAKE) --no-print-directory BUILDDIR=build-san CXXFLAGS="$(CXXFLAGS) $(SAN_FLAGS)" compiled
 
 shell-tests:
 	@for t in $(SHELL_TESTS); do echo "== $$t"; bash $$t || exit 1; done
@@ -61,4 +74,4 @@ $(BUILDDIR)/%: %.cpp $(SRC)
 -include $(addprefix $(BUILDDIR)/,$(addsuffix .d,$(TESTS)))
 
 clean:
-	rm -rf $(BUILDDIR)
+	rm -rf $(BUILDDIR) build-san

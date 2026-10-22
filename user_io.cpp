@@ -2281,12 +2281,17 @@ int process_ss(const char *rom_name, int enable)
 						FileClose(&f);
 						printf("process_ss: read %d bytes from file: %s\n", ret, ss_name);
 
-						// A 1.3 file has no WRITTEN mask. Insert one here, in
-						// the window, before the core reads any of it -- every
-						// bit set, which replays exactly what 1.3 replayed. The
-						// core knows only 1.4. See ss_upgrade_13_to_14().
+						// Older files are upgraded here, in the window, before
+						// the core reads any of it; the core knows only 1.5. A
+						// 1.3 file has no WRITTEN mask (inserted with every bit
+						// set, which replays exactly what 1.3 replayed), and a
+						// 1.4 file no MMU words (inserted as zero: translation
+						// off). A 1.3 file takes both steps. See
+						// ss_upgrade_13_to_14() and ss_upgrade_14_to_15().
 						if (ss_upgrade_13_to_14((uint32_t *)ss_base_win[i], len / 4))
-							printf("process_ss: upgraded a 1.3 state in place: %s\n", ss_name);
+							printf("process_ss: upgraded a 1.3 state to 1.4 in place: %s\n", ss_name);
+						if (ss_upgrade_14_to_15((uint32_t *)ss_base_win[i], len / 4))
+							printf("process_ss: upgraded a 1.4 state to 1.5 in place: %s\n", ss_name);
 					}
 				}
 				*(uint32_t*)(ss_base_win[i]) = 0xFFFFFFFF;

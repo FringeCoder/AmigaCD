@@ -155,7 +155,7 @@ OSD closes before adjust mode begins, which is exactly why the arrows reach the
 core. There is no menu surface to draw a readout on. Do not re-attempt it; the
 values are in the `Stored` toast instead.
 
-## U5 — `tests/test_mgl_rbf.cpp` cannot catch a `memmove` -> `memcpy` change  [HOST]
+## U5 — `tests/test_mgl_rbf.cpp` cannot catch a `memmove` -> `memcpy` change  [HOST]  — **DONE 2026-10-19**
 
 `tests/test_mgl_rbf.cpp:9` records it: the old and new `<rbf>` names overlap
 whenever they differ in length, which makes `memcpy` undefined behaviour — but
@@ -165,6 +165,15 @@ cannot depend on undefined behaviour misbehaving.
 The `memmove` is correct by the standard and unverified by the suite. The ARM
 build is where it would differ, if anywhere. Recorded rather than solved because
 the honest options are a sanitiser run or nothing.
+
+**Done with the sanitiser run.** `make -C tests sanitize` rebuilds the compiled
+tests under ASan and UBSan (`-fno-sanitize-recover=all`, so any finding fails
+the run) into `tests/build-san/`, and CI runs it after the plain tests. ASan's
+`memcpy` interceptor checks the overlap itself, so the outcome no longer
+depends on what glibc does. Falsified 2026-10-19: with the `memmove` changed to
+`memcpy`, the plain run still passes every check and the sanitised run stops at
+`AddressSanitizer: memcpy-param-overlap` in `test_mgl_rbf`. Every other test
+was clean under both sanitisers the first time it ran.
 
 ## U6 — Main_MiSTer's floppy config struct diverges from ours, permanently  [no code]
 

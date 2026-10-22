@@ -6,13 +6,12 @@
 // keypress whose stated purpose is to fix a path. So the check that matters is
 // not "does it change the rbf" but "does it change ONLY the rbf".
 //
-// ONE MUTATION THIS DOES NOT CATCH, recorded so the coverage is not mistaken
-// for complete: changing the implementation's memmove to memcpy leaves every
-// check below passing. The two regions overlap whenever the old and new names
-// differ in length, which makes memcpy undefined behaviour -- but on this host
-// glibc happens to produce the right answer anyway, and a test cannot depend on
-// undefined behaviour misbehaving. The memmove is correct by the standard and
-// unverified by this file; the ARM build is where it would differ, if anywhere.
+// ONE MUTATION THE CHECKS BELOW DO NOT CATCH: changing the implementation's
+// memmove to memcpy leaves every one of them passing. The two regions overlap
+// whenever the old and new names differ in length, which makes memcpy undefined
+// behaviour -- but glibc happens to produce the right answer anyway, and a test
+// cannot depend on undefined behaviour misbehaving. `make sanitize` catches it
+// instead: ASan's memcpy interceptor reports the overlap (docs/state-todo.md U5).
 
 #include <stdio.h>
 #include <string.h>
