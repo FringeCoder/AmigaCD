@@ -46,6 +46,8 @@ module ss_quiesce
 	input       frame_tick,
 
 	output reg  freeze,
+	// freeze as it will be after this edge, for ss_ctrl's port_own lookahead.
+	output      freeze_n,
 	output reg  quiesced,
 	output reg  timeout
 );
@@ -54,22 +56,28 @@ wire quiet = ~blit_busy & ~disk_busy & ~audio_busy & cpu_boundary;
 
 reg [7:0] frames;
 
+// freeze's next state, spelled out so ss_ctrl can register port_own from it.
+// freeze is loaded from this same wire, so the two cannot disagree; the logic
+// is the block below's, unchanged.
+assign freeze_n = !rst_n                         ? 1'b0 :
+                  !req                           ? 1'b0 :
+                  (!freeze && !timeout && quiet) ? 1'b1 :
+                                                   freeze;
+always @(posedge clk) freeze <= freeze_n;
+
 always @(posedge clk) begin
 	if (!rst_n) begin
-		freeze   <= 1'b0;
 		quiesced <= 1'b0;
 		timeout  <= 1'b0;
 		frames   <= 8'd0;
 	end
 	else if (!req) begin
-		freeze   <= 1'b0;
 		quiesced <= 1'b0;
 		timeout  <= 1'b0;
 		frames   <= 8'd0;
 	end
 	else if (!freeze && !timeout) begin
 		if (quiet) begin
-			freeze   <= 1'b1;
 			quiesced <= 1'b1;
 		end
 		else if (frame_tick) begin

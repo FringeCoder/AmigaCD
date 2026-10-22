@@ -414,8 +414,22 @@ always @(posedge clk) begin
 	mask_sel_q <= rd_addr[8];
 end
 
-assign rd_data     = mask_sel_q                ? mask_q :
-                     setclear(rd_addr[7:0])   ? `SC_REG(rd_addr[7:0]) : mem_q;
+// The set/clear registers answer from the same clock edge, so nothing on the
+// readback is combinational on rd_addr any more. As a comb select it was the one
+// path from ss_ctrl's address register through to ss_ctrl's sample flop that the
+// registered array read did not break, and the SDC carried a multicycle for it.
+// r_dmacon/r_intena/r_adkcon do not move while the machine is frozen for a save,
+// and ss_ctrl holds the address for SS_HOLD_MAX+1 clk_114 cycles before it
+// samples, so the registered value is the one the comb select gave.
+reg        sc_sel_q;
+reg [15:0] sc_val_q;
+always @(posedge clk) begin
+	sc_sel_q <= setclear(rd_addr[7:0]);
+	sc_val_q <= `SC_REG(rd_addr[7:0]);
+end
+
+assign rd_data     = mask_sel_q ? mask_q :
+                     sc_sel_q   ? sc_val_q : mem_q;
 assign rd_writable = writable(rd_addr[7:0]);
 assign rd_setclear = setclear(rd_addr[7:0]);
 

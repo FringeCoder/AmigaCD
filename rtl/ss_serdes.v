@@ -70,16 +70,36 @@ module ss_serdes
 localparam WORDS   = (WIDTH + 31) / 32;
 localparam PADDED  = WORDS * 32;
 
-// Despite the name, this is not physically shifted: each word is read from
-// or written to shifter[count*32 +: 32] directly. An actual shift-by-32
-// register (`shifter <= {32'd0, shifter[PADDED-1:32]}` /
-// `shifter <= {word_in, shifter[PADDED-1:32]}`) was the first cut, but for
-// WORDS == 1 (WIDTH <= 32, which includes this module's own default
-// parameter) PADDED == 32 and PADDED-1:32 is 31:32 -- an out-of-order
-// part-select that Icarus rejects at elaboration, not just at run time, so
-// the single-word case could never even compile. Indexed part-selects
-// addressed by `count` have no such degenerate width.
+// A real shift register: a save shifts the vector out of the bottom 32 bits,
+// a load shifts each word in at the top, so after WORDS words word k sits at
+// shifter[k*32 +: 32] -- the same place the old indexed write put it.
+//
+// It used to be addressed instead (shifter[count*32 +: 32] for both
+// directions), because a literal shift by 32 is the reversed part-select
+// [31:32] when WORDS == 1, which Icarus rejects at elaboration. That cost the
+// fit: a ~50-way word mux on count into word_out and a count decode into the
+// enable of every one of ~1500 shifter bits, both clk_114 paths that missed
+// setup after the 68030 merge. The degenerate width is handled below with a
+// generate instead. rtl/sim/ssserdes proves the outputs cycle-identical to the
+// addressed version.
+//
+// One difference, and why it is invisible: the old shifter still held the
+// saved vector after a save; this one has shifted it out. Nothing reads
+// shifter after a save -- state_out is only taken on a completed load, which
+// has overwritten every word. (Starting a save and a load on the same cycle
+// ran both directions at once in either version; ss_ctrl never does it.)
 reg [PADDED-1:0] shifter;
+wire [PADDED-1:0] shifted_out;   // shifter after one word has gone out of the bottom
+wire [PADDED-1:0] shifted_in;    // shifter after word_in has come in at the top
+generate
+	if (WORDS == 1) begin : g_one
+		assign shifted_out = {PADDED{1'b0}};
+		assign shifted_in  = word_in;
+	end else begin : g_many
+		assign shifted_out = {32'd0, shifter[PADDED-1:32]};
+		assign shifted_in  = {word_in, shifter[PADDED-1:32]};
+	end
+endgenerate
 reg [15:0]       count;
 reg              saving;
 reg              save_finish;   // last word_valid emitted; save_done due next cycle
@@ -116,7 +136,8 @@ always @(posedge clk) begin
 			save_finish <= 1'b0;
 		end
 		else if (saving) begin
-			word_out   <= shifter[count*32 +: 32];
+			word_out   <= shifter[31:0];
+			shifter    <= shifted_out;
 			word_valid <= 1'b1;
 			count      <= count + 16'd1;
 			if (count == (WORDS - 1)) begin
@@ -142,7 +163,7 @@ always @(posedge clk) begin
 			load_finish <= 1'b0;
 		end
 		else if (loading && word_in_valid) begin
-			shifter[count*32 +: 32] <= word_in;
+			shifter                 <= shifted_in;
 			count                   <= count + 16'd1;
 			if (count == (WORDS - 1)) begin
 				loading    <= 1'b0;
