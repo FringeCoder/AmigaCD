@@ -19,7 +19,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `d3b8537` "Adds PCFX system support (#1365)" -- **three of four taken (one adapted), see "Sync 2026-10-17"** | 2026-10-17 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `0c98d24` "Minimig: draw FDD Turbo at its own line in System (#1379)" -- **upstream rewrote its history; content-merged from `d3b8537`, see "Sync 2026-10-22"** | 2026-10-22 |
+| ^ previous merge base, superseded 2026-10-22 (**no longer on upstream's master**) | | `d3b8537` "Adds PCFX system support (#1365)" -- three of four taken (one adapted), see "Sync 2026-10-17" | 2026-10-17 |
 | ^ previous merge base, superseded 2026-10-17 | | `e836aea` "Minimig: 68030 with its clocks..." -- six of seven taken (two adapted), see "Sync 2026-10-16" | 2026-10-16 |
 | ^ previous merge base, superseded 2026-10-16 | | `738cb7a` "Release 20261010." | 2026-10-11 |
 | ^ previous merge base, superseded 2026-10-11 | | `42e6400` "input: Add X-Gunner lightgun support (#1348)" | 2026-10-09 |
@@ -28,7 +29,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `0bf2ab1` "68020/68030 fixes and the 68030 MMU bus error - #268" -- **all ten commits since `26eb46a` taken, see "Sync 2026-10-17"**; `430209e` and the real-floppy line still out -- FringeCoder/AmigaCD_MiSTer#58 | 2026-10-17 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `5b93485b` "Fix RTG with the 68030 MMU enabled (#281)" -- **upstream rewrote its history; content-merged from `0bf2ab1`, see "Sync 2026-10-22"**; `430209e` and the real-floppy line still out | 2026-10-22 |
+| ^ previous pin, superseded 2026-10-22 (**no longer on upstream's MiSTer**) | | `0bf2ab1` "68020/68030 fixes and the 68030 MMU bus error - #268" -- all ten commits since `26eb46a` taken, see "Sync 2026-10-17" -- FringeCoder/AmigaCD_MiSTer#58 | 2026-10-17 |
 | ^ previous pin, superseded 2026-10-17 | | `26eb46a` -- taken through `26eb46a` (68030 hand-ported in its own PR) -- FringeCoder/AmigaCD_MiSTer#56/#57 | 2026-10-16 |
 | ^ previous pin, superseded 2026-10-16 | | `c5ffbf9` "Fix Absolute Inebriation" -- partial take, floppy line still declined, see "Sync 2026-10-11" | 2026-10-11 |
 | ^ previous pin, superseded 2026-10-11 | | `da7632e` "Add OS3-style Mountlist (#244)" | 2026-09-10 |
@@ -100,6 +102,32 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-22: upstream rewrote both histories
+
+Between 2026-10-19 and 2026-10-22 both upstreams replaced the commits this fork
+had pinned. Minimig-AGA's `MiSTer` no longer contains `26eb46a..0bf2ab1`: the
+same work was re-landed as squashed PRs #275-#281 on top of `cbf17d2`, with
+real changes. Main_MiSTer's `master` no longer contains `e836aea`, `60a868f` or
+`d3b8537`: re-landed as #1363-#1379. Nothing can be cherry-picked across that,
+so each side was merged by CONTENT: a three-way merge per file with the old pin
+as base, upstream's new tip as theirs and this fork as ours. The old pins stay
+in the table above, marked as gone, because the 2026-10-16 and 2026-10-17
+notes below cite them.
+
+### What upstream changed, and what this fork did with it
+
+| Upstream | Change | Here |
+|---|---|---|
+| ec1353dc (#277) / d49cd64 (#1376) | The 68030 always has its MMU (the "68030 no MMU" of 60a868f is gone) and runs at 40MHz, 50MHz or Fast; CPU byte bits 7:6, cpucfg[4:3] | Taken. This fork has no line to spare for upstream's extra CPU steps, so the System page's MMU row becomes **CPU Clock: 40MHz / 50MHz / Fast** (greyed but for the 68030, like CPU Turbo for the 68020), and the AmigaCD Settings CPU row steps 68020 / 68030 40MHz / 68030 50MHz / 68030 Fast. A config or .mgl holding the old 0x22 opens as the 68030 Fast; stray clock bits are cleared (`minimig_fold_removed()`). |
+| ec1353dc (#277) | The SDRAM-backed Zorro III Fast RAM of 26eb46a is gone: the old SDRAM controller is back, `sdram_big`/`sdram_dual`, the `z3sdr` windows and ddram_ctrl's SDRAM proxy and prefetch with it | Taken in the core. Host side: nothing to do -- the SDRAM size is still sent to every core by the generic hps_io path; this core just stops reading it. |
+| c55ecd91 (#276) / 8f79cce (#1375) | The 68EC020 is cycle exact at A1200 speed | Taken. The **unthrottled 68020 (CPU Turbo On) stays**: upstream's load sends it to the 68030 Fast, this fork keeps it as its CD32/A1200 default, as at the 2026-10-16 and 2026-10-17 syncs. **Standing divergence.** |
+| 6c66eb1d (#275) / 781a5f4 (#1374) | Drive sounds | Already here since 26eb46a/e836aea, at status[60:59]; nothing new to take. |
+| 0c98d24 (#1379) | FDD Turbo on its own line in System | Already so here (row 11). |
+| 2ebd9f5, b988ec9, 1288361 (#1370-#1372) / c9502bae (#274) | A2065: RINT re-raise, stale acknowledge, transmit ring polling; the core skips no-op CSR0 writes | Taken, both halves. |
+| e8e915a, 8bc47c0 (#1369) | MGL `option` items; Atari ST MGL items | Taken (mra_loader.h keeps this fork's `xml_path` beside the new option table). |
+| bb73090 (#1367), 63186a3 (#1377) | PCAT-286 on the x86 support; VRR infoframes on the menu core | Taken -- generic, and on support this fork carries. |
+| 144cee3 (#1368) | HP 9000 family | **Not taken**: a core this fork does not build, like PCFX, FM Towns Marty, Sun, Falcon and PC-88 before it. Every hunk that names `hp9k` was dropped from the merge. |
 
 ## Sync 2026-10-17: the 68030 simplification, and upstream's 68020/68030 fixes
 

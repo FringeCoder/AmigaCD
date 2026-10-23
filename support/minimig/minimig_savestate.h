@@ -116,4 +116,98 @@ bool ss_write_host_block(uint32_t *win, uint32_t win_words,
 const void *ss_read_host_block(const uint32_t *win, const ss_header_t *h,
                                uint32_t *bytes_out);
 
+// ---------------------------------------------------------------------------
+// When the host half of a restore may be applied.
+//
+// The drive's saved position (the host block) has to be in place before the
+// restored machine asks for its first sector, and must NOT be applied at all
+// when the core refuses the file: a refusal releases the Amiga exactly as it
+// was, and a drive aimed at the save's position under it loses the read the
+// game had in flight. Measured on hardware 2026-10-23 -- Flink, a 1.3 file
+// with fast RAM restored without any, FAIL_LENGTH, and the game never ran
+// again: every sector request after it found no read armed.
+//
+// ss_ctrl.v freezes the machine first and validates under the freeze. Every
+// load_reject() is in a state before S_L_ST_FETCH; from S_L_ST_FETCH to
+// S_L_RELEASE the restore is committed and the machine is still frozen. That
+// is the window in which to apply. The host sees it by polling the core's live
+// status (minimig_ssdiag.cpp's 0xF600 window) after raising the request.
+// ---------------------------------------------------------------------------
+
+// ss_ctrl.v's state numbers, the ones this decision needs. They are the RTL's
+// localparams, not ours; minimig_ssdiag.cpp names the rest.
+enum
+{
+	SS_ST_IDLE         = 0,
+	SS_ST_L_RD_ISSUE   = 11,
+	SS_ST_L_RD_WAIT    = 12,
+	SS_ST_L_RD_DATA    = 13,
+	SS_ST_L_MAGIC      = 14,
+	SS_ST_L_LEN_CAP    = 15,
+	SS_ST_L_LEN_CHK    = 16,
+	SS_ST_L_CRC_CAP    = 17,
+	SS_ST_L_PAY_FETCH  = 18,
+	SS_ST_L_PAY_FEED   = 19,
+	SS_ST_L_FREEZE     = 20,
+	SS_ST_L_ST_FETCH   = 21,
+	SS_ST_L_ST_FEED    = 22,
+	SS_ST_L_ST_WAIT    = 23,
+	SS_ST_L_CH_FETCH   = 24,
+	SS_ST_L_CH_ISSUE   = 25,
+	SS_ST_L_CH_WAIT    = 26,
+	SS_ST_L_RELEASE    = 27,
+	SS_ST_KICK_ISSUE   = 28,
+	SS_ST_KICK_WAIT    = 29,
+	SS_ST_KICK_DRAIN   = 30,
+	SS_ST_L_KICK_CHK   = 32,
+	SS_ST_L_FLUSH      = 33,
+	SS_ST_L_SH_FETCH   = 36,
+	SS_ST_L_SH_LOAD    = 37,
+	SS_ST_L_REPLAY     = 38,
+	SS_ST_L_CLUT_FETCH = 53,
+	SS_ST_L_CLUT_LOAD  = 54,
+	SS_ST_L_FA_FETCH   = 62,
+	SS_ST_L_FA_LOAD    = 63,
+};
+
+// One read of the core's live status.
+typedef struct
+{
+	uint8_t  live;        // ss_ctrl's state register
+	uint8_t  load_busy;
+	uint8_t  load_ok;     // sticky until the next restore arms
+	uint8_t  load_fail;   // likewise
+	uint8_t  fail_code;   // ss_ctrl's load_fail_code, meaningful with load_fail
+	uint16_t seq;         // counts state changes; 16 bits, wraps
+} ss_core_obs_t;
+
+typedef struct
+{
+	uint16_t seq0;        // seq read before the request was raised
+	int      seen_busy;
+} ss_restore_watch_t;
+
+typedef enum
+{
+	SS_WATCH_WAIT,        // not decided yet: poll again
+	SS_WATCH_APPLY,       // committed: apply the host block now
+	SS_WATCH_SKIP,        // refused: leave the drive alone
+} ss_watch_t;
+
+void       ss_restore_watch_begin(ss_restore_watch_t *w, uint16_t seq_before);
+ss_watch_t ss_restore_watch_step(ss_restore_watch_t *w, ss_core_obs_t o);
+
+// ss_ctrl's FAST_WORDS: the 8 MB of Zorro II fast RAM a payload carries when
+// the machine had it. core_words is a fixed part plus this or nothing, and the
+// fixed part is well under it.
+#define SS_FAST_WORDS 0x200000u
+// ss_ctrl's load_fail_code for a payload of the wrong size.
+#define SS_FAIL_LENGTH 3u
+
+// The toast for a file the core refused as the wrong length (FAIL_LENGTH),
+// from the file's own core_words; 0 when the file says nothing useful. The
+// core's text, "Restore: not for this core", sent people looking for a build
+// mismatch when the cause was the Fast RAM setting.
+const char *ss_length_refusal_text(uint32_t file_core_words);
+
 #endif

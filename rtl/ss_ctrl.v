@@ -378,6 +378,13 @@ module ss_ctrl
 	// AmigaCD.sv ORs the two into the port mux instead, which costs nothing.
 	output reg                peek_scan,
 
+	// freeze | peek_scan -- the SDRAM CPU port claim AmigaCD.sv muxes on -- as
+	// a register of its own, loaded with the NEXT values of both. It equals the
+	// OR on every clock (rtl/sim/ssown proves it) but leaves straight off a flop,
+	// instead of through a gate fed by freeze's ~145-load net; that path into
+	// sdram_ctrl's sd_addr was the design's worst family after the chipset one.
+	output reg                port_own,
+
 	// ---------------------------------------------------- restore post-mortem
 	//
 	// Four samples of the CPU's PC taken after the freeze drops, and the two
@@ -471,12 +478,17 @@ localparam [23:0] FAST_WORDS = FAST_BEATS * 2;
 // (or the reverse) fails the header's core_words check as FAIL_LENGTH rather
 // than being read with every section after chip RAM displaced.
 //
-// fast_ena is sampled continuously rather than latched at the start of a
-// transfer. Changing the memory configuration resets the Amiga, which aborts
-// anything in flight, so there is no window in which it can move under a
-// transfer that has already committed to a length.
-wire [23:0] core_words   = CORE_BASE_W[23:0] + (fast_ena ? FAST_WORDS : 24'd0);
-wire [23:0] fast_present = fast_ena ? FAST_BEATS : 24'd0;
+// fast_ena is latched while idle and held for the whole of a transfer. It
+// used to be sampled continuously, on the argument that changing the memory
+// configuration resets the Amiga and so aborts anything in flight -- but this
+// module is reset by reset_d, not by minimig's reset, and the OSD's
+// ApplyConfiguration halts the CPU and writes the new config without touching
+// reset_d. A save running at that moment would have changed length part-way
+// through (found 2026-10-18). Held, it finishes with the length it started
+// with, consistent in its header and its sections.
+reg fast_ena_q;   // loaded below, after state is declared
+wire [23:0] core_words   = CORE_BASE_W[23:0] + (fast_ena_q ? FAST_WORDS : 24'd0);
+wire [23:0] fast_present = fast_ena_q ? FAST_BEATS : 24'd0;
 
 localparam SS_MAGIC   = 32'h53534341;
 // 1.1: the colour table section was added between the shadow and chip RAM. A
@@ -500,7 +512,13 @@ localparam SS_MAGIC   = 32'h53534341;
 // after it moved. A 1.3 file has no mask; the host upgrades one in memory
 // before it is uploaded (all entries marked written, which is what 1.3
 // replayed), so this core only ever reads 1.4. See minimig_savestate.cpp.
-localparam SS_VERSION = 32'h00010004;
+// 1.5: the state section grew by eight words, 66 to 74 -- the 68030's MMU
+// registers (rtl/ss_state.vh) -- and everything after it moved. The new
+// fields are the top of the vector, so the eight words are the END of the
+// state section; the host upgrades a 1.4 file by inserting eight zero words
+// there (TC zero: no translation, which is every 1.4 file's machine), so this
+// core only ever reads 1.5.
+localparam SS_VERSION = 32'h00010005;
 
 // Sized copies of CORE_WORDS for the comparisons on the restore path, so a
 // 24-bit counter and a 32-bit header word are each compared against something
@@ -708,6 +726,9 @@ reg restore_busy;
 // wedged-machine cases there have to drive the limit to a timeout, and pulsing
 // 120 frames per case to do it would buy nothing but simulation time.
 
+wire freeze_n;
+reg  peek_scan_d;   // peek_scan's next value, built up in the FSM block below
+
 ss_quiesce quiesce
 (
 	.clk(clk), .rst_n(rst_n),
@@ -723,7 +744,7 @@ ss_quiesce quiesce
 	.frame_limit((save_busy || peek_busy) ? SAVE_FRAMES : LOAD_FRAMES),
 	.blit_busy(blit_busy), .disk_busy(disk_busy), .audio_busy(audio_busy),
 	.cpu_boundary(cpu_boundary), .frame_tick(frame_tick),
-	.freeze(freeze), .quiesced(quiesced), .timeout(timeout)
+	.freeze(freeze), .freeze_n(freeze_n), .quiesced(quiesced), .timeout(timeout)
 );
 
 // ---------------------------------------------------------------- serdes
@@ -1002,6 +1023,7 @@ wire word_busy = crc_busy || pending_valid || ddr_write;
 // ---------------------------------------------------------------- writer
 
 reg [5:0]  state;
+always @(posedge clk) if (state == S_IDLE) fast_ena_q <= fast_ena;   // see core_words
 reg [23:0] word_idx;      // 32-bit word index within the window
 reg [31:0] pending_word;
 reg        pending_valid;
@@ -1233,6 +1255,9 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
+	// peek_scan is assigned through peek_scan_d so its next value is known at the
+	// end of the block, where port_own is loaded from it.
+	peek_scan_d = peek_scan;
 	if (!rst_n) begin
 		state            <= S_IDLE;
 		save_busy        <= 1'b0;
@@ -1257,7 +1282,7 @@ always @(posedge clk) begin
 		peek_data        <= 128'd0;
 		peek_valid       <= 1'b0;
 		peek_busy        <= 1'b0;
-		peek_scan        <= 1'b0;
+		peek_scan_d       = 1'b0;
 		peek_timeout     <= 1'b0;
 		peek_ack_cnt     <= 8'd0;
 		peek_words       <= 4'd0;
@@ -1461,7 +1486,7 @@ always @(posedge clk) begin
 		// bound and the only one needed.
 		S_PEEK_FREEZE: begin
 			if (quiesced) begin
-				peek_scan <= 1'b1;   // borrow the SDRAM CPU port
+				peek_scan_d  = 1'b1;   // borrow the SDRAM CPU port
 				scan_wd   <= 24'd0;
 				state     <= S_PEEK_ISSUE;
 			end
@@ -1498,7 +1523,7 @@ always @(posedge clk) begin
 			if (sd_ready && peek_ack_cnt != 8'hFF) peek_ack_cnt <= peek_ack_cnt + 8'd1;
 
 			if (scan_wd > SCAN_TIMEOUT) begin
-				peek_scan    <= 1'b0;
+				peek_scan_d   = 1'b0;
 				peek_busy    <= 1'b0;
 				peek_timeout <= 1'b1;
 				state        <= S_IDLE;
@@ -1518,7 +1543,7 @@ always @(posedge clk) begin
 					              dma_word_out[7:0], dma_word_out[15:8]};
 					peek_low_held <= 1'b0;
 					if (peek_words == 4'd6) begin
-						peek_scan  <= 1'b0;
+						peek_scan_d   = 1'b0;
 						peek_busy  <= 1'b0;
 						peek_valid <= 1'b1;
 						state      <= S_IDLE;
@@ -1868,7 +1893,7 @@ always @(posedge clk) begin
 						chip_addr <= SLOW_BASE;
 						state     <= S_SAVE_FLUSH;
 					end
-					else if (fast_ena) begin
+					else if (fast_ena_q) begin
 						fast_idx <= 24'd0;
 						state    <= S_FAST_RD;
 					end
@@ -1996,7 +2021,7 @@ always @(posedge clk) begin
 						pair_count <= 24'd0;
 						state      <= S_CHIP_ISSUE;
 					end
-					else if (fast_ena) begin
+					else if (fast_ena_q) begin
 						fast_idx <= 24'd0;
 						state    <= S_FAST_RD;
 					end
@@ -2444,7 +2469,7 @@ always @(posedge clk) begin
 					chip_addr <= SLOW_BASE;
 					state     <= S_L_CH_FETCH;
 				end
-				else if (fast_ena) begin
+				else if (fast_ena_q) begin
 					fast_idx  <= 24'd0;
 					fast_half <= 1'b0;
 					state     <= S_L_FA_FETCH;
@@ -2527,7 +2552,7 @@ always @(posedge clk) begin
 			// CORE_BASE_W, not CORE_WORDS: the fast RAM section sits after
 			// this one and is not written through ss_dma at all.
 			if (pay_idx == CORE_BASE_W[23:0]) begin
-				if (fast_ena) begin
+				if (fast_ena_q) begin
 					fast_idx  <= 24'd0;
 					fast_half <= 1'b0;
 					state     <= S_L_FA_FETCH;
@@ -2651,6 +2676,9 @@ always @(posedge clk) begin
 		default: state <= S_IDLE;
 		endcase
 	end
+
+	peek_scan <= peek_scan_d;
+	port_own  <= freeze_n | peek_scan_d;
 end
 
 endmodule

@@ -71,6 +71,10 @@ module ss_state_fanout
 	output reg                cpu_usp_wr,
 	output reg                cpu_vbr_wr,
 	output reg                cpu_cacr_wr,
+	// The 68030's MMU registers, eight 32-bit writes with the index in
+	// cpu_wr_index[2:0]. The kernel stages them and applies the stage on
+	// cpu_resume, so their order here does not matter.
+	output reg                cpu_mmu_wr,
 	// Sequencer re-seed. Strobed once, after every register above has
 	// landed and while cpu_wrapper still has the CPU parked (busy is still
 	// high on this cycle). Restoring the programmer's model without this
@@ -121,6 +125,11 @@ wire [31:0] ss_cpu_a4, ss_cpu_a5, ss_cpu_a6, ss_cpu_a7;
 wire [31:0] ss_pc, ss_usp, ss_vbr;
 wire [15:0] ss_sr;
 wire  [3:0] ss_cacr;
+wire  [2:0] ss_sfc, ss_dfc;
+wire  [6:0] ss_cacr_hi;
+wire [31:0] ss_mmu_tc, ss_mmu_tt0, ss_mmu_tt1;
+wire [63:0] ss_mmu_crp, ss_mmu_srp;
+wire [15:0] ss_mmu_sr;
 wire        ss_ovl, ss_rom_readonly, ss_sel_kick1mb, ss_sel_kick256kmirror;
 wire [14:0] ss_intreq;
 wire [190:0] ss_cia_a;
@@ -197,15 +206,18 @@ always @(*) begin
 	endcase
 end
 
-localparam [4:0] STEP_PC   = 5'd16;
-localparam [4:0] STEP_SR   = 5'd17;
-localparam [4:0] STEP_USP  = 5'd18;
-localparam [4:0] STEP_VBR  = 5'd19;
-localparam [4:0] STEP_CACR = 5'd20;
-localparam [4:0] STEP_MAP  = 5'd21;
+localparam [5:0] STEP_PC   = 6'd16;
+localparam [5:0] STEP_SR   = 6'd17;
+localparam [5:0] STEP_USP  = 6'd18;
+localparam [5:0] STEP_VBR  = 6'd19;
+localparam [5:0] STEP_CACR = 6'd20;
+localparam [5:0] STEP_MAP  = 6'd21;
 // The CIAs go in before the re-seed and after the map, on their own pulse.
-localparam [4:0] STEP_CIA  = 5'd22;
-localparam [4:0] STEP_RES  = 5'd23;
+localparam [5:0] STEP_CIA  = 6'd22;
+// The MMU registers, 23-30, one per step: index = step - STEP_MMU0.
+localparam [5:0] STEP_MMU0 = 6'd23;
+localparam [5:0] STEP_MMU7 = 6'd30;
+localparam [5:0] STEP_RES  = 6'd31;
 // One idle step after the re-seed, so `running` -- and therefore busy, and
 // therefore cpu_wrapper's ss_arm -- is still high on the cycle cpu_resume
 // goes out. The kernel wants the seed applied before the CPU clock enable
@@ -214,10 +226,26 @@ localparam [4:0] STEP_RES  = 5'd23;
 // ss_load_busy still being high in AmigaCD.sv's ss_arm term -- another
 // module's timing, for a property this module claims to enforce on its own.
 // Caught by ss_state_fanout_tb.
-localparam [4:0] STEP_DONE = 5'd24;
-localparam [4:0] STEP_LAST = STEP_DONE;
+localparam [5:0] STEP_DONE = 6'd32;
+localparam [5:0] STEP_LAST = STEP_DONE;
 
-reg [4:0] step;
+reg [5:0] step;
+
+// The MMU word for this step, in the kernel's index order.
+wire [5:0] mmu_idx = step - STEP_MMU0;
+reg [31:0] mmu_sel;
+always @(*) begin
+	case (mmu_idx[2:0])
+	3'd0:    mmu_sel = ss_mmu_tc;
+	3'd1:    mmu_sel = ss_mmu_tt0;
+	3'd2:    mmu_sel = ss_mmu_tt1;
+	3'd3:    mmu_sel = ss_mmu_crp[63:32];
+	3'd4:    mmu_sel = ss_mmu_crp[31:0];
+	3'd5:    mmu_sel = ss_mmu_srp[63:32];
+	3'd6:    mmu_sel = ss_mmu_srp[31:0];
+	default: mmu_sel = {16'd0, ss_mmu_sr};
+	endcase
+end
 reg       running;
 
 assign busy = running;
@@ -226,13 +254,14 @@ always @(posedge clk) begin
 	if (!rst_n) begin
 		running      <= 1'b0;
 		ack          <= 1'b0;
-		step         <= 5'd0;
+		step         <= 6'd0;
 		cpu_wr_en    <= 1'b0;
 		cpu_pc_wr    <= 1'b0;
 		cpu_sr_wr    <= 1'b0;
 		cpu_usp_wr   <= 1'b0;
 		cpu_vbr_wr   <= 1'b0;
 		cpu_cacr_wr  <= 1'b0;
+		cpu_mmu_wr   <= 1'b0;
 		map_we       <= 1'b0;
 		cia_we       <= 1'b0;
 		akiko_we     <= 1'b0;
@@ -248,6 +277,7 @@ always @(posedge clk) begin
 		cpu_usp_wr  <= 1'b0;
 		cpu_vbr_wr  <= 1'b0;
 		cpu_cacr_wr <= 1'b0;
+		cpu_mmu_wr  <= 1'b0;
 		map_we      <= 1'b0;
 		cia_we      <= 1'b0;
 		akiko_we    <= 1'b0;
@@ -259,7 +289,7 @@ always @(posedge clk) begin
 			if (!req)     ack <= 1'b0;
 			else if (!ack) begin
 				running <= 1'b1;
-				step    <= 5'd0;
+				step    <= 6'd0;
 			end
 		end
 		else begin
@@ -270,7 +300,10 @@ always @(posedge clk) begin
 			STEP_SR:   begin cpu_wr_data <= {16'd0, ss_sr};        cpu_sr_wr   <= 1'b1; end
 			STEP_USP:  begin cpu_wr_data <= ss_usp;                cpu_usp_wr  <= 1'b1; end
 			STEP_VBR:  begin cpu_wr_data <= ss_vbr;                cpu_vbr_wr  <= 1'b1; end
-			STEP_CACR: begin cpu_wr_data <= {28'd0, ss_cacr};      cpu_cacr_wr <= 1'b1; end
+			// SFC, DFC and the rest of CACR ride on the CACR strobe: TG68K takes
+			// them from bits 6:4, 9:7 and 16:10 of the same write
+			// (TG68KdotC_Kernel.vhd, ss_sfc and ss_cacr_hi).
+			STEP_CACR: begin cpu_wr_data <= {15'd0, ss_cacr_hi, ss_dfc, ss_sfc, ss_cacr}; cpu_cacr_wr <= 1'b1; end
 			// Same bit order as minimig.v's ss_map output. Only [3] (ovl) and
 			// [2] (rom_readonly) have a target; [1:0] are combinational
 			// address decodes -- see rtl/ss_state.vh.
@@ -284,6 +317,11 @@ always @(posedge clk) begin
 			// whole on one edge.
 			STEP_CIA:  begin cia_we <= 1'b1; akiko_we <= 1'b1; end
 			STEP_RES:  cpu_resume <= 1'b1;
+			STEP_MMU0, 6'd24, 6'd25, 6'd26, 6'd27, 6'd28, 6'd29, STEP_MMU7: begin
+				cpu_wr_index <= {1'b0, mmu_idx[2:0]};
+				cpu_wr_data  <= mmu_sel;
+				cpu_mmu_wr   <= 1'b1;
+			end
 			// Nothing is strobed here; the step exists to hold busy over the
 			// cycle the re-seed is on the wire.
 			STEP_DONE: ;
@@ -298,7 +336,7 @@ always @(posedge clk) begin
 				running <= 1'b0;
 				ack     <= 1'b1;
 			end
-			else step <= step + 5'd1;
+			else step <= step + 6'd1;
 		end
 	end
 end

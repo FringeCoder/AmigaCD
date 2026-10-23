@@ -658,9 +658,10 @@ static int minimig_ss_request_save()
 		return 0;
 	}
 
-	// Idempotent: re-maps the same four windows, reloads them from the file on
-	// disk and re-stamps the counter word.
-	process_ss(name, 1);
+	// Idempotent: re-maps the same four windows and re-stamps the counter word.
+	// Reads nothing from disk -- the core writes the whole window itself, and
+	// reading all four slots here stalled the game for seconds at every save.
+	process_ss(name, 1, SS_LOAD_NONE);
 
 	// The core reports "saved" long before the file exists -- the poller writes
 	// it. Ask that poller to hurry, so a reset straight after the toast cannot
@@ -727,11 +728,22 @@ static int minimig_ss_request_restore()
 	// core is about to validate holds whatever was there, and a restore after a
 	// power cycle -- the whole point of the feature -- could never work.
 	//
-	// It re-reads all four slots every press, ~16 MB. That is the cost of
-	// always validating the freshest file on disk rather than a stale window,
-	// on a keypress the user made deliberately. It also resets the poller's
+	// It reads the one slot being restored, every press, so the core always
+	// validates the freshest file on disk rather than a stale window. All four
+	// used to be read and upgraded here, which held the main loop -- and with
+	// it the CD drive -- for up to ten seconds. It also resets the poller's
 	// counters, so it cannot itself trigger a spurious write back to disk.
-	process_ss(ss_name, 1);
+	process_ss(ss_name, 1, minimig_config.ss_slot & 3);
+
+	// Nothing on the card for this slot: say so rather than send the core an
+	// empty window and show its "Restore: not a save state".
+	if (!ss_slot_file_bytes(minimig_config.ss_slot & 3))
+	{
+		char msg[40];
+		snprintf(msg, sizeof(msg), "Restore: slot %d is empty", (minimig_config.ss_slot & 3) + 1);
+		Info(msg, 2000, 0, 0, 0, 1);
+		return 0;
+	}
 
 	// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge) exactly as
 	// status[51] is. A level here would restore over and over -- ss_ctrl
@@ -740,17 +752,67 @@ static int minimig_ss_request_restore()
 	// machine that never runs again. The set/clear pair below is housekeeping
 	// on the persisted status word, not the safety property.
 	//
-	// Everything after this is the core's: it validates the window with the
-	// Amiga still running, refuses without freezing if any gate fails, and
-	// reports the outcome as an OSD toast either way (AmigaCD.sv ss_info_*).
-	user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+	// Everything after this is the core's: it freezes the Amiga, validates the
+	// window, and either loads it or releases the machine untouched. It reports
+	// the outcome as an OSD toast either way (AmigaCD.sv ss_info_*).
+	const int slot = minimig_config.ss_slot & 3;
+	user_io_status_set("[53:52]", slot);
+
 	// The drive travels beside the payload rather than in it: where the head is
-	// and what was playing are userspace state the core cannot see. Applied
-	// here so the restored machine's first sector request is served from the
-	// position it was saved at.
-	ss_apply_host_state(minimig_config.ss_slot & 3);
+	// and what was playing are userspace state the core cannot see. It has to
+	// be in place before the restored machine's first sector request, and it
+	// must not be applied at all if the core refuses the file -- the refused
+	// machine runs on from where it was, and a drive aimed at the save's
+	// position under it loses the read in flight. That happened: Flink, a 1.3
+	// file with fast RAM restored without any, FAIL_LENGTH, and the game never
+	// ran again. So the core's live status is watched from the request until
+	// it commits (frozen, past every gate) or refuses. See
+	// ss_restore_watch_step().
+	ss_core_obs_t o;
+	if (!minimig_ss_core_obs(&o))
+	{
+		// A core without the status window: the old order, applied blind.
+		ss_apply_host_state(slot);
+		user_io_status_set("[54]", 1);
+		user_io_status_set("[54]", 0);
+		return 1;
+	}
+
+	ss_restore_watch_t w;
+	ss_restore_watch_begin(&w, o.seq);
 	user_io_status_set("[54]", 1);
 	user_io_status_set("[54]", 0);
+
+	// Validation runs ~270 ms on hardware; the commit window it opens lasts as
+	// long as the load. Three seconds is a backstop for a core that never
+	// answers, and gives up WITHOUT applying, since nothing says it committed.
+	ss_watch_t verdict = SS_WATCH_WAIT;
+	unsigned long deadline = GetTimer(3000);
+	while (verdict == SS_WATCH_WAIT && !CheckTimer(deadline))
+	{
+		if (minimig_ss_core_obs(&o)) verdict = ss_restore_watch_step(&w, o);
+		if (verdict == SS_WATCH_WAIT) usleep(200);
+	}
+
+	unsigned long t_watch = GetTimer(0) - (deadline - 3000);
+	unsigned long t_apply = GetTimer(0);
+	if (verdict == SS_WATCH_APPLY) ss_apply_host_state(slot);
+	t_apply = GetTimer(0) - t_apply;
+
+	// The core can only number its refusal, and for a payload of the wrong
+	// size its text is "not for this core". In this core the size differs by
+	// exactly the Fast RAM block, and the file says whether it has one.
+	if (verdict == SS_WATCH_SKIP && o.load_fail && o.fail_code == SS_FAIL_LENGTH)
+	{
+		const char *why = ss_length_refusal_text(ss_slot_core_words(slot));
+		if (why) ss_replace_restore_info(why);
+	}
+	minimig_ss_diag_log("host restore slot %d: drive state %s (core state %u), "
+	                    "verdict after %lu ms, apply %lu ms", slot + 1,
+	                    verdict == SS_WATCH_APPLY ? "applied" :
+	                    verdict == SS_WATCH_SKIP  ? "left alone, core refused" :
+	                                                "left alone, no verdict in 3 s",
+	                    (unsigned)o.live, t_watch, t_apply);
 	return 1;
 }
 
@@ -831,7 +893,7 @@ static const char *helptexts[] =
 	helptext_custom,
 	"                                Welcome to MiSTer! Use the cursor keys to navigate the menus. Use space bar or enter to select an item. Press Esc or F12 to exit the menus. Joystick emulation on the numeric keypad can be toggled with the numlock or scrlock key, while pressing Ctrl-Alt-0 (numeric keypad) toggles autofire mode.",
 	"                                Minimig can emulate an A600/A1200 IDE harddisk interface. The emulation can make use of Minimig-style hardfiles (complete disk images) or UAE-style hardfiles (filesystem images with no partition table).",
-	"                                Minimig's processor core can emulate a 68000 (cycle accuracy as A500/A600), a 68EC020 at A1200 speed, or a 68030 with or without MMU (maximum performance), all with transparent cache. The 68030 has no FPU, and needs a core that offers it.",
+	"                                Minimig's processor core can emulate a 68000 (cycle accuracy as A500/A600), a 68EC020 at A1200 speed, or a 68030 with MMU at 40MHz or 50MHz, as fast as a real card, or Fast, all with transparent cache. The 68030 has no FPU, and needs a core that offers it.",
 	"                                Minimig can make use of up to 2 megabytes of Chip RAM, up to 1.5 megabytes of Slow RAM (A500 Trapdoor RAM), and up to 384 megabytes of Fast RAM (8MB max for 68000 mode). To use the HRTmon feature you will need a file on the SD card named hrtmon.rom.",
 	"                                Backspace key (or B-hold + A on gamepad) to unmount",
 	"                                Backspace key (or B-hold + A on gamepad) to clear stored option. You have to reload the core to be able to use default value.",
@@ -2302,8 +2364,38 @@ void HandleUI(void)
 		case 0:
 			if (CheckTimer(mgl->timer))
 			{
-				mgl->state = (mgl->item[mgl->current].action == MGL_ACTION_LOAD) ? 1 : 4;
+				if (mgl->item[mgl->current].action == MGL_ACTION_INFO) mgl->state = 8;
+				else if (mgl->item[mgl->current].action != MGL_ACTION_LOAD) mgl->state = 4;
+				// The Atari ST uses its own menu and never reaches
+				// MENU_GENERIC_MAIN, so there is no OSD entry for states 1/2 to
+				// select. Its items are applied directly in state 6 instead.
+				else mgl->state = is_st() ? 6 : 1;
 			}
+			break;
+
+		case 6:
+			{
+				mgl_item_struct *item = &mgl->item[mgl->current];
+				char path[2048];
+
+				if (item->path[0] == '/') snprintf(path, sizeof(path), "%s", item->path);
+				else snprintf(path, sizeof(path), "%s/%s", HomeDir(), item->path);
+
+				printf("MGL: Atari ST load type=%c index=%d path=%s\n", item->type, item->index, path);
+
+				// Loading a TOS image shows a progress message, which calls
+				// HandleUI() again. State 7 keeps that nested call from
+				// starting the same item a second time.
+				mgl->state = 7;
+				if (!tos_mgl_load(item->type, item->index, path))
+				{
+					printf("MGL: Atari ST has no slot for type=%c index=%d\n", item->type, item->index);
+				}
+				mgl->state = 3;
+			}
+			break;
+
+		case 7:
 			break;
 
 		case 3:
@@ -2327,6 +2419,11 @@ void HandleUI(void)
 				user_io_send_buttons(1);
 				mgl->state = 3;
 			}
+			break;
+
+		case 8:
+			Info(mgl->item[mgl->current].path, 5000);
+			mgl->state = 3;
 			break;
 		}
 	}
@@ -3114,7 +3211,8 @@ void HandleUI(void)
 							int num = (p[idx] >= '0' && p[idx] <= '9') ? p[idx] - '0' : 0;
 							if (!mgl->done && num == mgl->item[mgl->current].index && (p[0] == mgl->item[mgl->current].type)) mgl->item[mgl->current].submenu = selentry;
 
-							if (is_x86() && x86_get_image_name(num))
+							if ((is_x86() || (is_pcat286() && p[0] == 'S')) &&
+								x86_get_image_name(num))
 							{
 								strcpy(s, " ");
 								substrcpy(s + 1, p, 2);
@@ -3128,7 +3226,7 @@ void HandleUI(void)
 								strcat(s, " ");
 								strcat(s, x86_get_image_name(num));
 							}
-							else if (is_pcxt() && (p[0] == 'F'))
+							else if ((is_pcxt() || is_pcat286()) && (p[0] == 'F'))
 							{
 								strcpy(s, " ");
 								substrcpy(s + 1, p, 2);
@@ -3544,7 +3642,7 @@ void HandleUI(void)
 						}
 
 						ioctl_index = 0;
-						if ((p[idx] >= '0' && p[idx] <= '9') || is_x86() || is_pcxt()) ioctl_index = p[idx] - '0';
+						if ((p[idx] >= '0' && p[idx] <= '9') || is_x86() || is_pcxt() || is_pcat286()) ioctl_index = p[idx] - '0';
 						substrcpy(ext, p, 1);
 						while (strlen(ext) % 3) strcat(ext, " ");
 
@@ -3554,11 +3652,11 @@ void HandleUI(void)
 						strcpy(fs_pFileExt, ext);
 
 						memcpy(Selected_tmp, Selected_S[(int)ioctl_index], sizeof(Selected_tmp));
-						if (is_x86() || is_pcxt()) strcpy(Selected_tmp, x86_get_image_path(ioctl_index));
+						if (is_x86() || is_pcxt() || is_pcat286()) strcpy(Selected_tmp, x86_get_image_path(ioctl_index));
 						if (is_psx() && (ioctl_index == 2 || ioctl_index == 3)) fs_Options |= SCANO_SAVES;
 						if (is_saturn() && (ioctl_index == 1)) fs_Options |= SCANO_SAVES;
 
-						if ((is_saturn() && !(fs_Options & SCANO_SAVES)) || is_pce() || is_megacd() || is_3do() || is_x86() || is_cdi() || (is_psx() && !(fs_Options & SCANO_SAVES)) || is_neogeo())
+						if ((is_saturn() && !(fs_Options & SCANO_SAVES)) || is_pce() || is_megacd() || is_3do() || is_x86() || is_pcat286() || is_cdi() || (is_psx() && !(fs_Options & SCANO_SAVES)) || is_neogeo())
 						{
 							//look for CHD too
 							if (!strcasestr(ext, "CHD"))
@@ -3657,7 +3755,7 @@ void HandleUI(void)
 							if (user_io_status_bits(p + 1, &bit, 0, ex) == 1)
 							{
 								const char *opt = p + 1;
-								if (!bit && (is_x86() || is_pcxt()))
+								if (!bit && (is_x86() || is_pcxt() || is_pcat286()))
 								{
 									x86_init();
 									ResetUART();
@@ -3873,7 +3971,7 @@ void HandleUI(void)
 			}
 
 			menustate = MENU_GENERIC_MAIN1;
-			if (selPath[0] && !is_x86() && !is_pcxt()) MenuHide();
+			if (selPath[0] && !is_x86() && !is_pcxt() && !is_pcat286()) MenuHide();
 
 			printf("Image selected: %s\n", selPath);
 			memcpy(Selected_S[(int)ioctl_index], selPath, sizeof(Selected_S[(int)ioctl_index]));
@@ -3882,7 +3980,7 @@ void HandleUI(void)
 			char idx = user_io_ext_idx(selPath, fs_pFileExt) << 6 | ioctl_index;
 			if (addon[0] == 'f' && addon[1] != '1') process_addon(addon, idx);
 
-			else if (is_x86() || is_pcxt() || (is_uneon() && idx >= 2))
+			else if (is_x86() || is_pcxt() || is_pcat286() || (is_uneon() && idx >= 2))
 			{
 				x86_set_image(ioctl_index, selPath);
 			}
@@ -4152,7 +4250,7 @@ void HandleUI(void)
 					char *filename = user_io_create_config_name(1);
 					printf("Saving config to %s\n", filename);
 					user_io_status_save(filename);
-					if (is_x86() || is_pcxt()) x86_config_save();
+					if (is_x86() || is_pcxt() || is_pcat286()) x86_config_save();
 					if (is_arcade()) arcade_nvm_save();
 				}
 				break;
@@ -7474,22 +7572,24 @@ void HandleUI(void)
 		strcpy(s, " CPU      : ");
 		// CPU byte (minimig_config.cpu), since upstream e836aea:
 		//   bits 1:0  00 68000, 01 68010, 10 68030, 11 68020
-		//   bit  5    68020: the stock-speed throttle (68EC020, A1200 speed,
-		//             24-bit addresses), i.e. CPU Turbo Off.
-		//             68030: no MMU (upstream 60a868f; the clocks are gone).
+		//   bit  5    68020: the stock-speed throttle (68EC020, cycle exact at
+		//             A1200 speed, 24-bit addresses), i.e. CPU Turbo Off.
+		//   bits 7:6  68030: its clock -- 01 40MHz, 10 50MHz, 00 Fast
+		//             (upstream d49cd64). Every 68030 has its MMU.
 		//   bit  4    was this fork's D-Cache; the core no longer reads it.
 		// Upstream drops the unthrottled 68020 and moves such configs to the
-		// 68030 no MMU (0x22, since 60a868f). This fork keeps it -- it is CPU Turbo On, the
+		// 68030 Fast (d49cd64). This fork keeps it -- it is CPU Turbo On, the
 		// default since 4b4f604 -- and the RTL still runs it (cpucfg 011).
 		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
 		OsdWrite(m++, s, menusub == 0, 0);
-		// The 68030's MMU, on the line its clock had (upstream 60a868f left
-		// the 68030 one clock and made "no MMU" bit 5). Upstream offers it as
-		// a fifth CPU, "68030 no MMU"; here it is a row of its own, the way
-		// bit 5 is CPU Turbo on the 68020, which keeps every row below where
-		// it was on a page with no line to spare. Greyed for every other CPU.
-		strcpy(s, " CPU MMU  : ");
-		strcat(s, ((minimig_config.cpu & 0x03) != 0x02) ? "-" : (minimig_config.cpu & 0x20) ? "Off" : "On");
+		// The 68030's clock (CPU byte bits 7:6). Upstream d49cd64 offers the
+		// three as CPU steps, "68030 40MHz", "68030 50MHz" and "68030 Fast";
+		// here they are a row of their own, the way bit 5 is CPU Turbo on the
+		// 68020, which keeps every row below where it was on a page with no
+		// line to spare. This line held the 68030's MMU switch until upstream
+		// ec1353dc made the MMU part of every 68030. Greyed for other CPUs.
+		strcpy(s, " CPU Clock: ");
+		strcat(s, ((minimig_config.cpu & 0x03) != 0x02) ? "-" : minimig_cpu030_clock_msg(minimig_config.cpu));
 		OsdWrite(m++, s, menusub == 1, (minimig_config.cpu & 0x03) != 0x02);
 		// CPU CFG bit 5 read the other way up: set means the stock-speed throttle
 		// is engaged, so Turbo On is the bit CLEAR. Phrased as Turbo because that
@@ -7500,7 +7600,7 @@ void HandleUI(void)
 		// same page, and two rows both called Turbo is a support question waiting
 		// to happen.
 		//
-		// The 68020 only. On the 68030 bit 5 is the MMU row above.
+		// The 68020 only. The 68030's speed is the Clock row above.
 		strcpy(s, " CPU Turbo: ");
 		strcat(s, ((minimig_config.cpu & 0x03) != 0x03) ? "-" : (minimig_config.cpu & 0x20) ? "Off" : "On");
 		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03);
@@ -7591,10 +7691,10 @@ void HandleUI(void)
 			{
 				// 68000 -> 68010 -> 68020 -> 68030. Bits 2-4 (turbo chip/kick,
 				// the old D-Cache bit) are left alone. Bit 5 belongs to the
-				// Turbo row on the 68020 and to the MMU row on the 68030, so
-				// it is cleared on every change of CPU, with the old clock
-				// bits 7:6: a 68020 is entered Turbo On, this fork's default,
-				// and a 68030 with its MMU, as upstream's step order enters it.
+				// Turbo row on the 68020 and bits 7:6 to the Clock row on the
+				// 68030, so all three are cleared on every change of CPU: a
+				// 68020 is entered Turbo On, this fork's default, and a 68030
+				// Fast, the 68030 every config had before d49cd64.
 				static const unsigned char cpu_order[4] = { 0, 1, 3, 2 };
 				int cpu = minimig_config.cpu & 3;
 				int at = (cpu == 0) ? 0 : (cpu == 1) ? 1 : (cpu == 3) ? 2 : 3;
@@ -7606,9 +7706,9 @@ void HandleUI(void)
 			}
 			else if (menusub == 1 && (minimig_config.cpu & 0x3) == 0x2)
 			{
-				// 68030 MMU (CPU CFG bit 5): set is "68030 no MMU", whose MMU
-				// instructions take the F-line exception as on a 68020.
-				minimig_config.cpu ^= 0x20;
+				// 68030 clock (CPU CFG bits 7:6): 40MHz -> 50MHz -> Fast, the
+				// order of upstream d49cd64's CPU steps.
+				minimig_config.cpu = minimig_cpu030_clock_step(minimig_config.cpu, minus);
 				menustate = MENU_MINIMIG_CHIPSET1;
 				minimig_ConfigCPU(minimig_config.cpu);
 			}
@@ -8438,7 +8538,7 @@ void HandleUI(void)
 			static const char *const tips[] =
 			{
 				/* 0 FastRAM  */ "Zorro II and Zorro III fast RAM. Z3 and 68000 both stop save states working, and grey those rows out when selected.",
-				/* 1 CPU      */ "The machine's 68020, or a 68030 at full speed, with or without its MMU. No FPU. Save states work on both.",
+				/* 1 CPU      */ "The machine's 68020, or a 68030 with its MMU: at 40MHz or 50MHz like a real card, or Fast. No FPU. Save states work on all of them.",
 				/* 2 CPU Turbo*/ "Run the 68020 at full speed rather than throttled to the stock rate. Only available when the CPU is an 020.",
 				/* 3 Main ROM */ "The Kickstart. Amiga Forever ROMs work as they are, encrypted, as long as ROM.KEY sits beside them.",
 				/* 4 Ext ROM  */ "The extended ROM, which a CD32 needs to boot a disc. Minus clears the pairing.",
@@ -8476,17 +8576,17 @@ void HandleUI(void)
 		// CPU, on the line D-Cache had: the core no longer reads that bit
 		// (upstream 26eb46a uses the data cache where the real CPU has one).
 		// The machine's own 68020, or a 68030 accelerator -- the SX-32 Pro put
-		// one in a CD32, the Blizzards in an A1200 -- with or without its MMU
-		// (upstream 60a868f: one clock, the maximum). The 68000 machines
-		// (A500, CDTV) keep their 68000; greyed for them.
+		// one in a CD32, the Blizzards in an A1200 -- at a real card's 40MHz or
+		// 50MHz, or Fast (upstream d49cd64). The 68000 machines (A500, CDTV)
+		// keep their 68000; greyed for them.
 		strcpy(s, " CPU      : ");
-		if ((minimig_config.cpu & 0x23) == 0x22) strcat(s, "68030 no MMU");
-		else strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
+		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
+		if ((minimig_config.cpu & 0x03) == 0x02) { strcat(s, " "); strcat(s, minimig_cpu030_clock_msg(minimig_config.cpu)); }
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
 
 		// CPU Turbo = CPU byte bit5 read the other way up: the bit SET engages
 		// the stock-speed throttle, so Turbo On is the bit clear. The 68020
-		// only: on the 68030 bit 5 is "no MMU", which the CPU row above sets.
+		// only: the 68030's speed is in the CPU row above.
 		strcpy(s, " CPU Turbo: ");
 		strcat(s, ((minimig_config.cpu & 0x03) != 0x03) ? "-" : (minimig_config.cpu & 0x20) ? "OFF" : "ON");
 		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03);
@@ -8658,18 +8758,19 @@ void HandleUI(void)
 				minimig_config.memory = ((fc << 4) & 0x30) | ((fc << 5) & 0x80) | (minimig_config.memory & ~0xB0);
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 1) // CPU: 68020, 68030, 68030 no MMU
+			else if (menusub == 1) // CPU: 68020, 68030 40MHz, 68030 50MHz, 68030 Fast
 			{
 				// For the 68020 machines only; the A500 and CDTV keep their
 				// 68000. The 68020 is entered Turbo On, this fork's default;
-				// the 68030 with and without its MMU are upstream 60a868f's
-				// last two steps, in their order.
+				// the three 68030s are upstream d49cd64's last three steps, in
+				// their order.
 				if (minimig_config.cpu & 0x2)
 				{
-					static const unsigned char steps[3] = { 0x03, 0x02, 0x22 };
+					static const unsigned char steps[4] = { 0x03, 0x42, 0x82, 0x02 };
 					int at = ((minimig_config.cpu & 3) == 3) ? 0 :
-					         (minimig_config.cpu & 0x20) ? 2 : 1;
-					at = (at + (minus ? 2 : 1)) % 3;
+					         ((minimig_config.cpu & 0xc0) == 0x40) ? 1 :
+					         ((minimig_config.cpu & 0xc0) == 0x80) ? 2 : 3;
+					at = (at + (minus ? 3 : 1)) % 4;
 					minimig_config.cpu = (minimig_config.cpu & 0x1c) | steps[at];
 					minimig_ConfigCPU(minimig_config.cpu);
 				}
