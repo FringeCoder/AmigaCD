@@ -658,9 +658,10 @@ static int minimig_ss_request_save()
 		return 0;
 	}
 
-	// Idempotent: re-maps the same four windows, reloads them from the file on
-	// disk and re-stamps the counter word.
-	process_ss(name, 1);
+	// Idempotent: re-maps the same four windows and re-stamps the counter word.
+	// Reads nothing from disk -- the core writes the whole window itself, and
+	// reading all four slots here stalled the game for seconds at every save.
+	process_ss(name, 1, SS_LOAD_NONE);
 
 	// The core reports "saved" long before the file exists -- the poller writes
 	// it. Ask that poller to hurry, so a reset straight after the toast cannot
@@ -727,11 +728,22 @@ static int minimig_ss_request_restore()
 	// core is about to validate holds whatever was there, and a restore after a
 	// power cycle -- the whole point of the feature -- could never work.
 	//
-	// It re-reads all four slots every press, ~16 MB. That is the cost of
-	// always validating the freshest file on disk rather than a stale window,
-	// on a keypress the user made deliberately. It also resets the poller's
+	// It reads the one slot being restored, every press, so the core always
+	// validates the freshest file on disk rather than a stale window. All four
+	// used to be read and upgraded here, which held the main loop -- and with
+	// it the CD drive -- for up to ten seconds. It also resets the poller's
 	// counters, so it cannot itself trigger a spurious write back to disk.
-	process_ss(ss_name, 1);
+	process_ss(ss_name, 1, minimig_config.ss_slot & 3);
+
+	// Nothing on the card for this slot: say so rather than send the core an
+	// empty window and show its "Restore: not a save state".
+	if (!ss_slot_file_bytes(minimig_config.ss_slot & 3))
+	{
+		char msg[40];
+		snprintf(msg, sizeof(msg), "Restore: slot %d is empty", (minimig_config.ss_slot & 3) + 1);
+		Info(msg, 2000, 0, 0, 0, 1);
+		return 0;
+	}
 
 	// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge) exactly as
 	// status[51] is. A level here would restore over and over -- ss_ctrl
@@ -740,17 +752,67 @@ static int minimig_ss_request_restore()
 	// machine that never runs again. The set/clear pair below is housekeeping
 	// on the persisted status word, not the safety property.
 	//
-	// Everything after this is the core's: it validates the window with the
-	// Amiga still running, refuses without freezing if any gate fails, and
-	// reports the outcome as an OSD toast either way (AmigaCD.sv ss_info_*).
-	user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+	// Everything after this is the core's: it freezes the Amiga, validates the
+	// window, and either loads it or releases the machine untouched. It reports
+	// the outcome as an OSD toast either way (AmigaCD.sv ss_info_*).
+	const int slot = minimig_config.ss_slot & 3;
+	user_io_status_set("[53:52]", slot);
+
 	// The drive travels beside the payload rather than in it: where the head is
-	// and what was playing are userspace state the core cannot see. Applied
-	// here so the restored machine's first sector request is served from the
-	// position it was saved at.
-	ss_apply_host_state(minimig_config.ss_slot & 3);
+	// and what was playing are userspace state the core cannot see. It has to
+	// be in place before the restored machine's first sector request, and it
+	// must not be applied at all if the core refuses the file -- the refused
+	// machine runs on from where it was, and a drive aimed at the save's
+	// position under it loses the read in flight. That happened: Flink, a 1.3
+	// file with fast RAM restored without any, FAIL_LENGTH, and the game never
+	// ran again. So the core's live status is watched from the request until
+	// it commits (frozen, past every gate) or refuses. See
+	// ss_restore_watch_step().
+	ss_core_obs_t o;
+	if (!minimig_ss_core_obs(&o))
+	{
+		// A core without the status window: the old order, applied blind.
+		ss_apply_host_state(slot);
+		user_io_status_set("[54]", 1);
+		user_io_status_set("[54]", 0);
+		return 1;
+	}
+
+	ss_restore_watch_t w;
+	ss_restore_watch_begin(&w, o.seq);
 	user_io_status_set("[54]", 1);
 	user_io_status_set("[54]", 0);
+
+	// Validation runs ~270 ms on hardware; the commit window it opens lasts as
+	// long as the load. Three seconds is a backstop for a core that never
+	// answers, and gives up WITHOUT applying, since nothing says it committed.
+	ss_watch_t verdict = SS_WATCH_WAIT;
+	unsigned long deadline = GetTimer(3000);
+	while (verdict == SS_WATCH_WAIT && !CheckTimer(deadline))
+	{
+		if (minimig_ss_core_obs(&o)) verdict = ss_restore_watch_step(&w, o);
+		if (verdict == SS_WATCH_WAIT) usleep(200);
+	}
+
+	unsigned long t_watch = GetTimer(0) - (deadline - 3000);
+	unsigned long t_apply = GetTimer(0);
+	if (verdict == SS_WATCH_APPLY) ss_apply_host_state(slot);
+	t_apply = GetTimer(0) - t_apply;
+
+	// The core can only number its refusal, and for a payload of the wrong
+	// size its text is "not for this core". In this core the size differs by
+	// exactly the Fast RAM block, and the file says whether it has one.
+	if (verdict == SS_WATCH_SKIP && o.load_fail && o.fail_code == SS_FAIL_LENGTH)
+	{
+		const char *why = ss_length_refusal_text(ss_slot_core_words(slot));
+		if (why) ss_replace_restore_info(why);
+	}
+	minimig_ss_diag_log("host restore slot %d: drive state %s (core state %u), "
+	                    "verdict after %lu ms, apply %lu ms", slot + 1,
+	                    verdict == SS_WATCH_APPLY ? "applied" :
+	                    verdict == SS_WATCH_SKIP  ? "left alone, core refused" :
+	                                                "left alone, no verdict in 3 s",
+	                    (unsigned)o.live, t_watch, t_apply);
 	return 1;
 }
 

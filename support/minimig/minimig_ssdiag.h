@@ -1,6 +1,8 @@
 #ifndef MINIMIG_SSDIAG_H
 #define MINIMIG_SSDIAG_H
 
+#include "minimig_savestate.h"
+
 // Save state diagnostics — read the core's 0xF600 UIO status window and log it.
 //
 // A debugging aid, not a feature. See minimig_ssdiag.cpp for the window layout,
@@ -17,5 +19,11 @@ void minimig_ss_diag_poll(void);
 // is the half of the question the core-side window cannot answer. A no-op on
 // non-Minimig cores.
 void minimig_ss_diag_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+// One unthrottled read of the core's live save state status, for code that has
+// to act on it rather than log it -- the restore path, which applies the drive
+// state only once the core has committed (see ss_restore_watch_step()).
+// Returns 0, with *o untouched, off Minimig or when the core has no window.
+int minimig_ss_core_obs(ss_core_obs_t *o);
 
 #endif

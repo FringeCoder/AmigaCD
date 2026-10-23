@@ -2115,26 +2115,45 @@ void ss_expect_save(void)
 // drive has one today -- see akiko_cd32.h for why it cannot live in the core
 // payload.
 //
-// Applied when the restore is TRIGGERED rather than when it finishes. The core
-// validates the file itself and can still refuse, in which case the drive has
-// been aimed at a position the machine never reached -- a cosmetic
-// inconsistency the next drive command corrects. Waiting for the core's verdict
-// instead would cost a poll interval, and the restored machine starts asking
-// for sectors immediately.
+// Called once the core has COMMITTED to the restore, while the machine is still
+// frozen (minimig_ss_request_restore() watches for it). Applying it when the
+// restore was merely triggered was not cosmetic: a refused file leaves the
+// machine running on, and the drive, aimed at a position that machine never
+// reached, dropped the read in flight and every one after it.
 //
 // A file with no host block -- anything saved before this existed -- leaves the
 // drive alone and restores exactly as it used to.
+//
+// The block was copied out when ss_load_slot() read the file, so this is a
+// memcpy and not a parse. Parsing the window here meant a CRC over the whole
+// core payload in uncached DDR3 -- 494 ms for a 3.6 MB state, measured -- and
+// that ran after the commit was seen, so the core could release the machine
+// before the drive had its position.
+static uint8_t  ss_host_blk[4][1024];
+static uint32_t ss_host_len[4];
+
+// What ss_load_slot() learned about each slot's file: how many bytes came off
+// the card (0 = no file), and the payload's core_words once upgraded (0 = not
+// a parseable state). The restore path uses them to refuse an empty slot
+// itself and to explain a refusal the core can only number.
+static uint32_t ss_file_bytes[4];
+static uint32_t ss_file_core_words[4];
+
+uint32_t ss_slot_file_bytes(int slot)  { return ss_file_bytes[slot & 3]; }
+uint32_t ss_slot_core_words(int slot)  { return ss_file_core_words[slot & 3]; }
+
+// A better text for the core's next "Restore: ..." toast, set by the restore
+// path once it knows why the core refused. One-shot: show_core_info() takes it.
+static const char *ss_restore_info_text = 0;
+void ss_replace_restore_info(const char *text) { ss_restore_info_text = text; }
+
 void ss_apply_host_state(int slot)
 {
-	if (!ss_base_win[slot & 3] || !ss_size) return;
+	slot &= 3;
+	if (!ss_host_len[slot]) return;
 
-	const uint32_t *win = (const uint32_t *)ss_base_win[slot & 3];
-	ss_header_t h;
-	if (!ss_header_parse(win, ss_size / 4, &h)) return;
-
-	uint32_t bytes = 0;
-	const void *hb = ss_read_host_block(win, &h, &bytes);
-	if (!hb) return;
+	const void *hb = ss_host_blk[slot];
+	uint32_t bytes = ss_host_len[slot];
 
 	if (!akiko_cd32_state_load(hb, (int)bytes))
 		printf("process_ss: slot %d host block not usable\n", (slot & 3) + 1);
@@ -2186,7 +2205,109 @@ static void ss_rearm(int slot)
 	ss_cnt[slot] = 0xFFFFFFFF;
 }
 
-int process_ss(const char *rom_name, int enable)
+// Reads one slot's file into its window, upgrading an older format on the way.
+//
+// The file is read and upgraded in ordinary cached memory and copied into the
+// window once. The window is /dev/mem mapped O_SYNC, so every access there is
+// uncached: doing the upgrade in place -- a memmove of the payload and a
+// byte-wise CRC over all of it -- took 6.9 s for a 12 MB 1.3 file and 1.0 s
+// for each 3.6 MB 1.4 file, measured on hardware, and the main loop serves the
+// CD drive. Flink's audio stopped for 7.6 s; a restore pressed during the CD32
+// boot outlasted the drive's 6 s re-announce timer and the game never booted.
+//
+// The whole window is still written -- the file, then zeros to the end -- so a
+// truncated file fails the core's CRC rather than restoring over whatever an
+// earlier load left behind, as the memset before the read always ensured.
+static void ss_load_slot(int i, const char *path, uint32_t len)
+{
+	ss_host_len[i] = 0;
+	ss_file_bytes[i] = 0;
+	ss_file_core_words[i] = 0;
+
+	unsigned long t0 = GetTimer(0);
+	uint32_t *buf = (uint32_t *)calloc(len, 1);
+	if (!buf)
+	{
+		printf("process_ss: no %u bytes to load slot %d into\n", len, i + 1);
+		memset(ss_base_win[i], 0, len);
+		return;
+	}
+
+	int got = 0;
+	fileTYPE f = {};
+	if (FileExists(path))
+	{
+		if (!FileOpen(&f, path))
+		{
+			printf("Unable to open file: %s\n", path);
+		}
+		else
+		{
+			// Chunked so the OSD can show progress between reads.
+			ProgressMessage(0, 0, 0, 0);
+			char slot_txt[32];
+			snprintf(slot_txt, sizeof(slot_txt), "Slot %d", i + 1);
+
+			// The bar is scaled to the FILE, not to the window. A save is only
+			// as big as the memory that machine had, so it is normally a
+			// fraction of the window it is read into -- scaling to len would
+			// stop the bar partway every time and look like a failed read.
+			uint32_t total = (f.size > 0 && (uint64_t)f.size < (uint64_t)len)
+			                 ? (uint32_t)f.size : len;
+
+			for (uint32_t off = 0; off < len; )
+			{
+				uint32_t chunk = len - off;
+				if (chunk > SS_IO_CHUNK) chunk = SS_IO_CHUNK;
+
+				int n = FileReadAdv(&f, (uint8_t *)buf + off, chunk);
+				if (n > 0) got += n;
+				// Short read = end of file, which is the normal exit here
+				// rather than an error.
+				if (n != (int)chunk) break;
+
+				off += chunk;
+				ProgressMessage("Restore state", slot_txt, (off < total) ? off : total, total);
+			}
+			ProgressMessage(0, 0, 0, 0);
+			FileClose(&f);
+			printf("process_ss: read %d bytes from file: %s\n", got, path);
+
+			// Older files are upgraded before the core reads any of it; the
+			// core knows only 1.5. A 1.3 file has no WRITTEN mask (inserted
+			// with every bit set, which replays exactly what 1.3 replayed), and
+			// a 1.4 file no MMU words (inserted as zero: translation off). A 1.3
+			// file takes both steps. See ss_upgrade_13_to_14() and
+			// ss_upgrade_14_to_15().
+			if (ss_upgrade_13_to_14(buf, len / 4))
+				printf("process_ss: upgraded a 1.3 state to 1.4: %s\n", path);
+			if (ss_upgrade_14_to_15(buf, len / 4))
+				printf("process_ss: upgraded a 1.4 state to 1.5: %s\n", path);
+
+			// Keep the host half for ss_apply_host_state(), parsed here while
+			// the payload is in cached memory.
+			ss_header_t h;
+			uint32_t bytes = 0;
+			const void *hb = ss_header_parse(buf, len / 4, &h)
+			                 ? ss_read_host_block(buf, &h, &bytes) : 0;
+			if (hb && bytes <= sizeof(ss_host_blk[i]))
+			{
+				memcpy(ss_host_blk[i], hb, bytes);
+				ss_host_len[i] = bytes;
+			}
+			ss_file_bytes[i] = (got > 0) ? (uint32_t)got : 0;
+			if (buf[2] == SS_MAGIC && buf[3] == SS_VERSION) ss_file_core_words[i] = buf[4];
+		}
+	}
+
+	memcpy(ss_base_win[i], buf, len);
+	free(buf);
+
+	minimig_ss_diag_log("process_ss: slot %d loaded, %d bytes from disk, %lu ms",
+	                    i + 1, got, GetTimer(0) - t0);
+}
+
+int process_ss(const char *rom_name, int enable, int load_slot)
 {
 	static char ss_name[1024] = {};
 	static char *ss_sufx = 0;
@@ -2201,7 +2322,6 @@ int process_ss(const char *rom_name, int enable)
 
 		uint32_t len = ss_size;
 		uint32_t map_addr = ss_base;
-		fileTYPE f = {};
 
 		// Apple-II: per-game savestates, keyed by the game disk.
 		const char *ss_media = rom_name;
@@ -2239,7 +2359,6 @@ int process_ss(const char *rom_name, int enable)
 			else
 			{
 				ss_cnt[i] = 0xFFFFFFFF;
-				memset(ss_base_win[i], 0, len);
 
 				if (!i)
 				{
@@ -2252,63 +2371,12 @@ int process_ss(const char *rom_name, int enable)
 					FileGenerateSavestatePath(ss_media, ss_name, i + 1);
 				}
 
-				if (FileExists(ss_name))
-				{
-					if (!FileOpen(&f, ss_name))
-					{
-						printf("Unable to open file: %s\n", ss_name);
-					}
-					else
-					{
-						// Chunked for the same reason as the write above: this
-						// runs for all four slots on one keypress, ~16 MB of
-						// blocking reads, and until now it showed nothing at
-						// all -- the machine simply stopped answering for
-						// several seconds before the core's toast appeared.
-						ProgressMessage(0, 0, 0, 0);
-						char slot_txt[32];
-						snprintf(slot_txt, sizeof(slot_txt), "Slot %d of 4", i + 1);
-
-						// The bar is scaled to the FILE, not to the window.
-						// A save is only as big as the memory that machine had,
-						// so it is normally a fraction of the window it is read
-						// into -- scaling to len would stop the bar partway
-						// every time and look like a failed read.
-						uint32_t total = (f.size > 0 && (uint64_t)f.size < (uint64_t)len)
-						                 ? (uint32_t)f.size : len;
-
-						int ret = 0;
-						for (uint32_t off = 0; off < len; )
-						{
-							uint32_t chunk = len - off;
-							if (chunk > SS_IO_CHUNK) chunk = SS_IO_CHUNK;
-
-							int n = FileReadAdv(&f, (uint8_t *)ss_base_win[i] + off, chunk);
-							if (n > 0) ret += n;
-							// Short read = end of file, which is the normal exit
-							// here rather than an error.
-							if (n != (int)chunk) break;
-
-							off += chunk;
-							ProgressMessage("Restore state", slot_txt, (off < total) ? off : total, total);
-						}
-						ProgressMessage(0, 0, 0, 0);
-						FileClose(&f);
-						printf("process_ss: read %d bytes from file: %s\n", ret, ss_name);
-
-						// Older files are upgraded here, in the window, before
-						// the core reads any of it; the core knows only 1.5. A
-						// 1.3 file has no WRITTEN mask (inserted with every bit
-						// set, which replays exactly what 1.3 replayed), and a
-						// 1.4 file no MMU words (inserted as zero: translation
-						// off). A 1.3 file takes both steps. See
-						// ss_upgrade_13_to_14() and ss_upgrade_14_to_15().
-						if (ss_upgrade_13_to_14((uint32_t *)ss_base_win[i], len / 4))
-							printf("process_ss: upgraded a 1.3 state to 1.4 in place: %s\n", ss_name);
-						if (ss_upgrade_14_to_15((uint32_t *)ss_base_win[i], len / 4))
-							printf("process_ss: upgraded a 1.4 state to 1.5 in place: %s\n", ss_name);
-					}
-				}
+				// Only the slots asked for. A save loads none: the core writes
+				// the whole window itself, and arming is only the counter word
+				// below. A restore loads the one slot it restores. Loading all
+				// four on every press, and upgrading each one, held the main
+				// loop for up to ten seconds -- see ss_load_slot().
+				if (load_slot == SS_LOAD_ALL || load_slot == i) ss_load_slot(i, ss_name, len);
 				*(uint32_t*)(ss_base_win[i]) = 0xFFFFFFFF;
 			}
 
@@ -3162,7 +3230,16 @@ static void show_core_info(int info_n)
 			minimig_ss_diag_log("host show_core_info n=%d -> \"%s\"", info_n, str);
 			// Priority: this is the outcome of something the user pressed, and
 			// the video mode popup would otherwise cover it.
-			if (strlen(str)) Info(str, 2000, 0, 0, 0, 1);
+			// The restore path may know more than the core's numbered refusal
+			// says -- see ss_replace_restore_info().
+			const char *shown = str;
+			if (ss_restore_info_text && !strncmp(str, "Restore:", 8))
+			{
+				shown = ss_restore_info_text;
+				ss_restore_info_text = 0;
+				minimig_ss_diag_log("host show_core_info: shown as \"%s\"", shown);
+			}
+			if (strlen(shown)) Info(shown, 2000, 0, 0, 0, 1);
 			break;
 		}
 	}
