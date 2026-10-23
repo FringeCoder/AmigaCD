@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <initializer_list>
 
@@ -32,6 +33,7 @@ static ss_core_obs_t obs(uint8_t live, int busy, int ok, int fail, uint16_t seq)
 	o.load_busy = busy;
 	o.load_ok = ok;
 	o.load_fail = fail;
+	o.fail_code = 0;
 	o.seq = seq;
 	return o;
 }
@@ -115,6 +117,26 @@ int main(void)
 		ss_restore_watch_begin(&w, 0xFFFF);
 		check("seq wrap still counts as moved",
 		      ss_restore_watch_step(&w, obs(SS_ST_IDLE, 0, 0, 1, 2)) == SS_WATCH_SKIP);
+	}
+
+	// ---- what a LENGTH refusal tells the user -----------------------------
+	//
+	// ss_ctrl's core_words is the fixed part plus 8 MB of Zorro II fast RAM
+	// when fast_ena is set, so a LENGTH refusal of an otherwise valid file is
+	// a Fast RAM mismatch. The core's own toast said "not for this core".
+	// Sizes are the real ones: Chuck Rock without fast RAM, Flink with it.
+	{
+		const uint32_t no_fast   = 3671964u / 4u - 8u;
+		const uint32_t with_fast = 12060508u / 4u - 8u;
+		const char *t1 = ss_length_refusal_text(with_fast);
+		const char *t2 = ss_length_refusal_text(no_fast);
+		check("file with fast RAM says so",
+		      t1 && !strcmp(t1, "Restore: saved with Fast RAM"));
+		check("file without fast RAM says so",
+		      t2 && !strcmp(t2, "Restore: saved without Fast RAM"));
+		check("no file, no claim", ss_length_refusal_text(0) == 0);
+		check("both fit the OSD's 32 columns",
+		      t1 && t2 && strlen(t1) <= 32 && strlen(t2) <= 32);
 	}
 
 	printf("%s\n", failures ? "FAILED" : "ALL PASS");

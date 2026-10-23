@@ -2132,6 +2132,21 @@ void ss_expect_save(void)
 static uint8_t  ss_host_blk[4][1024];
 static uint32_t ss_host_len[4];
 
+// What ss_load_slot() learned about each slot's file: how many bytes came off
+// the card (0 = no file), and the payload's core_words once upgraded (0 = not
+// a parseable state). The restore path uses them to refuse an empty slot
+// itself and to explain a refusal the core can only number.
+static uint32_t ss_file_bytes[4];
+static uint32_t ss_file_core_words[4];
+
+uint32_t ss_slot_file_bytes(int slot)  { return ss_file_bytes[slot & 3]; }
+uint32_t ss_slot_core_words(int slot)  { return ss_file_core_words[slot & 3]; }
+
+// A better text for the core's next "Restore: ..." toast, set by the restore
+// path once it knows why the core refused. One-shot: show_core_info() takes it.
+static const char *ss_restore_info_text = 0;
+void ss_replace_restore_info(const char *text) { ss_restore_info_text = text; }
+
 void ss_apply_host_state(int slot)
 {
 	slot &= 3;
@@ -2206,6 +2221,8 @@ static void ss_rearm(int slot)
 static void ss_load_slot(int i, const char *path, uint32_t len)
 {
 	ss_host_len[i] = 0;
+	ss_file_bytes[i] = 0;
+	ss_file_core_words[i] = 0;
 
 	unsigned long t0 = GetTimer(0);
 	uint32_t *buf = (uint32_t *)calloc(len, 1);
@@ -2278,6 +2295,8 @@ static void ss_load_slot(int i, const char *path, uint32_t len)
 				memcpy(ss_host_blk[i], hb, bytes);
 				ss_host_len[i] = bytes;
 			}
+			ss_file_bytes[i] = (got > 0) ? (uint32_t)got : 0;
+			if (buf[2] == SS_MAGIC && buf[3] == SS_VERSION) ss_file_core_words[i] = buf[4];
 		}
 	}
 
@@ -3211,7 +3230,16 @@ static void show_core_info(int info_n)
 			minimig_ss_diag_log("host show_core_info n=%d -> \"%s\"", info_n, str);
 			// Priority: this is the outcome of something the user pressed, and
 			// the video mode popup would otherwise cover it.
-			if (strlen(str)) Info(str, 2000, 0, 0, 0, 1);
+			// The restore path may know more than the core's numbered refusal
+			// says -- see ss_replace_restore_info().
+			const char *shown = str;
+			if (ss_restore_info_text && !strncmp(str, "Restore:", 8))
+			{
+				shown = ss_restore_info_text;
+				ss_restore_info_text = 0;
+				minimig_ss_diag_log("host show_core_info: shown as \"%s\"", shown);
+			}
+			if (strlen(shown)) Info(shown, 2000, 0, 0, 0, 1);
 			break;
 		}
 	}

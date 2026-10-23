@@ -735,6 +735,16 @@ static int minimig_ss_request_restore()
 	// counters, so it cannot itself trigger a spurious write back to disk.
 	process_ss(ss_name, 1, minimig_config.ss_slot & 3);
 
+	// Nothing on the card for this slot: say so rather than send the core an
+	// empty window and show its "Restore: not a save state".
+	if (!ss_slot_file_bytes(minimig_config.ss_slot & 3))
+	{
+		char msg[40];
+		snprintf(msg, sizeof(msg), "Restore: slot %d is empty", (minimig_config.ss_slot & 3) + 1);
+		Info(msg, 2000, 0, 0, 0, 1);
+		return 0;
+	}
+
 	// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge) exactly as
 	// status[51] is. A level here would restore over and over -- ss_ctrl
 	// re-arms out of idle on any cycle load_req is high -- and the bit being
@@ -788,6 +798,15 @@ static int minimig_ss_request_restore()
 	unsigned long t_apply = GetTimer(0);
 	if (verdict == SS_WATCH_APPLY) ss_apply_host_state(slot);
 	t_apply = GetTimer(0) - t_apply;
+
+	// The core can only number its refusal, and for a payload of the wrong
+	// size its text is "not for this core". In this core the size differs by
+	// exactly the Fast RAM block, and the file says whether it has one.
+	if (verdict == SS_WATCH_SKIP && o.load_fail && o.fail_code == SS_FAIL_LENGTH)
+	{
+		const char *why = ss_length_refusal_text(ss_slot_core_words(slot));
+		if (why) ss_replace_restore_info(why);
+	}
 	minimig_ss_diag_log("host restore slot %d: drive state %s (core state %u), "
 	                    "verdict after %lu ms, apply %lu ms", slot + 1,
 	                    verdict == SS_WATCH_APPLY ? "applied" :

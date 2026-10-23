@@ -197,3 +197,10 @@ ss_watch_t ss_restore_watch_step(ss_restore_watch_t *w, ss_core_obs_t o)
 	// position, and late is what every restore did before this existed.
 	return o.load_ok ? SS_WATCH_APPLY : SS_WATCH_SKIP;
 }
+
+const char *ss_length_refusal_text(uint32_t file_core_words)
+{
+	if (!file_core_words) return 0;
+	return (file_core_words > SS_FAST_WORDS) ? "Restore: saved with Fast RAM"
+	                                         : "Restore: saved without Fast RAM";
+}

@@ -177,6 +177,7 @@ typedef struct
 	uint8_t  load_busy;
 	uint8_t  load_ok;     // sticky until the next restore arms
 	uint8_t  load_fail;   // likewise
+	uint8_t  fail_code;   // ss_ctrl's load_fail_code, meaningful with load_fail
 	uint16_t seq;         // counts state changes; 16 bits, wraps
 } ss_core_obs_t;
 
@@ -195,5 +196,18 @@ typedef enum
 
 void       ss_restore_watch_begin(ss_restore_watch_t *w, uint16_t seq_before);
 ss_watch_t ss_restore_watch_step(ss_restore_watch_t *w, ss_core_obs_t o);
+
+// ss_ctrl's FAST_WORDS: the 8 MB of Zorro II fast RAM a payload carries when
+// the machine had it. core_words is a fixed part plus this or nothing, and the
+// fixed part is well under it.
+#define SS_FAST_WORDS 0x200000u
+// ss_ctrl's load_fail_code for a payload of the wrong size.
+#define SS_FAIL_LENGTH 3u
+
+// The toast for a file the core refused as the wrong length (FAIL_LENGTH),
+// from the file's own core_words; 0 when the file says nothing useful. The
+// core's text, "Restore: not for this core", sent people looking for a build
+// mismatch when the cause was the Fast RAM setting.
+const char *ss_length_refusal_text(uint32_t file_core_words);
 
 #endif

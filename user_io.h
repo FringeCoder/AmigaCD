@@ -286,6 +286,12 @@ int process_ss(const char *rom_name, int enable = 1, int load_slot = SS_LOAD_ALL
 // Applies the host half of a save state -- today, the CD drive position.
 // Call after triggering a restore; a file without a host block is a no-op.
 void ss_apply_host_state(int slot);
+// What the last load of a slot found: bytes read from the card (0 = no file)
+// and the payload's core_words (0 = not a current-format state).
+uint32_t ss_slot_file_bytes(int slot);
+uint32_t ss_slot_core_words(int slot);
+// Replaces the text of the core's next "Restore: ..." toast, once.
+void ss_replace_restore_info(const char *text);
 // Tells the save state poller a save is coming, so it writes the file
 // promptly instead of up to a second later. See its definition.
 void ss_expect_save(void);

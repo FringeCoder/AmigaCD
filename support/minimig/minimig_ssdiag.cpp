@@ -334,6 +334,7 @@ int minimig_ss_core_obs(ss_core_obs_t *o)
 		o->live      =  w[0]       & 0x3f;
 		o->load_ok   = (w[1] >> 2) & 1;
 		o->load_fail = (w[1] >> 3) & 1;
+		o->fail_code = (w[1] >> 4) & 0x0f;
 		o->load_busy = (w[1] >> 9) & 1;
 		o->seq       =  w[2];
 		return 1;
