@@ -740,17 +740,54 @@ static int minimig_ss_request_restore()
 	// machine that never runs again. The set/clear pair below is housekeeping
 	// on the persisted status word, not the safety property.
 	//
-	// Everything after this is the core's: it validates the window with the
-	// Amiga still running, refuses without freezing if any gate fails, and
-	// reports the outcome as an OSD toast either way (AmigaCD.sv ss_info_*).
-	user_io_status_set("[53:52]", minimig_config.ss_slot & 3);
+	// Everything after this is the core's: it freezes the Amiga, validates the
+	// window, and either loads it or releases the machine untouched. It reports
+	// the outcome as an OSD toast either way (AmigaCD.sv ss_info_*).
+	const int slot = minimig_config.ss_slot & 3;
+	user_io_status_set("[53:52]", slot);
+
 	// The drive travels beside the payload rather than in it: where the head is
-	// and what was playing are userspace state the core cannot see. Applied
-	// here so the restored machine's first sector request is served from the
-	// position it was saved at.
-	ss_apply_host_state(minimig_config.ss_slot & 3);
+	// and what was playing are userspace state the core cannot see. It has to
+	// be in place before the restored machine's first sector request, and it
+	// must not be applied at all if the core refuses the file -- the refused
+	// machine runs on from where it was, and a drive aimed at the save's
+	// position under it loses the read in flight. That happened: Flink, a 1.3
+	// file with fast RAM restored without any, FAIL_LENGTH, and the game never
+	// ran again. So the core's live status is watched from the request until
+	// it commits (frozen, past every gate) or refuses. See
+	// ss_restore_watch_step().
+	ss_core_obs_t o;
+	if (!minimig_ss_core_obs(&o))
+	{
+		// A core without the status window: the old order, applied blind.
+		ss_apply_host_state(slot);
+		user_io_status_set("[54]", 1);
+		user_io_status_set("[54]", 0);
+		return 1;
+	}
+
+	ss_restore_watch_t w;
+	ss_restore_watch_begin(&w, o.seq);
 	user_io_status_set("[54]", 1);
 	user_io_status_set("[54]", 0);
+
+	// Validation runs ~270 ms on hardware; the commit window it opens lasts as
+	// long as the load. Three seconds is a backstop for a core that never
+	// answers, and gives up WITHOUT applying, since nothing says it committed.
+	ss_watch_t verdict = SS_WATCH_WAIT;
+	unsigned long deadline = GetTimer(3000);
+	while (verdict == SS_WATCH_WAIT && !CheckTimer(deadline))
+	{
+		if (minimig_ss_core_obs(&o)) verdict = ss_restore_watch_step(&w, o);
+		if (verdict == SS_WATCH_WAIT) usleep(200);
+	}
+
+	if (verdict == SS_WATCH_APPLY) ss_apply_host_state(slot);
+	minimig_ss_diag_log("host restore slot %d: drive state %s (core state %u)", slot + 1,
+	                    verdict == SS_WATCH_APPLY ? "applied" :
+	                    verdict == SS_WATCH_SKIP  ? "left alone, core refused" :
+	                                                "left alone, no verdict in 3 s",
+	                    (unsigned)o.live);
 	return 1;
 }
 

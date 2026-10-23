@@ -2115,12 +2115,11 @@ void ss_expect_save(void)
 // drive has one today -- see akiko_cd32.h for why it cannot live in the core
 // payload.
 //
-// Applied when the restore is TRIGGERED rather than when it finishes. The core
-// validates the file itself and can still refuse, in which case the drive has
-// been aimed at a position the machine never reached -- a cosmetic
-// inconsistency the next drive command corrects. Waiting for the core's verdict
-// instead would cost a poll interval, and the restored machine starts asking
-// for sectors immediately.
+// Called once the core has COMMITTED to the restore, while the machine is still
+// frozen (minimig_ss_request_restore() watches for it). Applying it when the
+// restore was merely triggered was not cosmetic: a refused file leaves the
+// machine running on, and the drive, aimed at a position that machine never
+// reached, dropped the read in flight and every one after it.
 //
 // A file with no host block -- anything saved before this existed -- leaves the
 // drive alone and restores exactly as it used to.

@@ -154,3 +154,46 @@ const void *ss_read_host_block(const uint32_t *win, const ss_header_t *h,
 	if (bytes_out) *bytes_out = h->host_words * 4u;
 	return &win[off];
 }
+
+void ss_restore_watch_begin(ss_restore_watch_t *w, uint16_t seq_before)
+{
+	w->seq0      = seq_before;
+	w->seen_busy = 0;
+}
+
+// Past every gate: from here to S_L_RELEASE the core loads, frozen, and cannot
+// refuse any more.
+static bool ss_load_committed(uint8_t s)
+{
+	switch (s)
+	{
+	case SS_ST_L_ST_FETCH: case SS_ST_L_ST_FEED: case SS_ST_L_ST_WAIT:
+	case SS_ST_L_CH_FETCH: case SS_ST_L_CH_ISSUE: case SS_ST_L_CH_WAIT:
+	case SS_ST_L_RELEASE:  case SS_ST_L_FLUSH:
+	case SS_ST_L_SH_FETCH: case SS_ST_L_SH_LOAD: case SS_ST_L_REPLAY:
+	case SS_ST_L_CLUT_FETCH: case SS_ST_L_CLUT_LOAD:
+	case SS_ST_L_FA_FETCH: case SS_ST_L_FA_LOAD:
+		return true;
+	default:
+		return false;
+	}
+}
+
+ss_watch_t ss_restore_watch_step(ss_restore_watch_t *w, ss_core_obs_t o)
+{
+	if (o.load_busy)
+	{
+		w->seen_busy = 1;
+		return ss_load_committed(o.live) ? SS_WATCH_APPLY : SS_WATCH_WAIT;
+	}
+
+	// Not busy. Either the core has not armed yet, and load_ok / load_fail are
+	// the LAST restore's verdict, or it has finished this one. Only a busy seen
+	// or a state change since the request tells the two apart.
+	if (!w->seen_busy && o.seq == w->seq0) return SS_WATCH_WAIT;
+
+	// Finished. load_ok here means the whole load ran between two polls and
+	// the machine is already running -- late, but the drive still needs its
+	// position, and late is what every restore did before this existed.
+	return o.load_ok ? SS_WATCH_APPLY : SS_WATCH_SKIP;
+}
