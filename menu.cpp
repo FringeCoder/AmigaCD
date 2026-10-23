@@ -658,9 +658,10 @@ static int minimig_ss_request_save()
 		return 0;
 	}
 
-	// Idempotent: re-maps the same four windows, reloads them from the file on
-	// disk and re-stamps the counter word.
-	process_ss(name, 1);
+	// Idempotent: re-maps the same four windows and re-stamps the counter word.
+	// Reads nothing from disk -- the core writes the whole window itself, and
+	// reading all four slots here stalled the game for seconds at every save.
+	process_ss(name, 1, SS_LOAD_NONE);
 
 	// The core reports "saved" long before the file exists -- the poller writes
 	// it. Ask that poller to hurry, so a reset straight after the toast cannot
@@ -727,11 +728,12 @@ static int minimig_ss_request_restore()
 	// core is about to validate holds whatever was there, and a restore after a
 	// power cycle -- the whole point of the feature -- could never work.
 	//
-	// It re-reads all four slots every press, ~16 MB. That is the cost of
-	// always validating the freshest file on disk rather than a stale window,
-	// on a keypress the user made deliberately. It also resets the poller's
+	// It reads the one slot being restored, every press, so the core always
+	// validates the freshest file on disk rather than a stale window. All four
+	// used to be read and upgraded here, which held the main loop -- and with
+	// it the CD drive -- for up to ten seconds. It also resets the poller's
 	// counters, so it cannot itself trigger a spurious write back to disk.
-	process_ss(ss_name, 1);
+	process_ss(ss_name, 1, minimig_config.ss_slot & 3);
 
 	// status[54], edge-detected in RTL (AmigaCD.sv ss_load_edge) exactly as
 	// status[51] is. A level here would restore over and over -- ss_ctrl
@@ -782,12 +784,16 @@ static int minimig_ss_request_restore()
 		if (verdict == SS_WATCH_WAIT) usleep(200);
 	}
 
+	unsigned long t_watch = GetTimer(0) - (deadline - 3000);
+	unsigned long t_apply = GetTimer(0);
 	if (verdict == SS_WATCH_APPLY) ss_apply_host_state(slot);
-	minimig_ss_diag_log("host restore slot %d: drive state %s (core state %u)", slot + 1,
+	t_apply = GetTimer(0) - t_apply;
+	minimig_ss_diag_log("host restore slot %d: drive state %s (core state %u), "
+	                    "verdict after %lu ms, apply %lu ms", slot + 1,
 	                    verdict == SS_WATCH_APPLY ? "applied" :
 	                    verdict == SS_WATCH_SKIP  ? "left alone, core refused" :
 	                                                "left alone, no verdict in 3 s",
-	                    (unsigned)o.live);
+	                    (unsigned)o.live, t_watch, t_apply);
 	return 1;
 }
 

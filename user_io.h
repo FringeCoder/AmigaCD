@@ -278,7 +278,11 @@ char * GetMidiLinkSoundfont();
 void user_io_store_filename(const char *filename);
 int user_io_use_cheats();
 
-int process_ss(const char *rom_name, int enable = 1);
+// Which slots process_ss() reads in from disk: all four (the default, and what
+// every other core expects), none (arming a save), or one slot index (a restore).
+#define SS_LOAD_ALL  (-1)
+#define SS_LOAD_NONE (-2)
+int process_ss(const char *rom_name, int enable = 1, int load_slot = SS_LOAD_ALL);
 // Applies the host half of a save state -- today, the CD drive position.
 // Call after triggering a restore; a file without a host block is a no-op.
 void ss_apply_host_state(int slot);
