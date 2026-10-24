@@ -19,7 +19,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `0c98d24` "Minimig: draw FDD Turbo at its own line in System (#1379)" -- **upstream rewrote its history; content-merged from `d3b8537`, see "Sync 2026-10-22"** | 2026-10-22 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `e698ccd` "Minimig: let the Akiko TOC carry all 99 tracks (#1384)" -- **two of four taken (the 68EC030 adapted), two already here; see "Sync 2026-10-24"** | 2026-10-24 |
+| ^ previous merge base, superseded 2026-10-24 | | `0c98d24` "Minimig: draw FDD Turbo at its own line in System (#1379)" -- upstream rewrote its history; content-merged from `d3b8537`, see "Sync 2026-10-22" | 2026-10-22 |
 | ^ previous merge base, superseded 2026-10-22 (**no longer on upstream's master**) | | `d3b8537` "Adds PCFX system support (#1365)" -- three of four taken (one adapted), see "Sync 2026-10-17" | 2026-10-17 |
 | ^ previous merge base, superseded 2026-10-17 | | `e836aea` "Minimig: 68030 with its clocks..." -- six of seven taken (two adapted), see "Sync 2026-10-16" | 2026-10-16 |
 | ^ previous merge base, superseded 2026-10-16 | | `738cb7a` "Release 20261010." | 2026-10-11 |
@@ -29,7 +30,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `5b93485b` "Fix RTG with the 68030 MMU enabled (#281)" -- **upstream rewrote its history; content-merged from `0bf2ab1`, see "Sync 2026-10-22"**; `430209e` and the real-floppy line still out | 2026-10-22 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `b988bd09` "Fix Denise (black stripes on Flink AGA), fix 68EC020 freeze" -- **all but `4ab0d5f` taken, see "Sync 2026-10-24"** -- FringeCoder/AmigaCD_MiSTer#62, merged into `cd32-native-mvp` as `b8079fce`; `430209e` and the real-floppy line still out | 2026-10-24 |
+| ^ previous pin, superseded 2026-10-24 (**reverted upstream by #284**) | | `5b93485b` "Fix RTG with the 68030 MMU enabled (#281)" -- upstream rewrote its history; content-merged from `0bf2ab1`, see "Sync 2026-10-22" | 2026-10-22 |
 | ^ previous pin, superseded 2026-10-22 (**no longer on upstream's MiSTer**) | | `0bf2ab1` "68020/68030 fixes and the 68030 MMU bus error - #268" -- all ten commits since `26eb46a` taken, see "Sync 2026-10-17" -- FringeCoder/AmigaCD_MiSTer#58 | 2026-10-17 |
 | ^ previous pin, superseded 2026-10-17 | | `26eb46a` -- taken through `26eb46a` (68030 hand-ported in its own PR) -- FringeCoder/AmigaCD_MiSTer#56/#57 | 2026-10-16 |
 | ^ previous pin, superseded 2026-10-16 | | `c5ffbf9` "Fix Absolute Inebriation" -- partial take, floppy line still declined, see "Sync 2026-10-11" | 2026-10-11 |
@@ -102,6 +104,35 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-24: two of four taken, and the core follows with the 68EC030
+
+Main_MiSTer `0c98d24..e698ccd`, a fast-forward this time (`0c98d24` is still on
+upstream's `master`).
+
+| Upstream | Change | Here |
+|---|---|---|
+| `23b4a18` (#1383) | Apple-II: write sync bytes when converting 5.25" images to WOZ | Taken, clean `cherry-pick -x`: `support/a2/iigs_fmt.cpp` was unchanged here since the pin. |
+| `8565774` (#1382) | Keep a saved 68020 (0x03) as a 68020 instead of loading it as the 68030 Fast | **Already here.** This fork never folded 0x03 -- it is CPU Turbo On, the standing divergence of the 2026-10-16, -17 and -22 syncs. Upstream has now come round to the same behaviour, so that divergence is gone. |
+| `e698ccd` (#1384) | Akiko TOC buffer 32 -> 102 points, for discs over 29 tracks (Fightin' Spirit, 34) | **Already fixed here**, at 52 (`support/minimig/akiko_cd32.cpp:541`), since Super Street Fighter II Turbo hit the same wedge on 2026-09-03. 52 is the structural ceiling: `drive_t.track[]` is `track_t[50]` in `ide.h`, here and upstream, so no loadable disc has more than 49 real tracks. 102 would only size for tracks the CD pipeline can never deliver. Not taken. |
+| `065d0d2` (#1381) | 68EC030: CPU byte bit 5 on the 68030 (0x22, and 0x62/0xa2 with a clock), and a saved 0x22 loads as 68EC030 | **Taken, adapted** (decided 2026-10-24, to keep current). The System page's CPU row steps 68000 / 68010 / 68020 / **68EC030** / 68030; the clock stays on the CPU Clock row, which is live for both 68030s and keeps bit 5. The AmigaCD Settings CPU row takes upstream's last seven steps as they are: 68020, 68EC030 40MHz / 50MHz / Fast, 68030 40MHz / 50MHz / Fast. `minimig_fold_removed()` no longer folds 0x22 to the 68030 Fast and keeps the clock on 0x62/0xa2, as upstream's load now does, so a config saved with the old "68030 no MMU" opens as the 68EC030. **The core runs it** since FringeCoder/AmigaCD_MiSTer `763e6db` (Minimig-AGA #283, below), which also holds TC.E off on a save state restore into a 68EC030 -- the restore path is this fork's, so upstream's PMOVE mask does not reach it. Merged into `cd32-native-mvp` as `b8079fce` (#62); a core released before that runs a 68EC030 picked here as the full 68030 with its MMU. |
+
+Minimig-AGA `MiSTer` moved past the `5b93485b` pin, to `b988bd09`, and the core
+followed the same day (FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-xdi173`,
+`763e6db` and `3f8e4bf`). Applied three-way: upstream moved linearly this time.
+
+| Upstream | Change | Core |
+|---|---|---|
+| `9194cef` (#283) | The 68EC030: `ec030` in `cpu_wrapper.v`, TC.E held off and the MMU table walk skipped in the kernel | Taken, plus the save state restore's TC load masked the same way, with a TG68K bench phase (PHASE 9) and a third CI kernel run; falsified both masks. |
+| `9efd296` | CPU cache: a read stops when the CPU leaves the cache (NetBSD MMU fault) | Taken. |
+| `de795a7` | `sdram_ctrl` raises `write_req` only once the cache takes the write (68EC020 freeze without Fast RAM) | Taken. `tb_sdram_fwd` had relied on the old behaviour and posted nothing; it now posts as the CPU does (`3f8e4bf`). |
+| `4767064` (#284) | Revert of `5b93485b` (#281), the RTG driver change for the MMU | Taken. |
+| `4ab0d5f` | Flink AGA sprite stripes: delay the sprite's shift along with its load | **Not taken.** The core's `f9399d6` fixes the same stripes by delaying the serial output, A/B tested on hardware 2026-10-18; both together would move the sprite twice. **Standing divergence.** |
+
+All 65 steps of the core's `rtl-sim.yml` pass locally on the result. Not yet fitted.
+
+The physical-disc fork (`e6e62b2`) and `kblood/Main_MiSTer-cd32-cdtv`
+(`52625a4`) have not moved.
 
 ## Sync 2026-10-22: upstream rewrote both histories
 

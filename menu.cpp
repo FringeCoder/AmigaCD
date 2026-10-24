@@ -893,7 +893,7 @@ static const char *helptexts[] =
 	helptext_custom,
 	"                                Welcome to MiSTer! Use the cursor keys to navigate the menus. Use space bar or enter to select an item. Press Esc or F12 to exit the menus. Joystick emulation on the numeric keypad can be toggled with the numlock or scrlock key, while pressing Ctrl-Alt-0 (numeric keypad) toggles autofire mode.",
 	"                                Minimig can emulate an A600/A1200 IDE harddisk interface. The emulation can make use of Minimig-style hardfiles (complete disk images) or UAE-style hardfiles (filesystem images with no partition table).",
-	"                                Minimig's processor core can emulate a 68000 (cycle accuracy as A500/A600), a 68EC020 at A1200 speed, or a 68030 with MMU at 40MHz or 50MHz, as fast as a real card, or Fast, all with transparent cache. The 68030 has no FPU, and needs a core that offers it.",
+	"                                Minimig's processor core can emulate a 68000 (cycle accuracy as A500/A600), a 68EC020 at A1200 speed, or a 68EC030 or 68030 with MMU at 40MHz or 50MHz, as fast as a real card, or Fast, all with transparent cache. The 68030 has no FPU, and needs a core that offers it.",
 	"                                Minimig can make use of up to 2 megabytes of Chip RAM, up to 1.5 megabytes of Slow RAM (A500 Trapdoor RAM), and up to 384 megabytes of Fast RAM (8MB max for 68000 mode). To use the HRTmon feature you will need a file on the SD card named hrtmon.rom.",
 	"                                Backspace key (or B-hold + A on gamepad) to unmount",
 	"                                Backspace key (or B-hold + A on gamepad) to clear stored option. You have to reload the core to be able to use default value.",
@@ -7574,13 +7574,15 @@ void HandleUI(void)
 		//   bits 1:0  00 68000, 01 68010, 10 68030, 11 68020
 		//   bit  5    68020: the stock-speed throttle (68EC020, cycle exact at
 		//             A1200 speed, 24-bit addresses), i.e. CPU Turbo Off.
-		//   bits 7:6  68030: its clock -- 01 40MHz, 10 50MHz, 00 Fast
-		//             (upstream d49cd64). Every 68030 has its MMU.
+		//   bit  5    68030: no MMU, the 68EC030 (upstream 065d0d2; core
+		//             Minimig-AGA #283, ec030 in cpu_wrapper.v).
+		//   bits 7:6  68030 and 68EC030: the clock -- 01 40MHz, 10 50MHz,
+		//             00 Fast (upstream d49cd64).
 		//   bit  4    was this fork's D-Cache; the core no longer reads it.
 		// Upstream drops the unthrottled 68020 and moves such configs to the
 		// 68030 Fast (d49cd64). This fork keeps it -- it is CPU Turbo On, the
 		// default since 4b4f604 -- and the RTL still runs it (cpucfg 011).
-		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
+		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : ((minimig_config.cpu & 0x23) == 0x22) ? "68EC030" : config_cpu_msg[minimig_config.cpu & 0x03]);
 		OsdWrite(m++, s, menusub == 0, 0);
 		// The 68030's clock (CPU byte bits 7:6). Upstream d49cd64 offers the
 		// three as CPU steps, "68030 40MHz", "68030 50MHz" and "68030 Fast";
@@ -7689,16 +7691,21 @@ void HandleUI(void)
 		{
 			if (menusub == 0)
 			{
-				// 68000 -> 68010 -> 68020 -> 68030. Bits 2-4 (turbo chip/kick,
-				// the old D-Cache bit) are left alone. Bit 5 belongs to the
-				// Turbo row on the 68020 and bits 7:6 to the Clock row on the
-				// 68030, so all three are cleared on every change of CPU: a
-				// 68020 is entered Turbo On, this fork's default, and a 68030
-				// Fast, the 68030 every config had before d49cd64.
-				static const unsigned char cpu_order[4] = { 0, 1, 3, 2 };
+				// 68000 -> 68010 -> 68020 -> 68EC030 -> 68030, the 68EC030
+				// before the 68030 as in upstream 065d0d2's steps. Bits 2-4
+				// (turbo chip/kick, the old D-Cache bit) are left alone. Bit 5
+				// is the Turbo row on the 68020 and the EC on the 68030, and
+				// bits 7:6 belong to the Clock row, so they are set from the
+				// step on every change of CPU: a 68020 is entered Turbo On,
+				// this fork's default, and either 68030 Fast, the 68030 every
+				// config had before d49cd64. Upstream offers the clocks as
+				// CPU steps too; here they stay on the Clock row, which is
+				// live for both 68030s.
+				static const unsigned char cpu_order[5] = { 0, 1, 3, 0x22, 2 };
 				int cpu = minimig_config.cpu & 3;
-				int at = (cpu == 0) ? 0 : (cpu == 1) ? 1 : (cpu == 3) ? 2 : 3;
-				cpu = cpu_order[(at + (minus ? 3 : 1)) & 3];
+				int at = (cpu == 0) ? 0 : (cpu == 1) ? 1 : (cpu == 3) ? 2 :
+				         (minimig_config.cpu & 0x20) ? 3 : 4;
+				cpu = cpu_order[(at + (minus ? 4 : 1)) % 5];
 
 				menustate = MENU_MINIMIG_CHIPSET1;
 				minimig_config.cpu = (minimig_config.cpu & 0x1c) | cpu;
@@ -7706,8 +7713,9 @@ void HandleUI(void)
 			}
 			else if (menusub == 1 && (minimig_config.cpu & 0x3) == 0x2)
 			{
-				// 68030 clock (CPU CFG bits 7:6): 40MHz -> 50MHz -> Fast, the
-				// order of upstream d49cd64's CPU steps.
+				// 68030 or 68EC030 clock (CPU CFG bits 7:6): 40MHz -> 50MHz ->
+				// Fast, the order of upstream d49cd64's CPU steps. Bit 5, the
+				// EC, is kept.
 				minimig_config.cpu = minimig_cpu030_clock_step(minimig_config.cpu, minus);
 				menustate = MENU_MINIMIG_CHIPSET1;
 				minimig_ConfigCPU(minimig_config.cpu);
@@ -8580,7 +8588,7 @@ void HandleUI(void)
 		// 50MHz, or Fast (upstream d49cd64). The 68000 machines (A500, CDTV)
 		// keep their 68000; greyed for them.
 		strcpy(s, " CPU      : ");
-		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : config_cpu_msg[minimig_config.cpu & 0x03]);
+		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : ((minimig_config.cpu & 0x23) == 0x22) ? "68EC030" : config_cpu_msg[minimig_config.cpu & 0x03]);
 		if ((minimig_config.cpu & 0x03) == 0x02) { strcat(s, " "); strcat(s, minimig_cpu030_clock_msg(minimig_config.cpu)); }
 		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
 
@@ -8758,19 +8766,21 @@ void HandleUI(void)
 				minimig_config.memory = ((fc << 4) & 0x30) | ((fc << 5) & 0x80) | (minimig_config.memory & ~0xB0);
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 1) // CPU: 68020, 68030 40MHz, 68030 50MHz, 68030 Fast
+			else if (menusub == 1) // CPU: 68020, 68EC030 or 68030 at 40MHz, 50MHz or Fast
 			{
 				// For the 68020 machines only; the A500 and CDTV keep their
 				// 68000. The 68020 is entered Turbo On, this fork's default;
-				// the three 68030s are upstream d49cd64's last three steps, in
-				// their order.
+				// the six 68030s are upstream 065d0d2's last six steps, in
+				// their order, the 68EC030s first.
 				if (minimig_config.cpu & 0x2)
 				{
-					static const unsigned char steps[4] = { 0x03, 0x42, 0x82, 0x02 };
+					static const unsigned char steps[7] = { 0x03, 0x62, 0xa2, 0x22, 0x42, 0x82, 0x02 };
+					const int ec = (minimig_config.cpu & 0x23) == 0x22;
 					int at = ((minimig_config.cpu & 3) == 3) ? 0 :
 					         ((minimig_config.cpu & 0xc0) == 0x40) ? 1 :
 					         ((minimig_config.cpu & 0xc0) == 0x80) ? 2 : 3;
-					at = (at + (minus ? 3 : 1)) % 4;
+					if (at && !ec) at += 3;
+					at = (at + (minus ? 6 : 1)) % 7;
 					minimig_config.cpu = (minimig_config.cpu & 0x1c) | steps[at];
 					minimig_ConfigCPU(minimig_config.cpu);
 				}
