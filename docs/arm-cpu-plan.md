@@ -96,6 +96,22 @@ is a cheap fix on that side (the FPGA-to-ARM direction would want the same
 trick in the core). If it does not, the delay is in the controller and no
 amount of software helps.
 
+**Result, 2026-10-25:** no effect. latprobe 2ee19d40 (build run 40179229995)
+on the seed-20 probe core, A500, no Fast RAM, runs alternated:
+
+| echo | median | min | p90 | p99 | empty polls (median / p99) |
+|---|---|---|---|---|---|
+| baseline, run 1 | 2.55 us | 1.48 | 2.69 | 23.4 | 10 / 76 |
+| `-F`, run 1 | 2.55 us | 1.49 | 2.69 | 23.3 | 10 / 76 |
+| baseline, run 2 | 2.55 us | 1.48 | 2.67 | 20.4 | 10 / 75 |
+| `-F`, run 2 | 2.55 us | 1.49 | 2.67 | 21.5 | 10 / 76 |
+
+The read-back adds a 141-211 ns ARM access to every round trip and the median
+does not move at all, so the ARM is not on the critical path: it is waiting
+for the echo either way. A same-port read does not hurry the ARM's write
+towards the FPGA's port, and the FPGA still makes 10 empty polls per request.
+Nothing on the ARM side shortens the DDR3 round trip; it stays at ~2.5 us.
+
 ## Step 1d (proposed): a bridge that does not go through DDR3
 
 The Cyclone V's lightweight HPS-to-FPGA bridge maps FPGA registers straight
