@@ -322,14 +322,16 @@ static int vis_mode(volatile uint32_t *lw, uint8_t *ddr, long count, int cpu)
 	double mhz = lw_mhz(lw);
 	if (mhz < 1) mhz = 113.5;   /* plain file: the cycles are whatever the stand-in says */
 
-	static struct vis_set set[5] = {
+	static struct vis_set set[7] = {
 		{ "A, word written 50 us earlier", 0, 0, NULL, NULL },
 		{ "A, word written just before", 0, 0, NULL, NULL },
 		{ "A, written and read back first", 0, 0, NULL, NULL },
 		{ "B, B_SEEN without polling", 0, 0, NULL, NULL },
 		{ "B, polled until visible", 0, 0, NULL, NULL },
+		{ "B, one read of word A instead", 0, 0, NULL, NULL },
+		{ "B, polled, then word B again", 0, 0, NULL, NULL },
 	};
-	for (int k = 0; k < 5; k++) {
+	for (int k = 0; k < 7; k++) {
 		set[k].cyc  = malloc(sizeof(uint32_t) * count);
 		set[k].miss = malloc(sizeof(uint32_t) * count);
 		if (!set[k].cyc || !set[k].miss) { fprintf(stderr, "out of memory\n"); return 1; }
@@ -367,7 +369,7 @@ static int vis_mode(volatile uint32_t *lw, uint8_t *ddr, long count, int cpu)
 		}
 
 		/* B: the bridge says go, the FPGA writes word B, the ARM watches. */
-		for (int k = 3; k < 5 && !give_up; k++) {
+		for (int k = 3; k < 7 && !give_up; k++) {
 			struct vis_set *s = &set[k];
 			v = (v * 1664525u + 1013904223u) & 0x1FFFFFFFu;
 			lw[5] = v;
@@ -378,13 +380,16 @@ static int vis_mode(volatile uint32_t *lw, uint8_t *ddr, long count, int cpu)
 			}
 			uint32_t stale = 0;
 			int seen = 1;
-			if (k == 4) {
+			if (k == 4 || k == 6) {
 				int64_t t0 = now_ns();
 				while (*word_b != v) {
 					stale++;
 					if (now_ns() - t0 > VIS_SPIN_NS) { seen = 0; break; }
 				}
 			}
+			/* controls: is the stall that word's pending write, or any read? */
+			if (k == 5 && *word_a == 0xFFFFFFFFu) stale++;
+			if (k == 6 && *word_b != v) stale++;
 			lw[6] = 0;
 			if (!lw_wait(&lw[6], B_DONE, B_DONE) || !seen) { s->timeouts++; continue; }
 			if (k == 3) b_issue[n_issue++] = lw[6] & 0xFFFF;
@@ -398,7 +403,7 @@ static int vis_mode(volatile uint32_t *lw, uint8_t *ddr, long count, int cpu)
 	printf("ARM to FPGA: A_GO arriving to the FPGA's read returning the new word (stale reads: the FPGA's)\n");
 	for (int k = 0; k < 3; k++) vis_print(&set[k], mhz);
 	printf("FPGA to ARM: the FPGA's write accepted to B_SEEN arriving (stale reads: the ARM's)\n");
-	for (int k = 3; k < 5; k++) vis_print(&set[k], mhz);
+	for (int k = 3; k < 7; k++) vis_print(&set[k], mhz);
 	if (n_issue) {
 		long done = n_issue;
 		qsort(b_issue, done, sizeof(*b_issue), cmp_u32);
@@ -412,6 +417,18 @@ static int vis_mode(volatile uint32_t *lw, uint8_t *ddr, long count, int cpu)
 		double m4 = PCT(set[4].cyc, 0.5);
 		printf("  => the FPGA's write reaches the ARM ~%.0f ns after it is accepted, at the median (polled minus not)\n",
 		       (m4 - m3) * 1000.0 / mhz);
+	}
+	if (set[3].n && set[5].n && set[6].n) {
+		long done = set[3].n;
+		double m3 = PCT(set[3].cyc, 0.5);
+		done = set[4].n;
+		double m4 = PCT(set[4].cyc, 0.5);
+		done = set[5].n;
+		double m5 = PCT(set[5].cyc, 0.5);
+		done = set[6].n;
+		double m6 = PCT(set[6].cyc, 0.5);
+		printf("  controls: a read of another word costs ~%.0f ns there; a second read of word B ~%.0f ns\n",
+		       (m5 - m3) * 1000.0 / mhz, (m6 - m4) * 1000.0 / mhz);
 	}
 	return give_up ? 1 : 0;
 }

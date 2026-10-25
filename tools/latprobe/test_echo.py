@@ -138,9 +138,10 @@ t = threading.Thread(target=visprobe); t.start()
 outv = subprocess.run([exe, "-V", "-n", "200", "-d", g.name], capture_output=True, text=True, timeout=120)
 stop = True; t.join()
 print(outv.stdout, outv.stderr)
-ok = ok and outv.returncode == 0 and a_trials == 600 and b_trials == 400 and "timed out" not in outv.stdout
+ok = ok and outv.returncode == 0 and a_trials == 600 and b_trials == 800 and "timed out" not in outv.stdout
 ok = ok and all(k in outv.stdout for k in ("A, word written 50 us earlier", "A, written and read back first",
                                            "B, polled until visible", "B_GO arriving to the write accepted",
+                                           "B, one read of word A instead", "B, polled, then word B again", "controls:",
                                            "B_GO arriving to the write accepted"))
 # b_cycles 300 polled against 100 not: 200 cycles at whatever clock it measured
 import re
