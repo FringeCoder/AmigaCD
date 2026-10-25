@@ -9,7 +9,8 @@ The MiSTer framework gives a core no AXI bridge to the ARM. The two paths are
 `hps_io` (microseconds per word) and DDR3, which both sides reach; the A2065
 already talks to Main through a DDR3 mailbox (`a2065_ddr3_mailbox.v` in the
 core). So the cost of one chipset access is the DDR3 round trip, and that is
-what step 1 measures.
+what step 1 measures. (Step 1d then wired the lightweight bridge up after
+all; see below.)
 
 ## Steps, each a go / no-go gate
 
@@ -112,12 +113,49 @@ for the echo either way. A same-port read does not hurry the ARM's write
 towards the FPGA's port, and the FPGA still makes 10 empty polls per request.
 Nothing on the ARM side shortens the DDR3 round trip; it stays at ~2.5 us.
 
-## Step 1d (proposed): a bridge that does not go through DDR3
+## Step 1d: a bridge that does not go through DDR3
 
 The Cyclone V's lightweight HPS-to-FPGA bridge maps FPGA registers straight
-into the ARM's address space: no DDR3, no cross-port visibility. MiSTer's
-framework does not wire it up, so measuring it means a `sys/` change and a
-register echo in the core. Even if it came in near 0.5 us per read, that is
-still slower than a real 68000 bus cycle (280-560 ns), so it would not bring
-back chip-RAM code -- it would only make an accelerator's register reads
-cheaper. Worth doing only if the accelerator itself is wanted.
+into the ARM's address space at physical 0xFF200000: no DDR3, no cross-port
+visibility. Main already releases it from reset and makes it visible
+(`fpga_io.cpp` `do_bridge()`); the framework just never instantiated it.
+AmigaCD_MiSTer `claude/lwbridge-echo` (81f9909) does, in `sys/sys_top.v`, with
+`sys/lw_echo.sv` as the only slave: ECHO (rw), MAGIC "LWBR", CYCLES (100 MHz)
+and COUNT. `rtl/sim/lw_echo/tb_lw_echo.sv` checks it as an AXI3 slave (IDs,
+bursts, strobes, stalls; 10568 checks). `latprobe -L` (167d8369) times it and
+refuses to run unless the loaded core's path contains "lwbridge", because an
+access with nothing behind the bridge can hang the ARM.
+
+**Result, 2026-10-25:** fit seed 18, setup +0.038. Installed as
+`_Test/lwbridge/amigacd.rbf`, A500 defaults, 30000-100000 accesses a run:
+
+| per access, ns | cpu 0 (3 runs) | cpu 1 (3 runs) |
+|---|---|---|
+| read | 321-324 | 379-492 |
+| read, timed by the FPGA's clock | 270-284 | 274-782 |
+| write | 356-359 | 437-541 |
+| write + dmb | 356-373 | 514-540 |
+| write, read back | 655-663 | 971-1185 |
+
+Every one of 260000 echoes came back intact. Main shares cpu 1 (23% CPU in
+`top`), which is why its numbers wander; cpu 0 is the honest figure, and it
+repeats to within 2%. Timed one at a time, a write-and-read-back takes 1630 ns
+median on the ARM's clock, of which 1040 ns is `clock_gettime` itself.
+
+What it means:
+
+- A read costs ~320 ns on the ARM, ~275 ns of it inside the bridge. That is
+  inside a real 68000's 280-560 ns bus cycle, where the DDR3 mailbox costs
+  ~2.5 us. A read that the proxy holds (rvalid late) until the chipset cycle
+  completes would be one bridge access per 68k access, not a mailbox round
+  trip. The earlier guess of ~0.5 us was pessimistic.
+- Writes are not posted: 356 ns, the ARM waits for the bridge's response.
+  `/dev/mem` with O_SYNC maps the bridge strongly ordered. A kernel driver or
+  UIO mapping as Device memory would let writes post, and the 12 ns DDR3
+  write in step 1b suggests what that buys. Not measured.
+- So for step 2 the bridge replaces the DDR3 mailbox as the request path. It
+  costs a `sys/` change, which the core carries anyway.
+
+The original proposal, kept for the record: even near 0.5 us a read would
+still be slower than a 68000 bus cycle, so it would only make an
+accelerator's register reads cheaper.
