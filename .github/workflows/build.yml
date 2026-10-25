@@ -106,6 +106,11 @@ jobs:
       - name: Build latprobe
         run: make -C tools/latprobe
 
+      # MEASUREMENT ONLY: step 3 of the ARM-CPU plan. A 68000 (Musashi) on the
+      # ARM, driving the Amiga's bus through the core's proxy.
+      - name: Build armcpu
+        run: make -C tools/armcpu
+
       # bin/MiSTer is stripped by the Makefile; bin/MiSTer.elf keeps symbols.
       # `file` is the quickest confirmation this really is an ARM binary and not
       # something the host toolchain produced. The GLIBC_* dump is the number to
@@ -128,6 +133,7 @@ jobs:
             bin/MiSTer
             bin/MiSTer.elf
             tools/latprobe/latprobe
+            tools/armcpu/armcpu
           if-no-files-found: error
           # Without this these keep the repository default and never expire. 493
           # of them accumulated from 2026-07-30 onward, 0.83 GB, which is over
@@ -319,6 +325,12 @@ jobs:
       # broken disarm would leave the real probe polling DDR3 flat out.
       - name: latprobe protocol (host)
         run: python3 tools/latprobe/test_echo.py
+
+      # armcpu on a plain file standing in for the bridge, with a hand-assembled
+      # ROM: reset vectors and overlay from the ROM, big-endian writes, the
+      # overlay following CIA-A, RESET restoring it, the bus given back.
+      - name: armcpu emulator (host)
+        run: python3 tools/armcpu/test_armcpu.py
 
       # The same compiled tests under ASan and UBSan. Some of what they guard is
       # undefined behaviour that glibc happens to get right: mgl_rbf.cpp's
