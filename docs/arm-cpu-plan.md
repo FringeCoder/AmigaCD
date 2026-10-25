@@ -237,6 +237,76 @@ What it means:
   would cost ~1.2 us, against a 68000's 280-560 ns. BigMig's answer below,
   chip RAM in SDRAM behind the snooped CPU cache, avoids the question.
 
+## Step 2: the FPGA bus proxy, driven from the ARM
+
+The FPGA half of the ARM CPU. AmigaCD_MiSTer `claude/lwbridge-echo`
+571d1f2:
+
+- `sys/lw_echo.sv` forwards lightweight-bridge offsets 0x080000-0x1FFFFF to
+  the core, one request per beat, and answers only when the core does.
+- `rtl/armcpu_bridge.v`: control registers at 0x080000 (MAGIC "ACPU", OWN,
+  BANK, STATUS with Paula's interrupt level, CYCLES, LAST, WORDS) and a 1 MB
+  window at 0x100000 onto the 68k's address space, in the 68k's byte order
+  (the ARM byte-swaps halfwords and words). An access is one or two 68000
+  word cycles; a byte read keeps to its own data strobe; writes are posted.
+- `rtl/proxy68k.v` plays each word cycle on the fx68k's pins with fx68k
+  busControl's phase timing. cpu_wrapper muxes it in on the 68000 path only
+  while OWN is set and holds the fx68k in reset meanwhile, so gary, the chip
+  bus, autoconfig and the CDTV bridge all see a 68000; with OWN clear the
+  fx68k's pins pass straight through. Nothing can hang the ARM: no DTACK for
+  ~9 ms ends a cycle, and a reset mid-cycle still answers.
+- `rtl/sim/armcpu/tb_armcpu.sv`: AXI to a 68000 bus slave that checks every
+  pin edge against fx68k's rules; 5832 checks, 17 mutations caught.
+- `latprobe -P` (AmigaCD 3326acf7) takes the bus, checks chip RAM in every
+  size, reads VHPOSR live, times each access kind and gives the bus back.
+
+The bridge, lw_echo and armcpu_bridge run on clk_sys (28.4 MHz). On clk_114
+the new logic joined the core's near-critical paths there and no seed of 19
+closed; on clk_sys it is out of the failing paths entirely (lw_echo only
+shows in the hold report, with slack to spare).
+
+**Result, 2026-10-25:** seed 9 of 20, setup -0.158 ns (no seed closes; see
+below). CPU set to 68000, cpu 0, two runs of 20000:
+
+| per access, chip RAM | ARM clock | by the bridge (request to last cycle) |
+|---|---|---|
+| read byte | 1709-1761 ns | 881 ns |
+| read halfword | 1696-1781 ns | 881-916 ns |
+| read word (two 68k cycles) | 2719-2778 ns | 1727 ns |
+| write byte | 1043-1207 ns | 811 ns |
+| write halfword | 1062-1161 ns | 811-1093 ns |
+| write word | 2019-2306 ns | 1656 ns |
+
+0 of 20000 random words read back wrong in either run, every size and the
+byte order were right, VHPOSR moved between reads, and after the bus was
+given back the A500 came up at the Kickstart 1.3 insert-disk screen.
+
+What it means:
+
+- **It works:** the ARM can be the CPU of the existing machine, through the
+  existing 68000 path, without touching the other CPUs.
+- **It is slow:** a chip-RAM halfword costs ~1.7 us from the ARM, three times
+  a real 68000's 564 ns cycle and BigMig's 607 ns. Two parts:
+  - ~0.88 us in the FPGA. A 68000-timed cycle is 564 ns at the least, and
+    the proxy waits for the next enPhi1 and for the CPU's chip-bus slot.
+  - ~0.85 us in the bridge. Step 1d read in ~320 ns with the bridge on a
+    100-114 MHz clock; on clk_sys every AXI handshake costs a 35 ns cycle.
+- **Timing does not close.** The best of 20 seeds is -0.158 ns. The new
+  logic is no longer in the failing paths; what fails is the usual clk_114
+  population (the TG68K read gate, ascal, the DDR3 controller, SDRAM). This
+  build still carries step 1's and 1e's probes, and the requirement above
+  says the existing CPUs must keep closing, so this comes first.
+
+Levers before step 3:
+
+1. Timing: drop the step 1 and 1e probes (latprobe_ddr3, visprobe_ddr3)
+   from the build, then fit again.
+2. Bridge latency: the bridge back on a fast clock, with its paths
+   pipelined, or the full h2f AXI bridge as BigMig uses.
+3. Bus cycle: for the ARM CPU, chip RAM through the SDRAM CPU port and its
+   snooped cache instead of a 68000-timed chip-bus cycle (BigMig's route),
+   keeping the 68000 timing as a "compat" setting.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
@@ -307,7 +377,8 @@ Where things are:
 | the DDR3 echo probe, `rtl/A2065/latprobe_ddr3.v`, its bench `rtl/A2065/sim/tb_latprobe.v`, wired into `a2065.v` behind the mailbox | AmigaCD_MiSTer commit `b570234` |
 | the lightweight bridge in `sys/sys_top.v` and its register echo `sys/lw_echo.sv`, bench `rtl/sim/lw_echo/tb_lw_echo.sv` (on top of `b570234`) | AmigaCD_MiSTer branch **`claude/lwbridge-echo`**, commit `81f9909` -- the one branch that holds both; never merged, on purpose |
 | the DDR3 visibility probe `rtl/A2065/visprobe_ddr3.v` (bench `rtl/A2065/sim/tb_visprobe.v`), the bridge moved to DDRAM_CLK with registers 4-7 passed into emu; `latprobe -V` | AmigaCD_MiSTer `claude/lwbridge-echo` commit `2053af4`; AmigaCD `eb97be70` |
-| the measured numbers | the step 1, 1b, 1c, 1d and 1e sections above |
+| the 68000 bus proxy: `rtl/proxy68k.v`, `rtl/armcpu_bridge.v`, lw_echo's bus port, bench `rtl/sim/armcpu/tb_armcpu.sv`; bridge on clk_sys; `latprobe -P` | AmigaCD_MiSTer `claude/lwbridge-echo` commit `571d1f2`; AmigaCD `3326acf7` |
+| the measured numbers | the step 1, 1b, 1c, 1d, 1e and 2 sections above |
 
 What to start from, in order:
 
