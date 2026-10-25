@@ -23,14 +23,25 @@
  *         already in it); test_armcpu.py checks what lands in it
  *     -f  run without the "lwbridge" core check (only on a core you know has
  *         the proxy: with nothing behind 0xFF200000 an access hangs the ARM)
+ *     -w  warm start: leave chip RAM as it is. By default the ExecBase pointer
+ *         at $4 is cleared first, so Kickstart cold-starts instead of trusting
+ *         whatever the previous CPU left in RAM (its capture vectors and
+ *         resident list point into code that is no longer there)
+ *     -D  debug: keep the last 8192 instructions (Musashi's instruction hook,
+ *         so the timing stays as it is without -D) and every CIA-A write,
+ *         RESET and interrupt level change, and dump them disassembled when a
+ *         slice ends with the PC in low memory with the overlay on or the
+ *         stack pointer outside RAM, or at the end (code below $400 is not a
+ *         fault: a disk's trackloader lives there)
  *
  * The bridge's 1 MB window is in the 68k's byte order, so a halfword or word
  * is byte-swapped here (latprobe -P does the same). The emulator follows the
  * ROM overlay itself -- CIA-A PRA bit 0 through DDRA, as Gary does -- and
  * reads $000000-$07FFFF from its own copy of the ROM while it is on, so the
  * reset vectors never depend on the bus. Interrupts: Paula's level is read
- * from armcpu_bridge STATUS every slice of 68000 cycles and handed to
- * Musashi, which autovectors. RESET pulls the CPU's reset output for the
+ * from armcpu_bridge STATUS every slice of 500 68000 cycles and handed to
+ * Musashi again each time, which autovectors (Musashi drops a level once it
+ * has taken it; the Amiga's stay up until the handler clears them). RESET pulls the CPU's reset output for the
  * instruction's 124 clocks (CTRL bit 3), which resets the chipset and CIAs.
  *
  * Taking the bus holds the fx68k in reset; giving it back restarts the
@@ -62,7 +73,7 @@
 #define CTRL_OWN    1u
 #define CTRL_RESET  8u
 
-#define SLICE       2000           /* 68000 cycles between interrupt polls */
+#define SLICE       500            /* 68000 cycles between interrupt polls */
 
 static volatile uint32_t *ctl;
 static volatile uint8_t  *win;
@@ -74,6 +85,32 @@ static int      ovl = 1;           /* ROM overlay on $000000 (after reset) */
 static uint8_t  cia_pra, cia_ddra;
 
 static uint64_t n_rom, n_bus_rd, n_bus_wr;
+
+/* -D: what led up to the PC leaving the ROM */
+#define RING 8192
+static int debug;
+static struct { uint32_t pc, sr, a7; uint8_t ovl, ipl; } ring[RING];
+static unsigned ring_n;
+static int level;
+
+void armcpu_instr_hook(unsigned int pc)
+{
+	if (!debug) return;
+	unsigned k = ring_n++ % RING;
+	ring[k].pc  = pc & 0xFFFFFF;
+	ring[k].sr  = m68k_get_reg(NULL, M68K_REG_SR);
+	ring[k].a7  = m68k_get_reg(NULL, M68K_REG_A7);
+	ring[k].ovl = ovl;
+	ring[k].ipl = level;
+}
+static char events[64][96];
+static unsigned n_events;
+static void event(const char *fmt, uint32_t a, uint32_t b)
+{
+	if (!debug) return;
+	snprintf(events[n_events % 64], sizeof(events[0]), fmt, a, b);
+	n_events++;
+}
 static volatile sig_atomic_t stop;
 
 static inline int64_t now_ns(void)
@@ -105,6 +142,7 @@ static inline void cia_track(uint32_t a, uint8_t v)
 	default: return;
 	}
 	ovl = !((cia_ddra & 1) && !(cia_pra & 1));
+	event("CIA-A write %06x = %02x", a, v);
 }
 
 static inline int is_rom(uint32_t a)
@@ -164,6 +202,7 @@ unsigned int m68k_read_disassembler_32(unsigned int a) { return m68k_read_memory
 /* RESET: the CPU's reset output low for 124 68000 clocks (~17.5 us) */
 static void armcpu_reset_instr(void)
 {
+	event("RESET at PC %06x (%x)", m68k_get_reg(NULL, M68K_REG_PPC) & 0xFFFFFF, 0);
 	ctl[1] = ctrl_bits | CTRL_RESET;
 	int64_t t0 = now_ns();
 	while (now_ns() - t0 < 20000) ;
@@ -206,10 +245,10 @@ int main(int argc, char **argv)
 	const char *rom_path = "/media/fat/games/Amiga500HD/1.3-scsi-patched.rom";
 	const char *dev = NULL;
 	double seconds = 20;
-	int cpu = 0, quiet = 0, force = 0, opt;
+	int cpu = 0, quiet = 0, force = 0, warm = 0, opt;
 	unsigned mode = 6;
 
-	while ((opt = getopt(argc, argv, "r:t:m:c:d:qfh")) != -1) {
+	while ((opt = getopt(argc, argv, "r:t:m:c:d:qfwDh")) != -1) {
 		switch (opt) {
 		case 'r': rom_path = optarg; break;
 		case 't': seconds = atof(optarg); break;
@@ -218,6 +257,8 @@ int main(int argc, char **argv)
 		case 'd': dev = optarg; break;
 		case 'q': quiet = 1; break;
 		case 'f': force = 1; break;
+		case 'D': debug = 1; break;
+		case 'w': warm = 1; break;
 		default:
 			fprintf(stderr, "usage: %s [-r rom] [-t seconds] [-m mode] [-c cpu] [-q] [-d file] [-f]\n", argv[0]);
 			return 2;
@@ -270,6 +311,7 @@ int main(int argc, char **argv)
 	m68k_set_cpu_type(M68K_CPU_TYPE_68000);
 	m68k_set_reset_instr_callback(armcpu_reset_instr);
 	armcpu_reset_instr();             /* a clean machine: chipset and CIAs reset, overlay on */
+	if (!warm) { bus_wr16(4, 0); bus_wr16(6, 0); }   /* no ExecBase: a cold start */
 	m68k_pulse_reset();
 
 	printf("armcpu: Musashi 68000 on cpu %d, %s, mode %u (%s%s), ROM %s\n", cpu,
@@ -279,11 +321,22 @@ int main(int argc, char **argv)
 
 	int64_t t_start = now_ns(), t_report = t_start;
 	uint64_t cycles = 0, cyc_report = 0, rd0 = 0, wr0 = 0, rom0 = 0;
-	int level = 0;
+	int dumped = 0;
 	while (!stop) {
+		/* Paula's level, handed over every slice: the Amiga's interrupts are
+		 * level-triggered, but Musashi without an acknowledge callback clears
+		 * its pending level when it takes the interrupt, so a level that
+		 * stays up has to be given again or it is taken only once */
 		int lv = ctl[3] & 7;
-		if (lv != level) { level = lv; m68k_set_irq(level); }
+		if (lv != level) { level = lv; event("IPL now %d (%x)", level, 0); }
+		m68k_set_irq(level);
 		cycles += m68k_execute(SLICE);
+		if (debug) {
+			uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
+			uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7) & 0xFFFFFF;
+			if ((ovl && pc < 0x80000) ||
+			    sp < 0x400 || (sp > 0x200000 && sp < 0xC00000) || sp > 0xD80000) { dumped = 1; break; }
+		}
 
 		int64_t t = now_ns();
 		if (seconds > 0 && t - t_start >= (int64_t)(seconds * 1e9)) break;
@@ -297,6 +350,21 @@ int main(int argc, char **argv)
 			fflush(stdout);
 			t_report = t; cyc_report = cycles; rd0 = n_bus_rd; wr0 = n_bus_wr; rom0 = n_rom;
 		}
+	}
+	if (debug) {
+		char buf[100];
+		printf("debug: %s; last %u of %u instructions (PC SR A7 OVL IPL), newest last:\n",
+		       dumped ? "the PC or stack went where Kickstart never takes them" : "ran out of time",
+		       ring_n < RING ? ring_n : RING, ring_n);
+		for (unsigned i = ring_n > RING ? ring_n - RING : 0; i < ring_n; i++) {
+			unsigned k = i % RING;
+			m68k_disassemble(buf, ring[k].pc, M68K_CPU_TYPE_68000);
+			printf("  %06x %04x %08x %d %d  %s\n", ring[k].pc, ring[k].sr, ring[k].a7, ring[k].ovl, ring[k].ipl, buf);
+		}
+		printf("  now: PC %06x SR %04x A7 %08x OVL %d\n", m68k_get_reg(NULL, M68K_REG_PC),
+		       m68k_get_reg(NULL, M68K_REG_SR), m68k_get_reg(NULL, M68K_REG_A7), ovl);
+		printf("debug: last %u of %u events:\n", n_events < 64 ? n_events : 64, n_events);
+		for (unsigned i = n_events > 64 ? n_events - 64 : 0; i < n_events; i++) printf("  %s\n", events[i % 64]);
 	}
 	double total = (now_ns() - t_start) / 1e9;
 	printf("  ran %.1f s: %llu 68000 cycles (%.2f MHz), %llu bus reads, %llu bus writes, %llu ROM reads; PC %06x\n",

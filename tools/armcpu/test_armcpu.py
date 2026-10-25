@@ -72,6 +72,31 @@ for name, good in checks.items():
     print(("ok   " if good else "FAIL ") + name)
     ok = ok and good
 
+# A level that stays up is taken again and again, as on a 68000: Paula's
+# lines are level-triggered, and Musashi drops a level it has taken unless it
+# is handed the level again. The handler at $1000 counts, never clears.
+irq = (struct.pack(">II", 0x00080000, 0x00F80008) +
+    w(0x13FC, 0x0003, 0x00BF, 0xE201) +           # DDRA
+    w(0x13FC, 0x0000, 0x00BF, 0xE001) +           # OVL off
+    w(0x23FC, 0x0000, 0x1000, 0x0000, 0x0078) +   # move.l #$1000,$78 (level 6)
+    w(0x33FC, 0x5279, 0x0000, 0x1000) +           # $1000: addq.w #1,$2000
+    w(0x33FC, 0x0000, 0x0000, 0x1002) +
+    w(0x33FC, 0x2000, 0x0000, 0x1004) +
+    w(0x33FC, 0x4E73, 0x0000, 0x1006) +           #        rte
+    w(0x46FC, 0x2000) +                           # move #$2000,sr
+    w(0x60FE))                                    # bra.s *
+rom2 = tempfile.NamedTemporaryFile(delete=False, suffix=".rom")
+rom2.write(irq + b"\0" * (0x80000 - len(irq))); rom2.close()
+mm[:] = b"\0" * 0x200000
+struct.pack_into("<I", mm, 0x80000, 0x41435055)
+struct.pack_into("<I", mm, 0x8000C, 0x106)          # a 68000, interrupt level 6
+mm.flush()
+r = subprocess.run([exe, "-d", f.name, "-r", rom2.name, "-t", "0.2", "-q"], capture_output=True, text=True, timeout=60)
+taken = struct.unpack_from(">H", mm, W + 0x2000)[0]
+good = r.returncode == 0 and taken > 100
+print(("ok   " if good else "FAIL ") + "a level that stays up is taken again (%d times)" % taken)
+ok = ok and good
+
 # refusals: no MAGIC, not a 68000, and no lwbridge core without -d
 struct.pack_into("<I", mm, 0x8000C, 0); mm.flush()
 r = subprocess.run([exe, "-d", f.name, "-r", rom.name, "-t", "0.1"], capture_output=True, text=True, timeout=30)
