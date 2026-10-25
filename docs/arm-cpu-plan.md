@@ -307,6 +307,78 @@ Levers before step 3:
    snooped cache instead of a 68000-timed chip-bus cycle (BigMig's route),
    keeping the 68000 timing as a "compat" setting.
 
+## Step 2b: timing closed, a faster bridge, and FAST reads
+
+The three levers above, done (AmigaCD_MiSTer `claude/lwbridge-echo`):
+
+1. **Probes out** (7b5aae6): latprobe_ddr3 and visprobe_ddr3 are no longer
+   built; a2065.v and minimig.v are back to e89ad97. Their sources and
+   benches stay.
+2. **Bridge on clk_100m** (7b5aae6): lw_echo and armcpu_bridge run on the
+   HPS's own clock, its own group in the SDC, so none of their logic is on
+   clk_114. The crossing to the proxy on clk_sys is asynchronous: two flops
+   on px_tgl, px_ack_tgl, px_own, the CPU setting and the interrupt level,
+   with every field held from its toggle to its answer.
+3. **FAST reads** (9d4a752): armcpu_bridge CTRL bit 1. While the proxy owns
+   the bus with FAST, cpu_wrapper sets turbochip_d / turbokick_d, so reads of
+   chip RAM, Kickstart and fast RAM go through the SDRAM CPU port and its
+   cache -- the 68020's turbo chip/kick route, whose cache snoops every
+   chipset write into both halves. A second memory_router decodes the held
+   request so the proxy knows before it starts; such a read skips the 68000
+   phases and ends on the port's ready. Writes, and every access to the
+   custom chips, CIAs and autoconfig, keep the 68000 timing. FAST is off by
+   default.
+
+tb_armcpu runs its random pass with FAST off and on and the bridge on an
+unrelated 100 MHz clock: 9648 checks, five FAST mutations caught.
+
+**Timing:** seed 2 of 20 closes, setup +0.034 ns (run 40218489738). That is
+the core's normal rate, not a cost of this work. The same CI fit on commits
+without it:
+
+| commit | what | seeds closing | best |
+|---|---|---|---|
+| 79669d2 | before any ARM-CPU work | 2 of 20 | +0.035 |
+| b570234 | step 1 probe only | 0 of 20 | -0.071 |
+| 7b5aae6 | levers 1 and 2 | 0 of 20 | -0.012 |
+| 9d4a752 | levers 1, 2 and 3 | 1 of 20 | +0.034 |
+
+What fails, on every build with or without the ARM CPU, is the usual
+clk_114 population, led by Q.rdgate_to_cpu (the TG68K read gate); the
+cpu_wrapper families keep 0.55-1.7 ns of slack.
+
+**Result, 2026-10-25:** CPU set to 68000, cpu 0, two runs of 20000; the
+bridge clock now measures 100.0 MHz.
+
+| per access, chip RAM | 68000 timing | FAST | step 2 (clk_sys bridge) |
+|---|---|---|---|
+| read byte | 1330-1355 ns | 651-652 ns | 1709-1761 ns |
+| read halfword | 1353-1398 ns | **652 ns** | 1696-1781 ns |
+| read word | 2372-2438 ns | 1060-1129 ns | 2719-2778 ns |
+| write byte | 978-1069 ns | 1065-1095 ns | 1043-1207 ns |
+| write halfword | 983-1039 ns | 1020-1078 ns | 1062-1161 ns |
+| write word | 1998-2002 ns | 2061-2074 ns | 2019-2306 ns |
+
+By the bridge's own clock a FAST halfword read is 260-290 ns in the FPGA,
+against 720-820 ns for a 68000-timed one. 0 of 20000 random words wrong in
+each run; with FAST, 0 of 512 reads stale after the ARM's own writes and 0
+of 256 after a blitter clear the ARM started itself -- the snooped cache
+keeps up with both. After the bus was given back the A500 came up at the
+Kickstart 1.3 screen.
+
+What it means:
+
+- **Reads are now at BigMig's figure:** 652 ns a halfword from the ARM
+  against its quoted 607 ns, and faster than a real 68000's 564 ns cycle
+  once the ARM's own instruction time is counted in.
+- **Writes are the slow side now:** ~1.0 us each, because every write is a
+  68000-timed chip-bus cycle (posted, but the next one waits for it). The
+  next lever is writes to chip RAM through the SDRAM port as well, which the
+  68020 path never does today, so it needs its own coherence argument
+  (chipset DMA reads the SDRAM directly; the CPU cache is write-through).
+- **The existing CPUs are untouched:** with OWN clear the fx68k's pins pass
+  through, FAST changes nothing, and the TG68K path has no change.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
@@ -378,7 +450,8 @@ Where things are:
 | the lightweight bridge in `sys/sys_top.v` and its register echo `sys/lw_echo.sv`, bench `rtl/sim/lw_echo/tb_lw_echo.sv` (on top of `b570234`) | AmigaCD_MiSTer branch **`claude/lwbridge-echo`**, commit `81f9909` -- the one branch that holds both; never merged, on purpose |
 | the DDR3 visibility probe `rtl/A2065/visprobe_ddr3.v` (bench `rtl/A2065/sim/tb_visprobe.v`), the bridge moved to DDRAM_CLK with registers 4-7 passed into emu; `latprobe -V` | AmigaCD_MiSTer `claude/lwbridge-echo` commit `2053af4`; AmigaCD `eb97be70` |
 | the 68000 bus proxy: `rtl/proxy68k.v`, `rtl/armcpu_bridge.v`, lw_echo's bus port, bench `rtl/sim/armcpu/tb_armcpu.sv`; bridge on clk_sys; `latprobe -P` | AmigaCD_MiSTer `claude/lwbridge-echo` commit `571d1f2`; AmigaCD `3326acf7` |
-| the measured numbers | the step 1, 1b, 1c, 1d, 1e and 2 sections above |
+| probes out, bridge on clk_100m, FAST reads; `latprobe -P` with FAST and the blitter check | AmigaCD_MiSTer `claude/lwbridge-echo` commit `9d4a752` (fit run 40218489738, seed 2); AmigaCD `326a8224` |
+| the measured numbers | the step 1, 1b, 1c, 1d, 1e, 2 and 2b sections above |
 
 What to start from, in order:
 
