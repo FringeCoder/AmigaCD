@@ -265,13 +265,17 @@ written would rebuild BigMig. What is left is a product choice:
    soft CPUs: the most work, a second core to maintain, and the CD32 library's
    timing-sensitive titles would still need the cycle-exact build.
 
-## Decision, 2026-10-25: leave the ARM CPU to BigMig
+## Proposed 2026-10-25, not adopted: leave the ARM CPU to BigMig
 
-Option 1. AmigaCD stays the cycle-exact CD32/CDTV machine; a fast ARM CPU is
-BigMig's job, and nothing of this plan goes into the release core. The
-measurement work is kept, so the investigation does not have to be redone.
+A session proposed option 1 -- AmigaCD stays the cycle-exact CD32/CDTV
+machine and a fast ARM CPU is BigMig's job -- and recorded it here as a
+decision. It was not the project's decision: Mark chose to continue with
+step 2 (2026-10-25). The BigMig survey above stays as prior art: its seam,
+its snooped chip-RAM cache and its `maxcpus=1` CPU core are the reference
+for steps 2-4. The notes below, written for picking the work up again, are
+the same reference.
 
-### If you want to do it anyway
+### Where things are, and what to reuse
 
 Where things are:
 
