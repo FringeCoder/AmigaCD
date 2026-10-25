@@ -48,9 +48,11 @@
  *         "lwbridge" path as -L. Takes the bus (the 68000 is held in reset,
  *         so the Amiga stops), checks chip RAM reads back what was written in
  *         every size, reads the beam position live from VHPOSR, times each
- *         access kind with 68000 timing and with FAST (reads through the
- *         SDRAM CPU port), checks FAST reads see both the ARM's own writes and
- *         a blitter clear, and gives the bus back -- the Amiga then reboots. With
+ *         access kind with 68000 timing, with FAST (reads through the SDRAM
+ *         CPU port) and with FASTW as well (writes too), checks FAST reads see
+ *         the ARM's own writes and a blitter clear, checks the blitter copies
+ *         what FASTW just wrote and that a FASTW write after a blit sticks,
+ *         and gives the bus back -- the Amiga then reboots. With
  *         -d, the file is the bridge's 2 MB (a plain file is a fair model of
  *         memory order; the counters stand still).
  *
@@ -564,11 +566,14 @@ static int px_mode(volatile uint8_t *lw, long count, int cpu)
 	usleep(50000);
 	double mhz = (px_ctl[4] - c0) * 1000.0 / (double)(now_ns() - t0);
 	uint32_t w0 = px_ctl[6];
-	for (int fast = 0; fast < 2; fast++) {
-		px_ctl[1] = fast ? 3 : 1;
-		if ((px_ctl[1] & 3) != (fast ? 3u : 1u)) { fprintf(stderr, "CTRL did not take FAST=%d\n", fast); return 1; }
+	static const uint32_t ctl_of[] = { 1, 3, 7 };
+	static const char *mode_of[] = { "68000 timing", "FAST (reads through the SDRAM port)",
+	                                 "FAST + FASTW (reads and writes through the SDRAM port)" };
+	for (int fast = 0; fast < 3; fast++) {
+		px_ctl[1] = ctl_of[fast];
+		if ((px_ctl[1] & 7) != ctl_of[fast]) { fprintf(stderr, "CTRL did not take %u\n", ctl_of[fast]); return 1; }
 		printf("  per access, chip RAM, %s, median of %ld batches of 100 (ARM clock) | last one by the bridge's clock:\n",
-		       fast ? "FAST (reads through the SDRAM port)" : "68000 timing", batches);
+		       mode_of[fast], batches);
 		for (int k = 0; k < 6; k++) {
 			uint32_t last;
 			double ns = px_time(k, a + 0x2000, batches, &last);
@@ -582,6 +587,7 @@ static int px_mode(volatile uint8_t *lw, long count, int cpu)
 
 	/* FAST reads come from the CPU port's cache: it must see what the ARM
 	 * wrote over the chip bus, and what the blitter wrote behind its back */
+	px_ctl[1] = 3;
 	int stale_w = 0, stale_b = 0, blit_ok = 1;
 	uint32_t r = PX_TEST + 0x1000;
 	for (uint32_t i = 0; i < 256; i++) px_wr16(r + 2 * i, 0xA5A5);
@@ -602,6 +608,39 @@ static int px_mode(volatile uint8_t *lw, long count, int cpu)
 	printf("  FAST reads after ARM writes: %d of 512 stale; after a blitter clear%s: %d of 256 stale\n",
 	       stale_w, blit_ok ? "" : " (BBUSY never cleared)", stale_b);
 	if (stale_w || stale_b || !blit_ok) bad++;
+
+	/* FASTW writes sit in sdram_ctrl's write buffer for a moment: a blitter
+	 * copy right after must read them (the controller forwards a buffered
+	 * write into a chipset read of the same block), and a FASTW write after
+	 * a blit must stick */
+	px_ctl[1] = 7;
+	uint32_t src = PX_TEST + 0x2000, dst = PX_TEST + 0x3000;
+	int miss_c = 0, miss_a = 0, blit2_ok = 1;
+	for (uint32_t i = 0; i < 256; i++) px_wr16(dst + 2 * i, 0x0000);
+	for (uint32_t i = 0; i < 256; i++) px_wr16(src + 2 * i, (uint16_t)(0xC300 ^ (i * 0x0101)));
+	px_wr16(0xDFF040, 0x09F0);            /* BLTCON0: A and D, D = A */
+	px_wr16(0xDFF042, 0x0000);
+	px_wr16(0xDFF044, 0xFFFF);            /* BLTAFWM */
+	px_wr16(0xDFF046, 0xFFFF);            /* BLTALWM */
+	px_wr16(0xDFF064, 0x0000);            /* BLTAMOD */
+	px_wr16(0xDFF066, 0x0000);            /* BLTDMOD */
+	px_wr32(0xDFF050, src);               /* BLTAPT */
+	px_wr32(0xDFF054, dst);               /* BLTDPT */
+	px_wr16(src + 510, 0x7E57);           /* the last word: written just before the start */
+	px_wr16(0xDFF058, (16 << 6) | 16);
+	(void)px_rd16(0xDFF002);
+	tb = now_ns();
+	while (px_rd16(0xDFF002) & 0x4000)
+		if (now_ns() - tb > 100000000LL) { blit2_ok = 0; break; }
+	for (uint32_t i = 0; i < 256; i++) {
+		uint16_t want = (i == 255) ? 0x7E57 : (uint16_t)(0xC300 ^ (i * 0x0101));
+		if (px_rd16(dst + 2 * i) != want) miss_c++;
+	}
+	for (uint32_t i = 0; i < 256; i++) px_wr16(dst + 2 * i, (uint16_t)(0x1100 + i));
+	for (uint32_t i = 0; i < 256; i++) if (px_rd16(dst + 2 * i) != (uint16_t)(0x1100 + i)) miss_a++;
+	printf("  FASTW: blitter copy of words just written%s: %d of 256 wrong; FASTW writes over the copy: %d of 256 wrong\n",
+	       blit2_ok ? "" : " (BBUSY never cleared)", miss_c, miss_a);
+	if (miss_c || miss_a || !blit2_ok) bad++;
 
 	px_ctl[1] = 0;
 	printf("  bus given back (OWN %u): the 68000 restarts from its reset vector\n", px_ctl[1] & 1);
