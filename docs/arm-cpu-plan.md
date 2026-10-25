@@ -209,3 +209,46 @@ written would rebuild BigMig. What is left is a product choice:
 3. An AmigaCD build variant with BigMig's seam and Emu68-A9 in place of the
    soft CPUs: the most work, a second core to maintain, and the CD32 library's
    timing-sensitive titles would still need the cycle-exact build.
+
+## Decision, 2026-10-25: leave the ARM CPU to BigMig
+
+Option 1. AmigaCD stays the cycle-exact CD32/CDTV machine; a fast ARM CPU is
+BigMig's job, and nothing of this plan goes into the release core. The
+measurement work is kept, so the investigation does not have to be redone.
+
+### If you want to do it anyway
+
+Where things are:
+
+| what | where |
+|---|---|
+| this document, `tools/latprobe` (DDR3 echo `latprobe`, ARM-side `-r`, `-F`, the lightweight-bridge `-L`) | AmigaCD `master` |
+| the DDR3 echo probe, `rtl/A2065/latprobe_ddr3.v`, its bench `rtl/A2065/sim/tb_latprobe.v`, wired into `a2065.v` behind the mailbox | AmigaCD_MiSTer commit `b570234` |
+| the lightweight bridge in `sys/sys_top.v` and its register echo `sys/lw_echo.sv`, bench `rtl/sim/lw_echo/tb_lw_echo.sv` (on top of `b570234`) | AmigaCD_MiSTer branch **`claude/lwbridge-echo`**, commit `81f9909` -- the one branch that holds both; never merged, on purpose |
+| the measured numbers | the step 1, 1b, 1c and 1d sections above |
+
+What to start from, in order:
+
+1. **Reuse, do not rebuild.** BigMig's seam (`sys/h2f_axi3_to_lite.v`,
+   `sys/axi_seam_slave.v`, `seam_engine`, `seam_ipl`, `seam_cpuregs`,
+   `rtl/minimig_m68k_hybrid_bridge.v`; GPLv3, compatible with this project
+   with attribution) and Emu68-A9 (MPL 2.0, raparici/Emu68-A964). A JIT of
+   our own would duplicate years of work.
+2. **Bridge:** the full h2f AXI bridge, as BigMig uses, or the lightweight one
+   step 1d measured (~320 ns a read on cpu 0, writes not posted through
+   `/dev/mem`). Either is a `sys/` change that every Template_MiSTer sync must
+   carry; record it beside the SNAC `hps_io` lines.
+3. **Chip RAM:** through `sdram_ctrl`'s CPU port and `cpu_cache_new`, which
+   already snoops chipset writes -- no ARM-side copy, no coherency protocol.
+4. **CPU core:** bare metal with `maxcpus=1` from a per-core `.txt` sidecar;
+   Linux on the CPU core is what gives the 20-23 us p99 every run here shows.
+5. **Not** the DDR3 mailbox: 2.5 us a round trip, and nothing on the ARM side
+   shortens it (steps 1b, 1c).
+6. **Logic and timing:** the core has no room to add a seam beside TG68K and
+   fx68k (it closes on a thin margin: SEED 20, +0.035 ns, and the read gate
+   into the TG68K is its wall). An ARM-CPU AmigaCD would be a separate build
+   with the soft CPUs removed, as BigMig does -- and the timing-sensitive part
+   of the CD32 library would still need the cycle-exact build.
+7. **Where AmigaCD adds value instead:** its CD32/CDTV work (Akiko's CD path,
+   the CDTV bridge, CD32 save states) is what BigMig lacks. Offering it there
+   (option 2) is the cheaper route to a fast CD32-capable machine.
