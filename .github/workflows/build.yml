@@ -100,6 +100,12 @@ jobs:
       - name: Build
         run: make
 
+      # MEASUREMENT ONLY: step 1 of the ARM-CPU plan. Times the ARM -> DDR3 ->
+      # FPGA -> ARM round trip against latprobe_ddr3.v in the core. Built here
+      # so it comes out of the same artifact as Main, ready to copy over.
+      - name: Build latprobe
+        run: make -C tools/latprobe
+
       # bin/MiSTer is stripped by the Makefile; bin/MiSTer.elf keeps symbols.
       # `file` is the quickest confirmation this really is an ARM binary and not
       # something the host toolchain produced. The GLIBC_* dump is the number to
@@ -121,6 +127,7 @@ jobs:
           path: |
             bin/MiSTer
             bin/MiSTer.elf
+            tools/latprobe/latprobe
           if-no-files-found: error
           # Without this these keep the repository default and never expire. 493
           # of them accumulated from 2026-07-30 onward, 0.83 GB, which is over
@@ -305,6 +312,13 @@ jobs:
       # sign of it is a machine that will not boot the thing you were testing.
       - name: Run native unit tests
         run: make -C tests
+
+      # latprobe's protocol against a stand-in for the FPGA probe on a plain
+      # file: every request answered exactly once, the stats parsed from the
+      # response format, the probe disarmed on exit. A wrong word order or a
+      # broken disarm would leave the real probe polling DDR3 flat out.
+      - name: latprobe protocol (host)
+        run: python3 tools/latprobe/test_echo.py
 
       # The same compiled tests under ASan and UBSan. Some of what they guard is
       # undefined behaviour that glibc happens to get right: mgl_rbf.cpp's

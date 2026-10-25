@@ -82,3 +82,6 @@ compile_commands.json
 # It is the Serena/clangd setup that puts it here, so it appears on any machine
 # that opens this tree in an IDE.
 .cache/
+
+# latprobe (tools/latprobe), built by make -C tools/latprobe
+tools/latprobe/latprobe
