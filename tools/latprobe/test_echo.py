@@ -40,5 +40,15 @@ print(out.stdout, out.stderr)
 ok = (out.returncode == 0 and "2000 round trips" in out.stdout and "0 timed out" in out.stdout
       and "median 7 (" in out.stdout and answered == 2001
       and struct.unpack_from("<I", m, REQ + 4)[0] == 0)
+# -B (no barriers) must still be answered every time, and -r must report
+# all four access kinds without needing the FPGA.
+stop = False; answered = 0
+t = threading.Thread(target=fpga); t.start()
+outb = subprocess.run([exe, "-n", "500", "-B", "-d", f.name], capture_output=True, text=True, timeout=120)
+stop = True; t.join()
+ok = ok and outb.returncode == 0 and "500 round trips" in outb.stdout and "no barriers" in outb.stdout
+outr = subprocess.run([exe, "-r", "-n", "20000", "-d", f.name], capture_output=True, text=True, timeout=120)
+print(outr.stdout)
+ok = ok and outr.returncode == 0 and all(k in outr.stdout for k in ("read ", "write ", "write + dmb", "write, read back"))
 print("answered", answered, "-> RUN:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

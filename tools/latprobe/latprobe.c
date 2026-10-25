@@ -20,6 +20,18 @@
  *     -g  microseconds to wait between round trips (default 0)
  *     -d FILE  map FILE at offset 0 instead of /dev/mem (host test only;
  *              tools/latprobe/test_echo.py plays the FPGA)
+ *     -r  raw: time the ARM's own uncached accesses to the window, with no
+ *         FPGA involved (any core will do): read, write, write + barrier,
+ *         write then read back. Splits the round trip into its ARM half and
+ *         its FPGA half.
+ *     -S  open /dev/mem without O_SYNC (does the mapping type change the
+ *         cost? on a page Linux does not own it may not)
+ *     -B  no barriers around the request write in the echo loop
+ *
+ * Results of the first run (2026-10-25, seed-20 probe core): median round
+ * trip 2.51 us, p99 ~23 us, idle and with Main busy alike; FPGA DDR3 read
+ * 141 ns; a median of 10 empty polls (~2 us) per request, i.e. most of the
+ * round trip is spent before the FPGA sees the request. -r is the follow-up.
  * Run it twice: once with the Amiga idle, once with Main busy (a CD32 title
  * streaming from a CHD). For the cleanest number, idle the 68k on a config
  * with no fast RAM, which shares the FPGA's DDR3 port ahead of the probe.
@@ -45,6 +57,7 @@
 #define PROBE_REQ_OFF    0x8080UL      /* Avalon 0x1010 */
 #define PROBE_RESP_OFF   0x8088UL      /* Avalon 0x1011 */
 #define PROBE_MAGIC      0x4C415450UL  /* "LATP" */
+#define RAW_OFF          0x8090UL      /* Avalon 0x1012: unused by the probe and the mailbox */
 
 #define TIMEOUT_NS       100000000LL   /* 100 ms: the probe is not answering */
 #define FPGA_MHZ         113.5
@@ -71,28 +84,77 @@ static int cmp_u16(const void *a, const void *b)
  * transaction. 64-bit words are written low half, then high half: the probe
  * only acts when the high half holds MAGIC and the low half a new seq, so the
  * low half must already be in place when MAGIC lands. */
+static int no_barrier;
+
 static inline void write_req(volatile uint32_t *w, uint32_t seq)
 {
 	w[0] = seq;
-	__sync_synchronize();
+	if (!no_barrier) __sync_synchronize();
 	w[1] = PROBE_MAGIC;
-	__sync_synchronize();
+	if (!no_barrier) __sync_synchronize();
+}
+
+/* -r: ns per operation, as the median over batches of RAW_BATCH operations,
+ * so a timer interrupt landing in one batch does not move the result. */
+#define RAW_BATCH 1000
+
+static double raw_one(volatile uint32_t *w, int kind, long batches)
+{
+	double *per = malloc(sizeof(*per) * batches);
+	uint32_t sink = 0;
+	if (!per) return -1;
+	for (long b = 0; b < batches; b++) {
+		int64_t t0 = now_ns();
+		for (int i = 0; i < RAW_BATCH; i++) {
+			switch (kind) {
+			case 0: sink += w[0]; break;                               /* read */
+			case 1: w[0] = (uint32_t)i; break;                         /* write */
+			case 2: w[0] = (uint32_t)i; __sync_synchronize(); break;   /* write + dmb */
+			case 3: w[0] = (uint32_t)i; sink += w[0]; break;           /* write, read back */
+			}
+		}
+		per[b] = (double)(now_ns() - t0) / RAW_BATCH;
+	}
+	for (long i = 1; i < batches; i++) {          /* insertion sort: small n */
+		double v = per[i]; long j = i - 1;
+		while (j >= 0 && per[j] > v) { per[j + 1] = per[j]; j--; }
+		per[j + 1] = v;
+	}
+	double med = per[batches / 2];
+	free(per);
+	if (sink == 0xDEADBEEF) fprintf(stderr, " ");  /* keep the reads */
+	return med;
+}
+
+static void raw_mode(uint8_t *base, long count, int cpu, int sync)
+{
+	volatile uint32_t *w = (volatile uint32_t *)(base + RAW_OFF);
+	long batches = count / RAW_BATCH;
+	static const char *name[] = { "read", "write", "write + dmb", "write, read back" };
+	if (batches < 11) batches = 11;
+	printf("latprobe -r: ARM-side uncached access cost, cpu %d, %s mapping, %ld batches of %d\n",
+	       cpu, sync ? "O_SYNC" : "no O_SYNC", batches, RAW_BATCH);
+	for (int k = 0; k < 4; k++)
+		printf("  %-17s %7.1f ns per op (median of batches)\n", name[k], raw_one(w, k, batches));
 }
 
 int main(int argc, char **argv)
 {
 	long count = 100000, gap_us = 0;
-	int cpu = 0, opt;
+	int cpu = 0, opt, raw = 0, sync = 1;
 	const char *dev = NULL;
 
-	while ((opt = getopt(argc, argv, "n:c:g:d:h")) != -1) {
+	while ((opt = getopt(argc, argv, "n:c:g:d:rSBh")) != -1) {
 		switch (opt) {
 		case 'n': count = strtol(optarg, NULL, 0); break;
 		case 'c': cpu = (int)strtol(optarg, NULL, 0); break;
 		case 'g': gap_us = strtol(optarg, NULL, 0); break;
 		case 'd': dev = optarg; break;
+		case 'r': raw = 1; break;
+		case 'S': sync = 0; break;
+		case 'B': no_barrier = 1; break;
 		default:
-			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us] [-r] [-S] [-B]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -104,10 +166,12 @@ int main(int argc, char **argv)
 	if (sched_setaffinity(0, sizeof(set), &set))
 		fprintf(stderr, "warning: cannot pin to cpu %d: %s\n", cpu, strerror(errno));
 
-	int fd = open(dev ? dev : "/dev/mem", O_RDWR | O_SYNC);
+	int fd = open(dev ? dev : "/dev/mem", O_RDWR | (sync ? O_SYNC : 0));
 	if (fd < 0) { perror(dev ? dev : "/dev/mem"); return 1; }
 	uint8_t *base = mmap(NULL, DDR3_WINDOW, PROT_READ | PROT_WRITE, MAP_SHARED, fd, dev ? 0 : DDR3_FLAT_BASE);
 	if (base == MAP_FAILED) { perror("mmap"); return 1; }
+
+	if (raw) { raw_mode(base, count, cpu, sync); return 0; }
 
 	volatile uint32_t *req  = (volatile uint32_t *)(base + PROBE_REQ_OFF);
 	volatile uint32_t *resp = (volatile uint32_t *)(base + PROBE_RESP_OFF);
@@ -165,7 +229,8 @@ int main(int argc, char **argv)
 	for (long i = 0; i < done; i++) sum += rt[i];
 
 #define PCT(a, p) (a)[(long)((double)(done - 1) * (p))]
-	printf("latprobe: %ld round trips on cpu %d, %ld timed out, gap %ld us\n", done, cpu, timeouts, gap_us);
+	printf("latprobe: %ld round trips on cpu %d, %ld timed out, gap %ld us%s%s\n", done, cpu, timeouts, gap_us,
+	       sync ? "" : ", no O_SYNC", no_barrier ? ", no barriers" : "");
 	printf("round trip, ARM clock (ns):\n");
 	printf("  min %lld  median %lld  mean %.0f  p90 %lld  p99 %lld  p99.9 %lld  max %lld\n",
 	       (long long)rt[0], (long long)PCT(rt, 0.5), sum / done, (long long)PCT(rt, 0.9),
