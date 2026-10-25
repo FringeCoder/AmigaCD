@@ -166,8 +166,11 @@ struct.pack_into("<I", pm, 0x8000C, 0x100)
 pm.flush()
 outp = subprocess.run([exe, "-P", "-n", "2000", "-d", h.name], capture_output=True, text=True, timeout=120)
 print(outp.stdout, outp.stderr)
-ok = ok and outp.returncode == 0 and "2000 random words: 0 wrong" in outp.stdout and "NOT MOVING" in outp.stdout
-ok = ok and all(k in outp.stdout for k in ("read byte", "write word", "bus given back (OWN 0)"))
+# A file has no blitter, so the blitter clear is "stale" and -P reports a
+# failure (exit 1); the ARM's own writes must still read back through FAST.
+ok = ok and outp.returncode == 1 and "2000 random words: 0 wrong" in outp.stdout and "NOT MOVING" in outp.stdout
+ok = ok and all(k in outp.stdout for k in ("read byte", "write word", "bus given back (OWN 0)", "FAST (reads",
+                                           "after ARM writes: 0 of 512 stale", "blitter clear: 256 of 256 stale"))
 # its 68k write of 0x11223344 at $070000 must be in the file big-endian
 ok = ok and pm[0x100000 + 0x70000:0x100000 + 0x70004] == bytes([0x11, 0x22, 0x33, 0x44])
 struct.pack_into("<I", pm, 0x8000C, 0); pm.flush()
