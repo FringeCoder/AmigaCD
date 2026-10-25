@@ -159,3 +159,53 @@ What it means:
 The original proposal, kept for the record: even near 0.5 us a read would
 still be slower than a 68000 bus cycle, so it would only make an
 accelerator's register reads cheaper.
+
+## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
+
+BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
+Emu68-A9 -- an ARMv7 port of Michal Schulz's Emu68 JIT -- running bare-metal on
+the HPS's second ARM core. It quotes ~840 MIPS and chip RAM at **607 ns an
+access (7.6 MB/s), chip-bus cycle included**. It confirms step 1d's direction
+and adds what our measurements do not cover:
+
+- **A bridge, not DDR3**, as step 1d found -- but the full h2f AXI bridge
+  (0xC0000000, through `sysmem.sv`), not the lightweight one:
+  `sys/h2f_axi3_to_lite.v` converts it to AXI-Lite and `sys/axi_seam_slave.v`
+  with `seam_engine` turns each access into a word transaction on the chip
+  bus (`rtl/minimig_m68k_hybrid_bridge.v`). Its 607 ns against step 1d's
+  ~320 ns bridge read is the chip-bus cycle on top of the bridge.
+- **Chip RAM reads through the FPGA's existing CPU cache.** The seam reaches
+  chip RAM by `sdram_ctrl`'s CPU port, and `cpu_cache_new` snoops chipset
+  writes (`snoop_act` from `chipWE`), so the cache stays coherent with DMA in
+  the fabric. That answers step 4's hardest problem with no ARM-side copy of
+  chip RAM. Its OSD has a live Chip Cache switch.
+- **No Linux on the CPU core.** A per-core `.txt` sidecar beside the `.rbf`
+  (MiSTer's official per-core boot arguments) boots Linux with `maxcpus=1`,
+  so core #1 runs only the JIT. That removes the tail every run here shows
+  (p99 ~20-23 us on cpu 0, and step 1d's wandering cpu-1 figures with Main on
+  it). Loading the core costs one board restart.
+- **Posted writes and fused longwords**: a request FIFO (`REQFIFO_LOG2`) and
+  a native longword path (`LONGWORD_EN`) in the seam -- the write posting that
+  step 1d found missing through `/dev/mem`, done in the fabric instead.
+- A **"Compat" chip speed** that slows chip-RAM access to roughly a 68000's
+  pace, for OCS/ECS software that times itself against the CPU.
+
+What it does not do: CD32 / CDTV (Akiko's C2P only, no CD drive model), a
+cycle-exact CPU, or the soft CPUs -- TG68K and fx68k are removed, which is what
+frees its logic and timing. It ships its own Main and its own `sys/`.
+Licences: the seam and core are GPLv3, as ours; Emu68-A9 is MPL 2.0 (source:
+raparici/Emu68-A964), its firmware image as a whole GPLv3.
+
+**What this means for this plan.** The engineering questions are answered:
+the bridge (step 1d here, the h2f AXI seam there), coherency (cache in the
+fabric, snooped), jitter (`maxcpus=1`, bare metal), and the CPU itself
+(Emu68-A9 exists; writing our own JIT would duplicate it). Steps 2-4 as
+written would rebuild BigMig. What is left is a product choice:
+
+1. Leave the ARM CPU to BigMig, and keep AmigaCD the cycle-exact CD32/CDTV
+   machine it is.
+2. Offer AmigaCD's CD32/CDTV work (Akiko's CD path, the CDTV bridge) to
+   BigMig, so the fast machine gains CD32 titles that tolerate a non-exact CPU.
+3. An AmigaCD build variant with BigMig's seam and Emu68-A9 in place of the
+   soft CPUs: the most work, a second core to maintain, and the CD32 library's
+   timing-sensitive titles would still need the cycle-exact build.
