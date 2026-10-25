@@ -379,6 +379,50 @@ What it means:
 - **The existing CPUs are untouched:** with OWN clear the fx68k's pins pass
   through, FAST changes nothing, and the TG68K path has no change.
 
+## Step 2c: FASTW, chip RAM writes through the SDRAM port
+
+AmigaCD_MiSTer `claude/lwbridge-echo` 6441bb5. armcpu_bridge CTRL bit 2
+(FASTW): the proxy's writes to chip RAM, fast RAM and RTG go to the SDRAM
+CPU port instead of a 68000-timed chip-bus cycle -- AS, R/W, the strobes and
+the data on the next edge, ending when the port's write buffer takes the
+word. cpu_wrapper's cchip covers writes while the proxy owns the bus with
+FASTW (the 68020's turbo chip only ever sends reads there). Writes to the
+custom chips and CIAs keep the 68000 timing; FASTW is off by default.
+
+Coherence, from sdram_ctrl: the write updates the CPU cache (write-through)
+and waits in a one-deep buffer for the next free slot; a chipset read of the
+same 8-byte block meanwhile has the buffered data forwarded into it
+(fwd_en). A chipset write to the same word inside that window would be
+overtaken, but starting any DMA takes the ARM chip-bus register writes of
+~1 us each, far longer than the buffer holds a word.
+
+tb_armcpu: a third random pass with FASTW, 13360 checks, four FASTW
+mutations caught.
+
+**Result, 2026-10-25:** fit seed 5 of 20, +0.046 ns at the slow 100 C corner
+the project times at (multi-corner analysis is off; the families script
+sees the HDMI scaler at -0.258 at another corner, not this logic). Two runs
+of 20000, cpu 0:
+
+| per access, chip RAM | 68000 timing | FAST | FAST + FASTW |
+|---|---|---|---|
+| read halfword | 1336-1348 ns | 655-656 ns | 655-659 ns |
+| read word | 2346-2383 ns | 1050-1059 ns | 1048-1097 ns |
+| write halfword | 1041-1054 ns | 1035-1097 ns | **344 ns** |
+| write word | 2005-2015 ns | 2042-2105 ns | **604-607 ns** |
+
+By the bridge's clock a FASTW halfword write is 260-280 ns. Checks, both
+runs: 0 of 20000 random words wrong; FAST reads 0 of 512 stale after the
+ARM's writes and 0 of 256 after a blitter clear; the blitter copying 256
+words just written with FASTW (the last one written right before BLTSIZE)
+0 wrong; FASTW writes over the blitter's result 0 wrong. The A500 came back
+at the Kickstart 1.3 screen.
+
+Where this leaves the bus: a chip-RAM halfword costs ~655 ns to read and
+~344 ns to write from the ARM, a word about twice that; registers in the
+custom chips and CIAs ~1.0-1.35 us. Those are the costs step 3's emulator
+pays for every chip access, with Kickstart and fast RAM on the ARM side.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
@@ -451,7 +495,8 @@ Where things are:
 | the DDR3 visibility probe `rtl/A2065/visprobe_ddr3.v` (bench `rtl/A2065/sim/tb_visprobe.v`), the bridge moved to DDRAM_CLK with registers 4-7 passed into emu; `latprobe -V` | AmigaCD_MiSTer `claude/lwbridge-echo` commit `2053af4`; AmigaCD `eb97be70` |
 | the 68000 bus proxy: `rtl/proxy68k.v`, `rtl/armcpu_bridge.v`, lw_echo's bus port, bench `rtl/sim/armcpu/tb_armcpu.sv`; bridge on clk_sys; `latprobe -P` | AmigaCD_MiSTer `claude/lwbridge-echo` commit `571d1f2`; AmigaCD `3326acf7` |
 | probes out, bridge on clk_100m, FAST reads; `latprobe -P` with FAST and the blitter check | AmigaCD_MiSTer `claude/lwbridge-echo` commit `9d4a752` (fit run 40218489738, seed 2); AmigaCD `326a8224` |
-| the measured numbers | the step 1, 1b, 1c, 1d, 1e, 2 and 2b sections above |
+| FASTW writes; `latprobe -P` with FASTW and its blitter checks | AmigaCD_MiSTer `claude/lwbridge-echo` commit `6441bb5` (fit run 40229429510, seed 5); AmigaCD `36a7d358` |
+| the measured numbers | the step 1, 1b, 1c, 1d, 1e, 2, 2b and 2c sections above |
 
 What to start from, in order:
 
