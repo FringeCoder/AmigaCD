@@ -160,6 +160,61 @@ The original proposal, kept for the record: even near 0.5 us a read would
 still be slower than a 68000 bus cycle, so it would only make an
 accelerator's register reads cheaper.
 
+## Step 1e: DDR3 write visibility, each direction on its own
+
+The question behind keeping chip RAM in DDR3: when one side writes a word,
+how long before the other side's read returns it? `visprobe_ddr3.v`
+(AmigaCD_MiSTer `claude/lwbridge-echo` 2053af4) sits on the A2065's DDR3
+port beside the step 1 probe and is started and stopped over the
+lightweight bridge, which for this build runs on the core's DDRAM_CLK
+(113.5 MHz) and passes registers 4-7 into emu. `latprobe -V` (eb97be70)
+drives it:
+
+- **A, ARM to FPGA:** the ARM writes word A, then A_GO over the bridge; the
+  FPGA reads A back to back from the cycle A_GO arrives and counts reads
+  that return the old value.
+- **B, FPGA to ARM:** B_GO makes the FPGA write word B; the ARM polls B, then
+  writes B_SEEN, and the FPGA times from its accepted write to B_SEEN. The
+  same trial without polling gives the bridge's fixed cost. Two controls
+  read a different word instead of B, and read B a second time.
+
+**Result, 2026-10-25:** fit seed 14, setup +0.093, every family positive.
+Cpu 0, A500 defaults, five runs of 5,000-10,000 trials (one on cpu 1); the
+medians repeated to the nanosecond.
+
+| trial | median | p99 | stale reads |
+|---|---|---|---|
+| A, word written 50 us before A_GO | 203-220 ns | 652-740 ns | none |
+| A, word written just before | 211-220 ns | 608-678 ns | none |
+| A, written and read back by the ARM first | 185-203 ns | 564-652 ns | none |
+| B, B_SEEN without polling | 1551-1568 ns | | -- |
+| B, polled until visible | 2740-2758 ns | | none |
+| B, one read of another word instead | 1683 ns | | -- |
+| B, polled, then word B again | 2872 ns | | none |
+
+`-L` on this build: read 322 ns, write 337 ns, write and read back 610 ns.
+
+What it means:
+
+- **No stale data, in either direction, in any trial.** The controller is
+  coherent across its ports as far as either side can observe.
+- **ARM to FPGA is immediate.** The FPGA's first read after A_GO already
+  returns the new word, and ~210 ns is that read itself. The ARM's write has
+  landed before its bridge write arrives (~340 ns), so the visibility delay
+  is under that, and invisible from the fabric.
+- **FPGA to ARM stalls the ARM's read instead.** Reading another word in its
+  place costs 132 ns, and so does reading B a second time; only the first
+  ARM read of a word the FPGA just wrote takes ~1.19 us, ~1.06 us more. The
+  read waits for the FPGA's write to land rather than returning old data.
+- **That is the step 1 round trip.** Its 2.5 us was the ARM's read of the
+  FPGA's answer stalling (plus the FPGA's polling), not the ARM's request
+  being late; step 1c's read-back could not help because it was on the
+  wrong side.
+- **For chip RAM in DDR3:** CPU writes would reach chipset DMA at once, but
+  every CPU read of a word DMA just wrote (a blit result, a disk buffer)
+  would cost ~1.2 us, against a 68000's 280-560 ns. BigMig's answer below,
+  chip RAM in SDRAM behind the snooped CPU cache, avoids the question.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
@@ -225,7 +280,8 @@ Where things are:
 | this document, `tools/latprobe` (DDR3 echo `latprobe`, ARM-side `-r`, `-F`, the lightweight-bridge `-L`) | AmigaCD `master` |
 | the DDR3 echo probe, `rtl/A2065/latprobe_ddr3.v`, its bench `rtl/A2065/sim/tb_latprobe.v`, wired into `a2065.v` behind the mailbox | AmigaCD_MiSTer commit `b570234` |
 | the lightweight bridge in `sys/sys_top.v` and its register echo `sys/lw_echo.sv`, bench `rtl/sim/lw_echo/tb_lw_echo.sv` (on top of `b570234`) | AmigaCD_MiSTer branch **`claude/lwbridge-echo`**, commit `81f9909` -- the one branch that holds both; never merged, on purpose |
-| the measured numbers | the step 1, 1b, 1c and 1d sections above |
+| the DDR3 visibility probe `rtl/A2065/visprobe_ddr3.v` (bench `rtl/A2065/sim/tb_visprobe.v`), the bridge moved to DDRAM_CLK with registers 4-7 passed into emu; `latprobe -V` | AmigaCD_MiSTer `claude/lwbridge-echo` commit `2053af4`; AmigaCD `eb97be70` |
+| the measured numbers | the step 1, 1b, 1c, 1d and 1e sections above |
 
 What to start from, in order:
 
