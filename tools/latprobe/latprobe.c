@@ -35,6 +35,13 @@
  *         "lwbridge": with no slave behind 0xFF200000 an access can hang the
  *         ARM's bus, so -L refuses to run on any other core. -f overrides the
  *         check (only for a core you know has the echo).
+ *     -V  step 1e: how long a DDR3 write takes to become visible across the
+ *         HPS controller's ports, each direction on its own, with the bridge
+ *         as the start and stop signal. Needs visprobe_ddr3.v (AmigaCD_MiSTer
+ *         claude/lwbridge-echo 2053af4 or later) and the same "lwbridge" path
+ *         as -L. -n is the trials per measurement (10000 takes seconds).
+ *         With -d, the file holds the bridge registers at 0 and the DDR3
+ *         window at 0x1000 (test_echo.py plays both).
  *
  * Without O_SYNC the mapping is cacheable (-r reads 9.8 ns): a request then
  * waits in the ARM's cache and the round trip never completes, so the echo
@@ -80,7 +87,10 @@
 #define LW_BASE          0xFF200000UL  /* lightweight HPS-to-FPGA bridge */
 #define LW_WINDOW        0x1000UL
 #define LW_MAGIC         0x4C574252UL  /* "LWBR", lw_echo.sv register 1 */
-#define LW_MHZ           100.0         /* lw_echo.sv runs on clk_100m */
+#define LW_WORDS_OFF     0x1000UL      /* -V -d: where the DDR3 window starts in the file */
+#define VIS_A_OFF        0x8090UL      /* Avalon 0x1012, visprobe_ddr3.v word A */
+#define VIS_B_OFF        0x8098UL      /* Avalon 0x1013, visprobe_ddr3.v word B */
+#define VIS_SPIN_NS      10000000LL    /* 10 ms: a visprobe step that never finishes */
 
 #define PCT(a, p) (a)[(long)((double)(done - 1) * (p))]
 
@@ -176,6 +186,19 @@ static int lw_core_loaded(void)
 	return found;
 }
 
+/* The bridge's clock, measured: CYCLES (lw[2]) against the ARM's over 50 ms.
+ * Step 1d ran it on clk_100m, step 1e on the core's DDRAM_CLK; 0 if the
+ * counter does not move (the host test's plain file). */
+static double lw_mhz(volatile uint32_t *lw)
+{
+	uint32_t c0 = lw[2];
+	int64_t t0 = now_ns();
+	usleep(50000);
+	uint32_t c1 = lw[2];
+	int64_t t1 = now_ns();
+	return (c1 - c0) * 1000.0 / (double)(t1 - t0);
+}
+
 /* -L: the echo register is lw[0], MAGIC lw[1], CYCLES lw[2], COUNT lw[3].
  * Batched medians per access kind, as -r does, then each write-and-read-back
  * round trip timed on its own for the tail, checking every value echoes. */
@@ -195,11 +218,15 @@ static int lw_mode(volatile uint32_t *lw, long count, int cpu)
 		printf("  %-17s %7.1f ns per op (median of batches)\n", name[k], raw_one(lw, k, batches));
 
 	/* The FPGA's own clock across one batch of reads: no ARM timer in it. */
+	double mhz = lw_mhz(lw);
 	uint32_t c0 = lw[2];
 	for (int i = 0; i < RAW_BATCH; i++) (void)lw[0];
 	uint32_t c1 = lw[2];
-	printf("  read, by the FPGA's clock: %.1f ns per op (%u cycles at %.0f MHz for %d)\n",
-	       (c1 - c0) * 1000.0 / LW_MHZ / RAW_BATCH, c1 - c0, LW_MHZ, RAW_BATCH);
+	if (mhz > 1)
+		printf("  read, by the FPGA's clock: %.1f ns per op (%u cycles at %.1f MHz for %d)\n",
+		       (c1 - c0) * 1000.0 / mhz / RAW_BATCH, c1 - c0, mhz, RAW_BATCH);
+	else
+		printf("  read, by the FPGA's clock: CYCLES is not counting\n");
 
 	int64_t *rt = malloc(sizeof(*rt) * count);
 	if (!rt) { fprintf(stderr, "out of memory\n"); return 1; }
@@ -233,6 +260,162 @@ static int lw_mode(volatile uint32_t *lw, long count, int cpu)
 	return bad ? 1 : 0;
 }
 
+/* -V: one measurement's results, in bridge-clock cycles and stale reads. */
+struct vis_set {
+	const char *name;
+	long n, timeouts;
+	uint32_t *cyc;      /* the probe's own cycle count for each trial */
+	uint32_t *miss;     /* reads that came back stale (A: the FPGA's, B: the ARM's) */
+};
+
+static int cmp_u32(const void *a, const void *b)
+{
+	uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+	return (x > y) - (x < y);
+}
+
+/* Spin on a bridge register until (value & mask) == want; 0 on timeout. */
+static int lw_wait(volatile uint32_t *r, uint32_t mask, uint32_t want)
+{
+	int64_t t0 = now_ns();
+	while ((*r & mask) != want)
+		if (now_ns() - t0 > VIS_SPIN_NS) return 0;
+	return 1;
+}
+
+static void vis_print(struct vis_set *v, double mhz)
+{
+	long done = v->n;
+	printf("  %-33s", v->name);
+	if (!done) { printf(" every trial timed out (%ld)\n", v->timeouts); return; }
+	qsort(v->cyc, done, sizeof(*v->cyc), cmp_u32);
+	qsort(v->miss, done, sizeof(*v->miss), cmp_u32);
+	printf(" ns: min %5.0f  median %5.0f  p90 %5.0f  p99 %6.0f  max %7.0f | stale reads: median %u  p99 %u  max %u",
+	       v->cyc[0] * 1000.0 / mhz, PCT(v->cyc, 0.5) * 1000.0 / mhz, PCT(v->cyc, 0.9) * 1000.0 / mhz,
+	       PCT(v->cyc, 0.99) * 1000.0 / mhz, v->cyc[done - 1] * 1000.0 / mhz,
+	       PCT(v->miss, 0.5), PCT(v->miss, 0.99), v->miss[done - 1]);
+	if (v->timeouts) printf("  (%ld timed out)", v->timeouts);
+	printf("\n");
+}
+
+/* -V. Bridge registers: write lw[4] A_GO, lw[5] B_GO, lw[6] B_SEEN; read
+ * lw[4] {a_done, a_timeout, a_busy, .., a_misses}, lw[5] a_cycles,
+ * lw[6] {b_done, b_wrote, b_pending, .., b_issue}, lw[7] b_cycles.
+ * Values are kept to 29 bits so a stand-in on a plain file can tell an ARM
+ * write from its own status (the real registers do not need it). */
+#define A_DONE    0x80000000u
+#define A_TIMEOUT 0x40000000u
+#define A_BUSY    0x20000000u
+#define B_DONE    0x80000000u
+#define B_WROTE   0x40000000u
+
+static int vis_mode(volatile uint32_t *lw, uint8_t *ddr, long count, int cpu)
+{
+	volatile uint32_t *word_a = (volatile uint32_t *)(ddr + VIS_A_OFF);
+	volatile uint32_t *word_b = (volatile uint32_t *)(ddr + VIS_B_OFF);
+
+	if (lw[1] != LW_MAGIC) {
+		fprintf(stderr, "no lw_echo behind the bridge: register 1 reads %08x, not %08lx\n",
+		        lw[1], (unsigned long)LW_MAGIC);
+		return 1;
+	}
+	double mhz = lw_mhz(lw);
+	if (mhz < 1) mhz = 113.5;   /* plain file: the cycles are whatever the stand-in says */
+
+	static struct vis_set set[5] = {
+		{ "A, word written 50 us earlier", 0, 0, NULL, NULL },
+		{ "A, word written just before", 0, 0, NULL, NULL },
+		{ "A, written and read back first", 0, 0, NULL, NULL },
+		{ "B, B_SEEN without polling", 0, 0, NULL, NULL },
+		{ "B, polled until visible", 0, 0, NULL, NULL },
+	};
+	for (int k = 0; k < 5; k++) {
+		set[k].cyc  = malloc(sizeof(uint32_t) * count);
+		set[k].miss = malloc(sizeof(uint32_t) * count);
+		if (!set[k].cyc || !set[k].miss) { fprintf(stderr, "out of memory\n"); return 1; }
+	}
+	uint32_t *b_issue = malloc(sizeof(uint32_t) * count);
+	if (!b_issue) { fprintf(stderr, "out of memory\n"); return 1; }
+	long n_issue = 0;
+
+	uint32_t v = (uint32_t)now_ns();
+	int give_up = 0;
+	for (long i = 0; i < count && !give_up; i++) {
+		/* A: the ARM writes word A, the bridge says go, the FPGA polls it. */
+		for (int k = 0; k < 3 && !give_up; k++) {
+			struct vis_set *s = &set[k];
+			v = (v * 1664525u + 1013904223u) & 0x1FFFFFFFu;
+			*word_a = v;
+			if (k == 0) {
+				int64_t t = now_ns();
+				while (now_ns() - t < 50000) ;
+			}
+			if (k == 2) (void)*word_a;
+			__sync_synchronize();
+			lw[4] = v;
+			if (!lw_wait(&lw[4], A_DONE | A_TIMEOUT | A_BUSY, A_DONE) &&
+			    !(lw[4] & A_TIMEOUT)) {
+				fprintf(stderr, "visprobe never finished an A trial: is the core built with visprobe_ddr3.v?\n");
+				give_up = 1;
+				break;
+			}
+			uint32_t st = lw[4];
+			if (st & A_TIMEOUT) { s->timeouts++; continue; }
+			s->cyc[s->n]  = lw[5];
+			s->miss[s->n] = st & 0xFFFF;
+			s->n++;
+		}
+
+		/* B: the bridge says go, the FPGA writes word B, the ARM watches. */
+		for (int k = 3; k < 5 && !give_up; k++) {
+			struct vis_set *s = &set[k];
+			v = (v * 1664525u + 1013904223u) & 0x1FFFFFFFu;
+			lw[5] = v;
+			if (!lw_wait(&lw[6], B_WROTE, B_WROTE)) {
+				fprintf(stderr, "visprobe never wrote word B: is the core built with visprobe_ddr3.v?\n");
+				give_up = 1;
+				break;
+			}
+			uint32_t stale = 0;
+			int seen = 1;
+			if (k == 4) {
+				int64_t t0 = now_ns();
+				while (*word_b != v) {
+					stale++;
+					if (now_ns() - t0 > VIS_SPIN_NS) { seen = 0; break; }
+				}
+			}
+			lw[6] = 0;
+			if (!lw_wait(&lw[6], B_DONE, B_DONE) || !seen) { s->timeouts++; continue; }
+			if (k == 3) b_issue[n_issue++] = lw[6] & 0xFFFF;
+			s->cyc[s->n]  = lw[7];
+			s->miss[s->n] = stale;
+			s->n++;
+		}
+	}
+
+	printf("latprobe -V: DDR3 write visibility, cpu %d, bridge clock %.1f MHz, %ld trials each\n", cpu, mhz, count);
+	printf("ARM to FPGA: A_GO arriving to the FPGA's read returning the new word (stale reads: the FPGA's)\n");
+	for (int k = 0; k < 3; k++) vis_print(&set[k], mhz);
+	printf("FPGA to ARM: the FPGA's write accepted to B_SEEN arriving (stale reads: the ARM's)\n");
+	for (int k = 3; k < 5; k++) vis_print(&set[k], mhz);
+	if (n_issue) {
+		long done = n_issue;
+		qsort(b_issue, done, sizeof(*b_issue), cmp_u32);
+		printf("  B_GO arriving to the write accepted: median %.0f ns  p99 %.0f ns\n",
+		       PCT(b_issue, 0.5) * 1000.0 / mhz, PCT(b_issue, 0.99) * 1000.0 / mhz);
+	}
+	if (set[3].n && set[4].n) {
+		long done = set[3].n;
+		double m3 = PCT(set[3].cyc, 0.5);
+		done = set[4].n;
+		double m4 = PCT(set[4].cyc, 0.5);
+		printf("  => the FPGA's write reaches the ARM ~%.0f ns after it is accepted, at the median (polled minus not)\n",
+		       (m4 - m3) * 1000.0 / mhz);
+	}
+	return give_up ? 1 : 0;
+}
+
 static void raw_mode(uint8_t *base, long count, int cpu, int sync)
 {
 	volatile uint32_t *w = (volatile uint32_t *)(base + RAW_OFF);
@@ -248,10 +431,10 @@ static void raw_mode(uint8_t *base, long count, int cpu, int sync)
 int main(int argc, char **argv)
 {
 	long count = 100000, gap_us = 0;
-	int cpu = 0, opt, raw = 0, sync = 1, lw = 0, force = 0;
+	int cpu = 0, opt, raw = 0, sync = 1, lw = 0, vis = 0, force = 0;
 	const char *dev = NULL;
 
-	while ((opt = getopt(argc, argv, "n:c:g:d:rSBFLfh")) != -1) {
+	while ((opt = getopt(argc, argv, "n:c:g:d:rSBFLVfh")) != -1) {
 		switch (opt) {
 		case 'n': count = strtol(optarg, NULL, 0); break;
 		case 'c': cpu = (int)strtol(optarg, NULL, 0); break;
@@ -262,9 +445,10 @@ int main(int argc, char **argv)
 		case 'B': no_barrier = 1; break;
 		case 'F': flush_rb = 1; break;
 		case 'L': lw = 1; break;
+		case 'V': vis = 1; break;
 		case 'f': force = 1; break;
 		default:
-			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us] [-r] [-S] [-B] [-F] [-L [-f]]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us] [-r] [-S] [-B] [-F] [-L|-V [-f]]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -276,17 +460,24 @@ int main(int argc, char **argv)
 	if (sched_setaffinity(0, sizeof(set), &set))
 		fprintf(stderr, "warning: cannot pin to cpu %d: %s\n", cpu, strerror(errno));
 
-	if (lw) {
+	if (lw || vis) {
 		if (!dev && !force && !lw_core_loaded()) {
-			fprintf(stderr, "-L: no running core has \"lwbridge\" in its path. Without lw_echo.sv behind the "
-			                "bridge an access can hang the ARM, so -L only runs on that core (-f overrides).\n");
+			fprintf(stderr, "-L/-V: no running core has \"lwbridge\" in its path. Without lw_echo.sv behind the "
+			                "bridge an access can hang the ARM, so -L and -V only run on that core (-f overrides).\n");
 			return 2;
 		}
 		int lfd = open(dev ? dev : "/dev/mem", O_RDWR | O_SYNC);
 		if (lfd < 0) { perror(dev ? dev : "/dev/mem"); return 1; }
 		void *lb = mmap(NULL, LW_WINDOW, PROT_READ | PROT_WRITE, MAP_SHARED, lfd, dev ? 0 : LW_BASE);
 		if (lb == MAP_FAILED) { perror("mmap"); return 1; }
-		return lw_mode((volatile uint32_t *)lb, count, cpu);
+		if (lw) return lw_mode((volatile uint32_t *)lb, count, cpu);
+
+		int dfd = dev ? lfd : open("/dev/mem", O_RDWR | O_SYNC);
+		if (dfd < 0) { perror("/dev/mem"); return 1; }
+		uint8_t *ddr = mmap(NULL, DDR3_WINDOW, PROT_READ | PROT_WRITE, MAP_SHARED, dfd,
+		                    dev ? LW_WORDS_OFF : DDR3_FLAT_BASE);
+		if (ddr == MAP_FAILED) { perror("mmap"); return 1; }
+		return vis_mode((volatile uint32_t *)lb, ddr, count, cpu);
 	}
 
 	int fd = open(dev ? dev : "/dev/mem", O_RDWR | (sync ? O_SYNC : 0));
