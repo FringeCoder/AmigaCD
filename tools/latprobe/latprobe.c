@@ -42,6 +42,15 @@
  *         as -L. -n is the trials per measurement (10000 takes seconds).
  *         With -d, the file holds the bridge registers at 0 and the DDR3
  *         window at 0x1000 (test_echo.py plays both).
+ *     -P  step 2: drive the Amiga's bus from the ARM, through the 68000 bus
+ *         proxy (armcpu_bridge.v, proxy68k.v; AmigaCD_MiSTer
+ *         claude/lwbridge-echo). Needs the CPU set to 68000 and the same
+ *         "lwbridge" path as -L. Takes the bus (the 68000 is held in reset,
+ *         so the Amiga stops), checks chip RAM reads back what was written in
+ *         every size, reads the beam position live from VHPOSR, times each
+ *         access kind, and gives the bus back -- the Amiga then reboots. With
+ *         -d, the file is the bridge's 2 MB (a plain file is a fair model of
+ *         memory order; the counters stand still).
  *
  * Without O_SYNC the mapping is cacheable (-r reads 9.8 ns): a request then
  * waits in the ARM's cache and the round trip never completes, so the echo
@@ -91,6 +100,12 @@
 #define VIS_A_OFF        0x8090UL      /* Avalon 0x1012, visprobe_ddr3.v word A */
 #define VIS_B_OFF        0x8098UL      /* Avalon 0x1013, visprobe_ddr3.v word B */
 #define VIS_SPIN_NS      10000000LL    /* 10 ms: a visprobe step that never finishes */
+
+#define PX_SPAN          0x200000UL    /* -P: the whole lightweight bridge */
+#define PX_CTL           0x080000UL    /* armcpu_bridge.v control registers */
+#define PX_WIN           0x100000UL    /* the 68k window, 1 MB per BANK */
+#define PX_MAGIC         0x41435055UL  /* "ACPU" */
+#define PX_TEST          0x070000UL    /* chip RAM -P may overwrite (the Amiga reboots after) */
 
 #define PCT(a, p) (a)[(long)((double)(done - 1) * (p))]
 
@@ -433,6 +448,128 @@ static int vis_mode(volatile uint32_t *lw, uint8_t *ddr, long count, int cpu)
 	return give_up ? 1 : 0;
 }
 
+/* -P: the 68k's memory through the bridge is in the 68k's byte order, so a
+ * halfword or word is byte-swapped on the ARM. ctl[] is armcpu_bridge.v's
+ * control block: 0 MAGIC, 1 CTRL (bit 0 OWN), 2 BANK, 3 STATUS, 4 CYCLES,
+ * 5 LAST, 6 WORDS. */
+static volatile uint32_t *px_ctl;
+static volatile uint8_t  *px_win;
+static uint32_t px_bank = 0xFFFFFFFFu;
+
+static inline void px_set_bank(uint32_t a)
+{
+	uint32_t b = a >> 20;
+	if (b != px_bank) { px_ctl[2] = b; px_bank = b; }
+}
+static inline uint8_t  px_rd8(uint32_t a)  { px_set_bank(a); return px_win[a & 0xFFFFF]; }
+static inline uint16_t px_rd16(uint32_t a) { px_set_bank(a); return __builtin_bswap16(*(volatile uint16_t *)(px_win + (a & 0xFFFFF))); }
+static inline uint32_t px_rd32(uint32_t a) { px_set_bank(a); return __builtin_bswap32(*(volatile uint32_t *)(px_win + (a & 0xFFFFF))); }
+static inline void px_wr8(uint32_t a, uint8_t v)   { px_set_bank(a); px_win[a & 0xFFFFF] = v; }
+static inline void px_wr16(uint32_t a, uint16_t v) { px_set_bank(a); *(volatile uint16_t *)(px_win + (a & 0xFFFFF)) = __builtin_bswap16(v); }
+static inline void px_wr32(uint32_t a, uint32_t v) { px_set_bank(a); *(volatile uint32_t *)(px_win + (a & 0xFFFFF)) = __builtin_bswap32(v); }
+
+/* ns per access, median over batches, ARM clock; and the bridge's own count
+ * of clk cycles for the last access (LAST) */
+static double px_time(int kind, uint32_t a, long batches, uint32_t *last)
+{
+	double *per = malloc(sizeof(*per) * batches);
+	uint32_t sink = 0;
+	if (!per) return -1;
+	for (long b = 0; b < batches; b++) {
+		int64_t t0 = now_ns();
+		for (int i = 0; i < 100; i++) {
+			switch (kind) {
+			case 0: sink += px_rd8(a + (i & 1)); break;
+			case 1: sink += px_rd16(a); break;
+			case 2: sink += px_rd32(a); break;
+			case 3: px_wr8(a + (i & 1), (uint8_t)i); break;
+			case 4: px_wr16(a, (uint16_t)i); break;
+			case 5: px_wr32(a, (uint32_t)i); break;
+			}
+		}
+		(void)px_ctl[0];      /* a write is posted: wait for the last one */
+		per[b] = (double)(now_ns() - t0) / 100;
+	}
+	*last = px_ctl[5];
+	for (long i = 1; i < batches; i++) {
+		double v = per[i]; long j = i - 1;
+		while (j >= 0 && per[j] > v) { per[j + 1] = per[j]; j--; }
+		per[j + 1] = v;
+	}
+	double med = per[batches / 2];
+	free(per);
+	if (sink == 0xDEADBEEF) fprintf(stderr, " ");
+	return med;
+}
+
+static int px_mode(volatile uint8_t *lw, long count, int cpu)
+{
+	px_ctl = (volatile uint32_t *)(lw + PX_CTL);
+	px_win = lw + PX_WIN;
+	int bad = 0;
+
+	if (px_ctl[0] != PX_MAGIC) {
+		fprintf(stderr, "no armcpu_bridge behind the bridge: control register 0 reads %08x, not %08lx\n",
+		        px_ctl[0], (unsigned long)PX_MAGIC);
+		return 1;
+	}
+	uint32_t st = px_ctl[3];
+	if (!(st & 0x100)) {
+		fprintf(stderr, "the CPU is not set to 68000 (STATUS %08x): the proxy only replaces the fx68k\n", st);
+		return 1;
+	}
+	printf("latprobe -P: the Amiga's bus from the ARM, cpu %d; interrupt level before taking the bus: %u\n",
+	       cpu, st & 7);
+
+	px_ctl[1] = 1;
+	if (!(px_ctl[1] & 1)) { fprintf(stderr, "OWN did not take\n"); return 1; }
+	px_bank = 0xFFFFFFFFu;
+
+	/* chip RAM: every size, both ways, and the byte order */
+	uint32_t a = PX_TEST;
+	for (uint32_t i = 0; i < 256; i++) px_wr8(a + i, (uint8_t)(i * 7 + 3));
+	for (uint32_t i = 0; i < 256; i++) if (px_rd8(a + i) != (uint8_t)(i * 7 + 3)) bad++;
+	for (uint32_t i = 0; i < 128; i++) if (px_rd16(a + 2 * i) != (uint16_t)(((i * 14 + 3) & 0xFF) << 8 | ((i * 14 + 10) & 0xFF))) bad++;
+	px_wr32(a, 0x11223344u);
+	if (px_rd16(a) != 0x1122 || px_rd16(a + 2) != 0x3344 || px_rd8(a) != 0x11 || px_rd8(a + 3) != 0x44) bad++;
+	px_wr16(a + 4, 0xA55A);
+	if (px_rd32(a + 4) >> 16 != 0xA55A) bad++;
+	uint32_t v = (uint32_t)now_ns();
+	for (long i = 0; i < count; i++) {
+		v = v * 1664525u + 1013904223u;
+		uint32_t at = a + 0x100 + ((v >> 8) & 0xFFC);
+		px_wr32(at, v);
+		if (px_rd32(at) != v) bad++;
+	}
+	printf("  chip RAM at $%06lx: every size written and read back, %ld random words: %d wrong\n",
+	       (unsigned long)a, count, bad);
+
+	/* the custom chips, live: VHPOSR moves with the beam */
+	uint16_t h0 = px_rd16(0xDFF006), h1 = h0;
+	int moved = 0;
+	for (int i = 0; i < 100 && !moved; i++) { h1 = px_rd16(0xDFF006); moved = (h1 != h0); }
+	printf("  VHPOSR $DFF006: %04x then %04x -- %s\n", h0, h1, moved ? "the beam is moving" : "NOT MOVING");
+	printf("  DMACONR %04x  INTENAR %04x  INTREQR %04x  interrupt level now %u\n",
+	       px_rd16(0xDFF002), px_rd16(0xDFF01C), px_rd16(0xDFF01E), px_ctl[3] & 7);
+
+	/* time each kind on chip RAM */
+	static const char *name[] = { "read byte", "read halfword", "read word", "write byte", "write halfword", "write word" };
+	long batches = count / 100;
+	if (batches < 11) batches = 11;
+	uint32_t w0 = px_ctl[6];
+	printf("  per access, chip RAM, median of %ld batches of 100 (ARM clock) | last one by the bridge's clock:\n", batches);
+	for (int k = 0; k < 6; k++) {
+		uint32_t last;
+		double ns = px_time(k, a + 0x2000, batches, &last);
+		printf("    %-15s %7.1f ns | %u cycles (%.0f ns at 113.5 MHz)\n", name[k], ns, last, last * 1000.0 / 113.5);
+	}
+	printf("  68k word cycles made: %u\n", px_ctl[6] - w0);
+
+	px_ctl[1] = 0;
+	printf("  bus given back (OWN %u): the 68000 restarts from its reset vector\n", px_ctl[1] & 1);
+	return bad ? 1 : 0;
+}
+
 static void raw_mode(uint8_t *base, long count, int cpu, int sync)
 {
 	volatile uint32_t *w = (volatile uint32_t *)(base + RAW_OFF);
@@ -448,10 +585,10 @@ static void raw_mode(uint8_t *base, long count, int cpu, int sync)
 int main(int argc, char **argv)
 {
 	long count = 100000, gap_us = 0;
-	int cpu = 0, opt, raw = 0, sync = 1, lw = 0, vis = 0, force = 0;
+	int cpu = 0, opt, raw = 0, sync = 1, lw = 0, vis = 0, prox = 0, force = 0;
 	const char *dev = NULL;
 
-	while ((opt = getopt(argc, argv, "n:c:g:d:rSBFLVfh")) != -1) {
+	while ((opt = getopt(argc, argv, "n:c:g:d:rSBFLVPfh")) != -1) {
 		switch (opt) {
 		case 'n': count = strtol(optarg, NULL, 0); break;
 		case 'c': cpu = (int)strtol(optarg, NULL, 0); break;
@@ -463,9 +600,10 @@ int main(int argc, char **argv)
 		case 'F': flush_rb = 1; break;
 		case 'L': lw = 1; break;
 		case 'V': vis = 1; break;
+		case 'P': prox = 1; break;
 		case 'f': force = 1; break;
 		default:
-			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us] [-r] [-S] [-B] [-F] [-L|-V [-f]]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us] [-r] [-S] [-B] [-F] [-L|-V|-P [-f]]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -477,14 +615,19 @@ int main(int argc, char **argv)
 	if (sched_setaffinity(0, sizeof(set), &set))
 		fprintf(stderr, "warning: cannot pin to cpu %d: %s\n", cpu, strerror(errno));
 
-	if (lw || vis) {
+	if (lw || vis || prox) {
 		if (!dev && !force && !lw_core_loaded()) {
-			fprintf(stderr, "-L/-V: no running core has \"lwbridge\" in its path. Without lw_echo.sv behind the "
-			                "bridge an access can hang the ARM, so -L and -V only run on that core (-f overrides).\n");
+			fprintf(stderr, "-L/-V/-P: no running core has \"lwbridge\" in its path. Without lw_echo.sv behind the "
+			                "bridge an access can hang the ARM, so -L, -V and -P only run on that core (-f overrides).\n");
 			return 2;
 		}
 		int lfd = open(dev ? dev : "/dev/mem", O_RDWR | O_SYNC);
 		if (lfd < 0) { perror(dev ? dev : "/dev/mem"); return 1; }
+		if (prox) {
+			void *pb = mmap(NULL, PX_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, lfd, dev ? 0 : LW_BASE);
+			if (pb == MAP_FAILED) { perror("mmap"); return 1; }
+			return px_mode((volatile uint8_t *)pb, count, cpu);
+		}
 		void *lb = mmap(NULL, LW_WINDOW, PROT_READ | PROT_WRITE, MAP_SHARED, lfd, dev ? 0 : LW_BASE);
 		if (lb == MAP_FAILED) { perror("mmap"); return 1; }
 		if (lw) return lw_mode((volatile uint32_t *)lb, count, cpu);

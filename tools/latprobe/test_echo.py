@@ -154,5 +154,27 @@ ok = ok and outvn.returncode == 1 and "no lw_echo behind the bridge" in outvn.st
 outvg = subprocess.run([exe, "-V", "-n", "10"], capture_output=True, text=True, timeout=60)
 ok = ok and outvg.returncode == 2 and "lwbridge" in outvg.stderr
 
+# -P (step 2, the 68000 bus proxy) on a plain 2 MB file standing in for the
+# bridge: memory order is the file's byte order, so every size must read
+# back what it wrote; MAGIC and the 68000 bit are set by hand, and the
+# counters stand still (VHPOSR "NOT MOVING" is the right answer here).
+h = tempfile.NamedTemporaryFile(delete=False)
+h.write(b"\0" * 0x200000); h.flush()
+pm = mmap.mmap(h.fileno(), 0x200000)
+struct.pack_into("<I", pm, 0x80000, 0x41435055)
+struct.pack_into("<I", pm, 0x8000C, 0x100)
+pm.flush()
+outp = subprocess.run([exe, "-P", "-n", "2000", "-d", h.name], capture_output=True, text=True, timeout=120)
+print(outp.stdout, outp.stderr)
+ok = ok and outp.returncode == 0 and "2000 random words: 0 wrong" in outp.stdout and "NOT MOVING" in outp.stdout
+ok = ok and all(k in outp.stdout for k in ("read byte", "write word", "bus given back (OWN 0)"))
+# its 68k write of 0x11223344 at $070000 must be in the file big-endian
+ok = ok and pm[0x100000 + 0x70000:0x100000 + 0x70004] == bytes([0x11, 0x22, 0x33, 0x44])
+struct.pack_into("<I", pm, 0x8000C, 0); pm.flush()
+outq = subprocess.run([exe, "-P", "-n", "10", "-d", h.name], capture_output=True, text=True, timeout=60)
+ok = ok and outq.returncode == 1 and "not set to 68000" in outq.stderr
+outr2 = subprocess.run([exe, "-P", "-n", "10"], capture_output=True, text=True, timeout=60)
+ok = ok and outr2.returncode == 2 and "lwbridge" in outr2.stderr
+
 print("answered", answered, "-> RUN:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
