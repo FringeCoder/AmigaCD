@@ -29,6 +29,12 @@
  *     -B  no barriers around the request write in the echo loop
  *     -F  read the request word back right after writing it, to see whether
  *         that pushes the write out to DDR3 sooner (step 1c)
+ *     -L  step 1d: time the lightweight HPS-to-FPGA bridge instead of DDR3.
+ *         Needs a core built with sys/lw_echo.sv (AmigaCD_MiSTer
+ *         claude/lwbridge-echo) and installed under a path containing
+ *         "lwbridge": with no slave behind 0xFF200000 an access can hang the
+ *         ARM's bus, so -L refuses to run on any other core. -f overrides the
+ *         check (only for a core you know has the echo).
  *
  * Without O_SYNC the mapping is cacheable (-r reads 9.8 ns): a request then
  * waits in the ARM's cache and the round trip never completes, so the echo
@@ -49,6 +55,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <sched.h>
 #include <stdint.h>
@@ -69,6 +76,13 @@
 #define TIMEOUT_NS       100000000LL   /* 100 ms: the probe is not answering */
 #define MAX_TIMEOUTS     5             /* consecutive, then give up */
 #define FPGA_MHZ         113.5
+
+#define LW_BASE          0xFF200000UL  /* lightweight HPS-to-FPGA bridge */
+#define LW_WINDOW        0x1000UL
+#define LW_MAGIC         0x4C574252UL  /* "LWBR", lw_echo.sv register 1 */
+#define LW_MHZ           100.0         /* lw_echo.sv runs on clk_100m */
+
+#define PCT(a, p) (a)[(long)((double)(done - 1) * (p))]
 
 static inline int64_t now_ns(void)
 {
@@ -135,6 +149,90 @@ static double raw_one(volatile uint32_t *w, int kind, long batches)
 	return med;
 }
 
+/* -L: is the running core one with the bridge echo? Main_MiSTer is started
+ * with the .rbf path as an argument: look for an argument ending in ".rbf"
+ * whose path contains "lwbridge", in any process's command line. */
+static int lw_core_loaded(void)
+{
+	DIR *d = opendir("/proc");
+	struct dirent *e;
+	int found = 0;
+	if (!d) return 0;
+	while (!found && (e = readdir(d))) {
+		char path[300], buf[4096];
+		if (e->d_name[0] < '1' || e->d_name[0] > '9') continue;
+		snprintf(path, sizeof(path), "/proc/%s/cmdline", e->d_name);
+		FILE *f = fopen(path, "r");
+		if (!f) continue;
+		size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+		fclose(f);
+		buf[n] = 0;
+		for (size_t i = 0; i < n; i += strlen(buf + i) + 1) {
+			size_t l = strlen(buf + i);
+			if (l > 4 && !strcmp(buf + i + l - 4, ".rbf") && strstr(buf + i, "lwbridge")) found = 1;
+		}
+	}
+	closedir(d);
+	return found;
+}
+
+/* -L: the echo register is lw[0], MAGIC lw[1], CYCLES lw[2], COUNT lw[3].
+ * Batched medians per access kind, as -r does, then each write-and-read-back
+ * round trip timed on its own for the tail, checking every value echoes. */
+static int lw_mode(volatile uint32_t *lw, long count, int cpu)
+{
+	uint32_t magic = lw[1];
+	if (magic != LW_MAGIC) {
+		fprintf(stderr, "no lw_echo behind the bridge: register 1 reads %08x, not %08lx\n",
+		        magic, (unsigned long)LW_MAGIC);
+		return 1;
+	}
+	long batches = count / RAW_BATCH;
+	static const char *name[] = { "read", "write", "write + dmb", "write, read back" };
+	if (batches < 11) batches = 11;
+	printf("latprobe -L: lightweight HPS-to-FPGA bridge, cpu %d, %ld batches of %d\n", cpu, batches, RAW_BATCH);
+	for (int k = 0; k < 4; k++)
+		printf("  %-17s %7.1f ns per op (median of batches)\n", name[k], raw_one(lw, k, batches));
+
+	/* The FPGA's own clock across one batch of reads: no ARM timer in it. */
+	uint32_t c0 = lw[2];
+	for (int i = 0; i < RAW_BATCH; i++) (void)lw[0];
+	uint32_t c1 = lw[2];
+	printf("  read, by the FPGA's clock: %.1f ns per op (%u cycles at %.0f MHz for %d)\n",
+	       (c1 - c0) * 1000.0 / LW_MHZ / RAW_BATCH, c1 - c0, LW_MHZ, RAW_BATCH);
+
+	int64_t *rt = malloc(sizeof(*rt) * count);
+	if (!rt) { fprintf(stderr, "out of memory\n"); return 1; }
+	int64_t clk_over = INT64_MAX;
+	for (int i = 0; i < 1000; i++) {                 /* the cost of the timer itself */
+		int64_t a = now_ns(), b = now_ns();
+		if (b - a < clk_over) clk_over = b - a;
+	}
+	long bad = 0, done = count;
+	uint32_t v = (uint32_t)now_ns();
+	for (long i = 0; i < count; i++) {
+		v = v * 1664525u + 1013904223u;
+		int64_t t0 = now_ns();
+		lw[0] = v;
+		uint32_t back = lw[0];
+		rt[i] = now_ns() - t0;
+		if (back != v) bad++;
+	}
+	qsort(rt, count, sizeof(*rt), cmp_i64);
+	double sum = 0;
+	for (long i = 0; i < count; i++) sum += rt[i];
+	printf("echo round trip (write, read back), each timed alone, ARM clock (ns, includes the timer's own %lld):\n",
+	       (long long)clk_over);
+	printf("  min %lld  median %lld  mean %.0f  p90 %lld  p99 %lld  p99.9 %lld  max %lld\n",
+	       (long long)rt[0], (long long)PCT(rt, 0.5), sum / done, (long long)PCT(rt, 0.9),
+	       (long long)PCT(rt, 0.99), (long long)PCT(rt, 0.999), (long long)rt[done - 1]);
+	printf("  %ld of %ld read back a different value\n", bad, count);
+	uint32_t n = lw[3];
+	printf("  lw_echo served %u reads and %u writes (16-bit counts, wrapping)\n", n & 0xFFFF, n >> 16);
+	free(rt);
+	return bad ? 1 : 0;
+}
+
 static void raw_mode(uint8_t *base, long count, int cpu, int sync)
 {
 	volatile uint32_t *w = (volatile uint32_t *)(base + RAW_OFF);
@@ -150,10 +248,10 @@ static void raw_mode(uint8_t *base, long count, int cpu, int sync)
 int main(int argc, char **argv)
 {
 	long count = 100000, gap_us = 0;
-	int cpu = 0, opt, raw = 0, sync = 1;
+	int cpu = 0, opt, raw = 0, sync = 1, lw = 0, force = 0;
 	const char *dev = NULL;
 
-	while ((opt = getopt(argc, argv, "n:c:g:d:rSBFh")) != -1) {
+	while ((opt = getopt(argc, argv, "n:c:g:d:rSBFLfh")) != -1) {
 		switch (opt) {
 		case 'n': count = strtol(optarg, NULL, 0); break;
 		case 'c': cpu = (int)strtol(optarg, NULL, 0); break;
@@ -163,8 +261,10 @@ int main(int argc, char **argv)
 		case 'S': sync = 0; break;
 		case 'B': no_barrier = 1; break;
 		case 'F': flush_rb = 1; break;
+		case 'L': lw = 1; break;
+		case 'f': force = 1; break;
 		default:
-			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us] [-r] [-S] [-B] [-F]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us] [-r] [-S] [-B] [-F] [-L [-f]]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -175,6 +275,19 @@ int main(int argc, char **argv)
 	CPU_SET(cpu, &set);
 	if (sched_setaffinity(0, sizeof(set), &set))
 		fprintf(stderr, "warning: cannot pin to cpu %d: %s\n", cpu, strerror(errno));
+
+	if (lw) {
+		if (!dev && !force && !lw_core_loaded()) {
+			fprintf(stderr, "-L: no running core has \"lwbridge\" in its path. Without lw_echo.sv behind the "
+			                "bridge an access can hang the ARM, so -L only runs on that core (-f overrides).\n");
+			return 2;
+		}
+		int lfd = open(dev ? dev : "/dev/mem", O_RDWR | O_SYNC);
+		if (lfd < 0) { perror(dev ? dev : "/dev/mem"); return 1; }
+		void *lb = mmap(NULL, LW_WINDOW, PROT_READ | PROT_WRITE, MAP_SHARED, lfd, dev ? 0 : LW_BASE);
+		if (lb == MAP_FAILED) { perror("mmap"); return 1; }
+		return lw_mode((volatile uint32_t *)lb, count, cpu);
+	}
 
 	int fd = open(dev ? dev : "/dev/mem", O_RDWR | (sync ? O_SYNC : 0));
 	if (fd < 0) { perror(dev ? dev : "/dev/mem"); return 1; }
@@ -251,7 +364,6 @@ int main(int argc, char **argv)
 	double sum = 0;
 	for (long i = 0; i < done; i++) sum += rt[i];
 
-#define PCT(a, p) (a)[(long)((double)(done - 1) * (p))]
 	printf("latprobe: %ld round trips on cpu %d, %ld timed out, gap %ld us%s%s%s\n", done, cpu, timeouts, gap_us,
 	       sync ? "" : ", no O_SYNC", no_barrier ? ", no barriers" : "", flush_rb ? ", read-back flush" : "");
 	printf("round trip, ARM clock (ns):\n");

@@ -77,5 +77,20 @@ stop = True; t.join()
 gave_up = "giving up" in outd.stderr and time.time() - t0 < 10
 print(outd.stdout, outd.stderr)
 ok = ok and gave_up
+# -L (step 1d, the lightweight bridge) on a plain file standing in for the
+# lw_echo registers: MAGIC in register 1, so ECHO in register 0 reads back
+# what was written. Without -d it must refuse to touch 0xFF200000 unless a
+# core with "lwbridge" in its path is running, which it is not here.
+struct.pack_into("<I", m, 4, 0x4C574252); m.flush()
+outl = subprocess.run([exe, "-L", "-n", "20000", "-d", f.name], capture_output=True, text=True, timeout=120)
+print(outl.stdout, outl.stderr)
+ok = ok and outl.returncode == 0 and "0 of 20000 read back a different value" in outl.stdout
+struct.pack_into("<I", m, 4, 0); m.flush()
+outn = subprocess.run([exe, "-L", "-n", "100", "-d", f.name], capture_output=True, text=True, timeout=60)
+ok = ok and outn.returncode == 1 and "no lw_echo behind the bridge" in outn.stderr
+outg = subprocess.run([exe, "-L", "-n", "100"], capture_output=True, text=True, timeout=60)
+print(outg.stderr)
+ok = ok and outg.returncode == 2 and "lwbridge" in outg.stderr
+
 print("answered", answered, "-> RUN:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
