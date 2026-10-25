@@ -12,6 +12,28 @@ core). So the cost of one chipset access is the DDR3 round trip, and that is
 what step 1 measures. (Step 1d then wired the lightweight bridge up after
 all; see below.)
 
+## Requirement (Mark, 2026-10-25)
+
+The ARM CPU is **one more CPU choice**, beside the 68000 (fx68k), 68010,
+68020 and 68030 (TG68K). The existing choices stay exactly as they are,
+cycle-exact where they are today; nothing of this plan may change how they
+run. Only the new choice uses the ARM core for the CPU and the ARM's memory
+(Kickstart and Fast RAM on the ARM side); chip RAM and the chipset stay in
+the FPGA.
+
+How the build so far meets that:
+
+- The proxy (step 2) sits behind a mux on the 68000 path's pins and only
+  drives them while armcpu_bridge's OWN is set; with OWN clear the fx68k's
+  signals pass through unchanged, and the TG68K path has no change at all.
+- For the measurements OWN can only be set with the 68000 selected. The
+  finished option replaces that with its own CPU setting (a new value
+  beside cpucfg's four, carried in the OSD config and the .mgl), which
+  selects the proxy instead of the fx68k from reset.
+- The mux is one more level of logic on the fx68k's outputs, so every fit
+  has to keep closing timing; behaviour with OWN clear is identical by
+  construction, and the existing CPU benches run unchanged.
+
 ## Steps, each a go / no-go gate
 
 1. **Measure the round trip.** `latprobe_ddr3.v` in the core echoes a request
