@@ -556,12 +556,20 @@ static int px_mode(volatile uint8_t *lw, long count, int cpu)
 	static const char *name[] = { "read byte", "read halfword", "read word", "write byte", "write halfword", "write word" };
 	long batches = count / 100;
 	if (batches < 11) batches = 11;
+	/* the bridge's clock, from its CYCLES against ours (clk_sys in the core) */
+	uint32_t c0 = px_ctl[4];
+	int64_t t0 = now_ns();
+	usleep(50000);
+	double mhz = (px_ctl[4] - c0) * 1000.0 / (double)(now_ns() - t0);
 	uint32_t w0 = px_ctl[6];
 	printf("  per access, chip RAM, median of %ld batches of 100 (ARM clock) | last one by the bridge's clock:\n", batches);
 	for (int k = 0; k < 6; k++) {
 		uint32_t last;
 		double ns = px_time(k, a + 0x2000, batches, &last);
-		printf("    %-15s %7.1f ns | %u cycles (%.0f ns at 113.5 MHz)\n", name[k], ns, last, last * 1000.0 / 113.5);
+		if (mhz > 1)
+			printf("    %-15s %7.1f ns | %u cycles (%.0f ns at %.1f MHz)\n", name[k], ns, last, last * 1000.0 / mhz, mhz);
+		else
+			printf("    %-15s %7.1f ns | %u cycles (CYCLES not counting)\n", name[k], ns, last);
 	}
 	printf("  68k word cycles made: %u\n", px_ctl[6] - w0);
 
