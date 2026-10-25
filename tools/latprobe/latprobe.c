@@ -27,6 +27,13 @@
  *     -S  open /dev/mem without O_SYNC (does the mapping type change the
  *         cost? on a page Linux does not own it may not)
  *     -B  no barriers around the request write in the echo loop
+ *     -F  read the request word back right after writing it, to see whether
+ *         that pushes the write out to DDR3 sooner (step 1c)
+ *
+ * Without O_SYNC the mapping is cacheable (-r reads 9.8 ns): a request then
+ * waits in the ARM's cache and the round trip never completes, so the echo
+ * loop refuses -S, and gives up after MAX_TIMEOUTS consecutive timeouts
+ * either way rather than running for hours.
  *
  * Results of the first run (2026-10-25, seed-20 probe core): median round
  * trip 2.51 us, p99 ~23 us, idle and with Main busy alike; FPGA DDR3 read
@@ -60,6 +67,7 @@
 #define RAW_OFF          0x8090UL      /* Avalon 0x1012: unused by the probe and the mailbox */
 
 #define TIMEOUT_NS       100000000LL   /* 100 ms: the probe is not answering */
+#define MAX_TIMEOUTS     5             /* consecutive, then give up */
 #define FPGA_MHZ         113.5
 
 static inline int64_t now_ns(void)
@@ -84,7 +92,7 @@ static int cmp_u16(const void *a, const void *b)
  * transaction. 64-bit words are written low half, then high half: the probe
  * only acts when the high half holds MAGIC and the low half a new seq, so the
  * low half must already be in place when MAGIC lands. */
-static int no_barrier;
+static int no_barrier, flush_rb;
 
 static inline void write_req(volatile uint32_t *w, uint32_t seq)
 {
@@ -92,6 +100,7 @@ static inline void write_req(volatile uint32_t *w, uint32_t seq)
 	if (!no_barrier) __sync_synchronize();
 	w[1] = PROBE_MAGIC;
 	if (!no_barrier) __sync_synchronize();
+	if (flush_rb) (void)w[1];
 }
 
 /* -r: ns per operation, as the median over batches of RAW_BATCH operations,
@@ -144,7 +153,7 @@ int main(int argc, char **argv)
 	int cpu = 0, opt, raw = 0, sync = 1;
 	const char *dev = NULL;
 
-	while ((opt = getopt(argc, argv, "n:c:g:d:rSBh")) != -1) {
+	while ((opt = getopt(argc, argv, "n:c:g:d:rSBFh")) != -1) {
 		switch (opt) {
 		case 'n': count = strtol(optarg, NULL, 0); break;
 		case 'c': cpu = (int)strtol(optarg, NULL, 0); break;
@@ -153,8 +162,9 @@ int main(int argc, char **argv)
 		case 'r': raw = 1; break;
 		case 'S': sync = 0; break;
 		case 'B': no_barrier = 1; break;
+		case 'F': flush_rb = 1; break;
 		default:
-			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us] [-r] [-S] [-B]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-n count] [-c cpu] [-g gap_us] [-r] [-S] [-B] [-F]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -172,6 +182,11 @@ int main(int argc, char **argv)
 	if (base == MAP_FAILED) { perror("mmap"); return 1; }
 
 	if (raw) { raw_mode(base, count, cpu, sync); return 0; }
+	if (!sync && !dev) {
+		fprintf(stderr, "-S maps the window cacheable: requests never reach DDR3 promptly, so the round trip "
+		                "cannot be timed. -S is for -r only.\n");
+		return 2;
+	}
 
 	volatile uint32_t *req  = (volatile uint32_t *)(base + PROBE_REQ_OFF);
 	volatile uint32_t *resp = (volatile uint32_t *)(base + PROBE_RESP_OFF);
@@ -197,7 +212,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	long done = 0, timeouts = 0;
+	long done = 0, timeouts = 0, in_a_row = 0;
 	for (long i = 0; i < count; i++) {
 		seq += 2;
 		int64_t t0 = now_ns();
@@ -206,7 +221,15 @@ int main(int argc, char **argv)
 			if (now_ns() - t0 > TIMEOUT_NS) break;
 		}
 		int64_t t1 = now_ns();
-		if (resp[1] != seq) { timeouts++; continue; }
+		if (resp[1] != seq) {
+			timeouts++;
+			if (++in_a_row >= MAX_TIMEOUTS) {
+				fprintf(stderr, "giving up: %d round trips in a row timed out (%ld done)\n", MAX_TIMEOUTS, done);
+				break;
+			}
+			continue;
+		}
+		in_a_row = 0;
 		uint32_t lo = resp[0];
 		rt[done]     = t1 - t0;
 		rd_lat[done] = (uint16_t)(lo >> 16);
@@ -229,8 +252,8 @@ int main(int argc, char **argv)
 	for (long i = 0; i < done; i++) sum += rt[i];
 
 #define PCT(a, p) (a)[(long)((double)(done - 1) * (p))]
-	printf("latprobe: %ld round trips on cpu %d, %ld timed out, gap %ld us%s%s\n", done, cpu, timeouts, gap_us,
-	       sync ? "" : ", no O_SYNC", no_barrier ? ", no barriers" : "");
+	printf("latprobe: %ld round trips on cpu %d, %ld timed out, gap %ld us%s%s%s\n", done, cpu, timeouts, gap_us,
+	       sync ? "" : ", no O_SYNC", no_barrier ? ", no barriers" : "", flush_rb ? ", read-back flush" : "");
 	printf("round trip, ARM clock (ns):\n");
 	printf("  min %lld  median %lld  mean %.0f  p90 %lld  p99 %lld  p99.9 %lld  max %lld\n",
 	       (long long)rt[0], (long long)PCT(rt, 0.5), sum / done, (long long)PCT(rt, 0.9),

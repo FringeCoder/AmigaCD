@@ -50,5 +50,32 @@ ok = ok and outb.returncode == 0 and "500 round trips" in outb.stdout and "no ba
 outr = subprocess.run([exe, "-r", "-n", "20000", "-d", f.name], capture_output=True, text=True, timeout=120)
 print(outr.stdout)
 ok = ok and outr.returncode == 0 and all(k in outr.stdout for k in ("read ", "write ", "write + dmb", "write, read back"))
+# -F (read-back after the request write) is answered every time too.
+stop = False; answered = 0
+t = threading.Thread(target=fpga); t.start()
+outf = subprocess.run([exe, "-n", "500", "-F", "-d", f.name], capture_output=True, text=True, timeout=120)
+stop = True; t.join()
+ok = ok and outf.returncode == 0 and "500 round trips" in outf.stdout and "read-back flush" in outf.stdout
+
+# A probe that stops answering mid-run must not keep the tool spinning: it
+# gives up after a few consecutive timeouts (100 ms each), well inside 10 s.
+limit = 300
+def fpga_dies():
+    global answered
+    last = None
+    while not stop and answered < limit:
+        lo, hi = struct.unpack_from("<II", m, REQ)
+        if hi == MAGIC and lo != last:
+            last = lo
+            struct.pack_into("<II", m, RESP, 7 << 16, lo)
+            answered += 1
+stop = False; answered = 0
+t = threading.Thread(target=fpga_dies); t.start()
+t0 = time.time()
+outd = subprocess.run([exe, "-n", "100000", "-d", f.name], capture_output=True, text=True, timeout=60)
+stop = True; t.join()
+gave_up = "giving up" in outd.stderr and time.time() - t0 < 10
+print(outd.stdout, outd.stderr)
+ok = ok and gave_up
 print("answered", answered, "-> RUN:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

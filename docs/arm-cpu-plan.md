@@ -55,12 +55,53 @@ Verdict so far: the "few microseconds" case. An ARM CPU can only be a Fast-RAM
 accelerator (Workbench, RTG, compiled software), with writes posted to the FPGA
 without waiting and only reads paying a round trip. Not a CD32 option.
 
-## Step 1b: the ARM half on its own
+## Step 1b: the ARM half on its own, 2026-10-25
 
-`latprobe -r` times the ARM's own uncached read, write, write + barrier and
-write-then-read-back on an unused word of the window (0x1FF08090); it needs no
-FPGA, so any AmigaCD core will do. `-S` maps without `O_SYNC` and `-B` drops
-the barriers from the echo loop. If the ARM's own accesses come out near
-1 us each, the round trip is bounded by the ARM's path to DDR3, not by the FPGA
-or this protocol, and the next lever is the mapping (or a different bridge),
-not the proxy.
+latprobe 161b8283 (build run 40178540711). `-r` on the normal core, the echo
+runs on the seed-20 probe core (A500, no Fast RAM, as in step 1).
+
+| `-r` (ns per op, median of 100 batches of 1000) | read | write | write + dmb | write, read back |
+|---|---|---|---|---|
+| O_SYNC (strongly ordered) | 141.0 | 8.6 | 33.4 | 211.3 |
+| no O_SYNC | 9.8 | 8.6 | 12.3 | 14.8 |
+
+| echo | median | min | p99 | empty polls (median) |
+|---|---|---|---|---|
+| baseline | 2.53 us | 1.47 | 23.4 | 10 |
+| `-B` (no barriers) | 2.48 us | 1.52 | 21.0 | 10 |
+| `-S`, `-S -B` | ms to tens of ms, most timed out | | | 65535 |
+
+- The ARM's own accesses are cheap: a 141 ns uncached read, an 8.6 ns posted
+  write, 33 ns with a barrier. Barriers cost under 2 % of the round trip.
+- Without O_SYNC the mapping is cacheable (9.8 ns reads): a request sits in
+  the ARM's cache and the round trip never completes. Unusable for sharing.
+  The echo loop now refuses `-S` and gives up after 5 consecutive timeouts
+  (the user's 100000-round-trip `-S -B` run spun for 4 minutes before this).
+- That leaves ~2 us unexplained by anything the ARM executes. Adding up the
+  rest: the ARM sees the answer within one 141 ns read and posts the next
+  request in ~10-35 ns; the FPGA reads in 141 ns and polls every ~0.2 us. The
+  ~2 us sit between "the FPGA's response write was accepted" and "the FPGA's
+  poll sees the ARM's next request" -- while each write is in flight between
+  two different ports of the HPS SDRAM controller (the ARM's, and the FPGA's
+  f2sdram). **Hypothesis:** a write is accepted long before the other port can
+  see it; the controller queues writes per port, and nothing makes a read on
+  one port wait for a write still queued on another. A read on the same port
+  does see its own write (the 211 ns read-back), which fits.
+
+## Step 1c: does a read-back push the write out?
+
+`latprobe -F` reads the request word back right after writing it. If the
+round trip drops, the ARM-to-FPGA direction was the slow one and a read-back
+is a cheap fix on that side (the FPGA-to-ARM direction would want the same
+trick in the core). If it does not, the delay is in the controller and no
+amount of software helps.
+
+## Step 1d (proposed): a bridge that does not go through DDR3
+
+The Cyclone V's lightweight HPS-to-FPGA bridge maps FPGA registers straight
+into the ARM's address space: no DDR3, no cross-port visibility. MiSTer's
+framework does not wire it up, so measuring it means a `sys/` change and a
+register echo in the core. Even if it came in near 0.5 us per read, that is
+still slower than a real 68000 bus cycle (280-560 ns), so it would not bring
+back chip-RAM code -- it would only make an accelerator's register reads
+cheaper. Worth doing only if the accelerator itself is wanted.
