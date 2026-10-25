@@ -423,6 +423,49 @@ Where this leaves the bus: a chip-RAM halfword costs ~655 ns to read and
 custom chips and CIAs ~1.0-1.35 us. Those are the costs step 3's emulator
 pays for every chip access, with Kickstart and fast RAM on the ARM side.
 
+## Step 3: a 68000 on the ARM boots Kickstart
+
+**armcpu** (AmigaCD `tools/armcpu`, 367d606e): Musashi v4.60 (MIT, vendored
+unmodified with its generated opcode table) runs a 68000 on ARM core 0.
+Kickstart is loaded into ARM memory; every other access goes through the
+proxy with FAST and FASTW. The emulator follows the ROM overlay itself
+(CIA-A PRA bit 0 through DDRA, as Gary does), hands Paula's interrupt level
+to Musashi every 500 cycles, and executes RESET through a new CTRL bit 3
+that pulls the CPU's reset output (AmigaCD_MiSTer f7b4328, fit seed 9,
++0.127 ns). It cold-starts by clearing the ExecBase pointer at $4.
+
+**Result, 2026-10-25:** with the A500 config (Kickstart
+`1.3-scsi-patched.rom`) and both floppy drives empty, Kickstart 1.3 boots on
+the ARM's 68000 to the insert-disk screen, with the fx68k held in reset
+throughout. Effective speed, from Musashi's cycle count against the clock:
+15-19 MHz of 68000 while it runs from the ROM copy in ARM memory, ~6.8 MHz
+in the insert-disk loop, which is chip-bound (~400,000 bus reads and
+~257,000 writes a second).
+
+What the first runs found:
+
+- **Interrupts are level-triggered; Musashi's are not.** Without an
+  acknowledge callback Musashi drops its pending level when it takes the
+  interrupt, so a level handed over only on change was taken once. A disk
+  loader waiting for DSKBLK with level 6 up hung. Handing the level over
+  every slice fixes it (host test: a level that stays up is taken again).
+- **Stale RAM looks like a warm start.** Taking over a machine the fx68k
+  had booted, Kickstart trusted the old ExecBase and its capture vectors.
+- **The disk then in DF0 does not boot on the fx68k either** on this core
+  and binary (a white screen), so it is no test of the ARM CPU; the boot was
+  checked with the drives empty. Booting real software from floppy is the
+  next check.
+- **Single-stepping hides timing faults:** the debug trace now uses
+  Musashi's instruction hook so a traced run keeps normal timing.
+
+Where it stands against the goal: the ARM is the CPU of an otherwise
+unchanged machine, the other CPU choices are untouched, and Kickstart and
+ROM code run at 2-3 times a 7 MHz 68000. Chip-bound code runs at about a
+68000's speed, as the bus costs predict. Not yet: fast RAM on the ARM side
+(an emulated autoconfig board), the CPU choice in the OSD, and the ARM core
+to itself (maxcpus=1, as BigMig does) -- every run here shares Linux's
+scheduler.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
@@ -496,7 +539,8 @@ Where things are:
 | the 68000 bus proxy: `rtl/proxy68k.v`, `rtl/armcpu_bridge.v`, lw_echo's bus port, bench `rtl/sim/armcpu/tb_armcpu.sv`; bridge on clk_sys; `latprobe -P` | AmigaCD_MiSTer `claude/lwbridge-echo` commit `571d1f2`; AmigaCD `3326acf7` |
 | probes out, bridge on clk_100m, FAST reads; `latprobe -P` with FAST and the blitter check | AmigaCD_MiSTer `claude/lwbridge-echo` commit `9d4a752` (fit run 40218489738, seed 2); AmigaCD `326a8224` |
 | FASTW writes; `latprobe -P` with FASTW and its blitter checks | AmigaCD_MiSTer `claude/lwbridge-echo` commit `6441bb5` (fit run 40229429510, seed 5); AmigaCD `36a7d358` |
-| the measured numbers | the step 1, 1b, 1c, 1d, 1e, 2, 2b and 2c sections above |
+| the 68000 on the ARM: `tools/armcpu` (Musashi, the overlay, interrupts, RESET, the debug trace), `test_armcpu.py`; the RESET bit | AmigaCD `367d606e`; AmigaCD_MiSTer `claude/lwbridge-echo` commit `f7b4328` (fit run 40234323873, seed 9) |
+| the measured numbers | the step 1, 1b, 1c, 1d, 1e, 2, 2b, 2c and 3 sections above |
 
 What to start from, in order:
 
