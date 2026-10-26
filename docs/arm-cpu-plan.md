@@ -689,6 +689,11 @@ That is 9.9x SysInfo's A4000/040 reference, for code in fast RAM. Chip RAM
 and the chipset still cost a bus cycle each (SysInfo's chip speed: 2.83x an
 A600).
 
+**Workbench from floppy:** with the Workbench 1.3 Juggler disk in DF0 (DF1
+ejected), Kickstart 3.1 on the JIT boots it to the Workbench screen with the
+disk's Movie icon in about 40 s. Opening Movie went to a black screen; the
+run's time limit ended before it could be judged either way.
+
 Not yet: the fit closing, armuae started from Main's OSD instead of armcpu,
 a 68040/68060 model with 32-bit addressing (natmem is 16 MB, so the JIT's
 direct accesses above it need guarding), the FPU in the JIT, and a
