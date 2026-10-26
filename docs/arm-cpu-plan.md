@@ -569,6 +569,23 @@ default. The Musashi figure is up from 4783 with the gcc 13 build; the
 toolchain alone moves it by about 19%. A 68040/68060 needs a JIT
 (Amiberry's ARM32 UAE JIT, or Emu68), not another interpreter.
 
+**Against the core's own 68030** (live pair, A1200 profile, KS 3.1, 8 MB
+FastRAM, SysInfo's SPEED clicked through a uinput mouse,
+`scripts/mister-vmouse.py`):
+
+| CPU | Dhrystones | MIPS | vs A600 |
+|---|---|---|---|
+| FPGA 68030 50 MHz (SysInfo: 55.8) | 7857 | 8.28 | 14.85x |
+| FPGA 68030 Fast (SysInfo: 60.6) | 7857 | 8.28 | 14.85x |
+| ARM 68020, Musashi | 5685 | 5.99 | 10.74x |
+| ARM 68020, Moira | 3970 | 4.14 | 7.50x |
+
+The interpreter reaches about 72% of the core's 68030 on code in fast RAM,
+and much less on anything that touches chip RAM or the chipset. It has no
+MMU and no save states either. It does not replace the 68030; only a JIT
+would. 50 MHz and Fast score the same, so the FPGA 68030 is bound by its
+fast RAM there, not by its clock.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
