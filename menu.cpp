@@ -50,6 +50,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "osd.h"
 #include "hardware.h"
 #include "menu.h"
+#include "support/minimig/minimig_armcpu.h"
 #include "user_io.h"
 #include "debug.h"
 #include "fpga_io.h"
@@ -627,7 +628,8 @@ static int minimig_ss_blocked()
 	// MMU registers and the rest of CACR in the state (see ss_supported in
 	// AmigaCD.sv). The 68000 (fx68k) and Zorro III fast RAM stay refused.
 	int cpu = minimig_config.cpu & 0x03;
-	return (minimig_fast_z3(minimig_config.cpu) && fastram >= 4) || (cpu == 0);
+	// The ARM CPU's state lives on the ARM, where no save state reaches.
+	return (minimig_fast_z3(minimig_config.cpu) && fastram >= 4) || (cpu == 0) || armcpu_wanted();
 }
 
 // Ask the core for a save, from either menu.
@@ -8546,7 +8548,7 @@ void HandleUI(void)
 			static const char *const tips[] =
 			{
 				/* 0 FastRAM  */ "Zorro II and Zorro III fast RAM. Z3 and 68000 both stop save states working, and grey those rows out when selected.",
-				/* 1 CPU      */ "The machine's 68020, or a 68030 with its MMU: at 40MHz or 50MHz like a real card, or Fast. No FPU. Save states work on all of them.",
+				/* 1 CPU      */ "The machine's 68020, or a 68030 with its MMU: at 40MHz or 50MHz like a real card, or Fast. No FPU. Save states work on all of them. With the test core, ARM runs a 68020 on the ARM with 8 MB of its own fast RAM.",
 				/* 2 CPU Turbo*/ "Run the 68020 at full speed rather than throttled to the stock rate. Only available when the CPU is an 020.",
 				/* 3 Main ROM */ "The Kickstart. Amiga Forever ROMs work as they are, encrypted, as long as ROM.KEY sits beside them.",
 				/* 4 Ext ROM  */ "The extended ROM, which a CD32 needs to boot a disc. Minus clears the pairing.",
@@ -8587,17 +8589,25 @@ void HandleUI(void)
 		// one in a CD32, the Blizzards in an A1200 -- at a real card's 40MHz or
 		// 50MHz, or Fast (upstream d49cd64). The 68000 machines (A500, CDTV)
 		// keep their 68000; greyed for them.
+		//
+		// The ARM CPU (minimig_armcpu.cpp) is one more choice on this row, on
+		// a core that has the bus proxy: after the machine's own CPUs, and on
+		// the 68000 machines the only other one, so the row is live there too.
 		strcpy(s, " CPU      : ");
-		strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : ((minimig_config.cpu & 0x23) == 0x22) ? "68EC030" : config_cpu_msg[minimig_config.cpu & 0x03]);
-		if ((minimig_config.cpu & 0x03) == 0x02) { strcat(s, " "); strcat(s, minimig_cpu030_clock_msg(minimig_config.cpu)); }
-		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2));
+		if (armcpu_wanted()) strcat(s, "ARM 68020");
+		else
+		{
+			strcat(s, ((minimig_config.cpu & 0x23) == 0x23) ? "68EC020" : ((minimig_config.cpu & 0x23) == 0x22) ? "68EC030" : config_cpu_msg[minimig_config.cpu & 0x03]);
+			if ((minimig_config.cpu & 0x03) == 0x02) { strcat(s, " "); strcat(s, minimig_cpu030_clock_msg(minimig_config.cpu)); }
+		}
+		OsdWrite(m++, s, menusub == 1, !(minimig_config.cpu & 0x2) && !armcpu_core_has_proxy());
 
 		// CPU Turbo = CPU byte bit5 read the other way up: the bit SET engages
 		// the stock-speed throttle, so Turbo On is the bit clear. The 68020
 		// only: the 68030's speed is in the CPU row above.
 		strcpy(s, " CPU Turbo: ");
-		strcat(s, ((minimig_config.cpu & 0x03) != 0x03) ? "-" : (minimig_config.cpu & 0x20) ? "OFF" : "ON");
-		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03);
+		strcat(s, ((minimig_config.cpu & 0x03) != 0x03 || armcpu_wanted()) ? "-" : (minimig_config.cpu & 0x20) ? "OFF" : "ON");
+		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03 || armcpu_wanted());
 
 		// No blank between the CPU rows and the ROMs. Row budget: this page
 		// draws fifteen lines before Back on line 15 -- eleven selectable, the
@@ -8772,7 +8782,21 @@ void HandleUI(void)
 				// 68000. The 68020 is entered Turbo On, this fork's default;
 				// the six 68030s are upstream 065d0d2's last six steps, in
 				// their order, the 68EC030s first.
-				if (minimig_config.cpu & 0x2)
+				// On a core with the bus proxy the ARM CPU is one step more:
+				// after the last of the machine's CPUs, before the first. On
+				// the 68000 machines it is the only other step. Its flag sits
+				// beside the CPU byte, which keeps the machine's CPU for when
+				// it is switched off.
+				const bool arm_ok = armcpu_core_has_proxy();
+				if (minimig_config.armcpu == 1)
+				{
+					minimig_config.armcpu = 0;
+					if (minimig_config.cpu & 0x2)
+						minimig_config.cpu = (minimig_config.cpu & 0x1c) | (minus ? 0x02 : 0x03);
+					minimig_ConfigCPU(minimig_config.cpu);
+					armcpu_restart();
+				}
+				else if (minimig_config.cpu & 0x2)
 				{
 					static const unsigned char steps[7] = { 0x03, 0x62, 0xa2, 0x22, 0x42, 0x82, 0x02 };
 					const int ec = (minimig_config.cpu & 0x23) == 0x22;
@@ -8780,9 +8804,24 @@ void HandleUI(void)
 					         ((minimig_config.cpu & 0xc0) == 0x40) ? 1 :
 					         ((minimig_config.cpu & 0xc0) == 0x80) ? 2 : 3;
 					if (at && !ec) at += 3;
-					at = (at + (minus ? 6 : 1)) % 7;
-					minimig_config.cpu = (minimig_config.cpu & 0x1c) | steps[at];
+					if (arm_ok && ((!minus && at == 6) || (minus && at == 0)))
+					{
+						minimig_config.armcpu = 1;
+						minimig_ConfigCPU(minimig_config.cpu);
+						armcpu_restart();
+					}
+					else
+					{
+						at = (at + (minus ? 6 : 1)) % 7;
+						minimig_config.cpu = (minimig_config.cpu & 0x1c) | steps[at];
+						minimig_ConfigCPU(minimig_config.cpu);
+					}
+				}
+				else if (arm_ok)
+				{
+					minimig_config.armcpu = 1;
 					minimig_ConfigCPU(minimig_config.cpu);
+					armcpu_restart();
 				}
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}

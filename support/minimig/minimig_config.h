@@ -187,6 +187,16 @@ typedef struct
 	// Two, not four: this OSD has df0 and df1. A stock Minimig with df2/df3
 	// does not get those back.
 	char            floppy_path[2][1024];
+
+	// The ARM CPU (support/minimig/minimig_armcpu.cpp): 1 runs the 68020 on
+	// the ARM instead of the CPU in the CPU byte, which is kept as it was for
+	// when the ARM CPU is switched off again. MEASUREMENT BUILD.
+	//
+	// Lands at offset 9331, the last byte of the struct's tail padding after
+	// floppy_path, so sizeof(mm_configTYPE) is unchanged at 9332 and existing
+	// files load through the current-layout branch with a zero here: off.
+	// Read as == 1, never as truthy: it is a byte from a file.
+	uint8_t         armcpu;
 } mm_configTYPE;
 
 // The layout before floppy_path was appended. Every config written before

@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 
 #include "fpga_io.h"
+#include "support/minimig/minimig_armcpu.h"
 #include "file_io.h"
 #include "input.h"
 #include "osd.h"
@@ -425,6 +426,9 @@ static int make_env(const char *name, const char *cfg)
 
 int fpga_load_rbf(const char *name, const char *cfg, const char *xml)
 {
+	// Before any core replaces this one: the ARM CPU talks to the bridge, and
+	// the next core may have nothing behind it.
+	armcpu_stop();
 	OsdDisable();
 	static char path[1024];
 	int ret = 0;

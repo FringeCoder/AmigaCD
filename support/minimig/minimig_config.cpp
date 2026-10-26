@@ -19,6 +19,7 @@
 #include "minimig_fdd.h"
 #include "minimig_profile.h"
 #include "minimig_config.h"
+#include "minimig_armcpu.h"
 #include "rom_crypt.h"
 #include "vadjust_info.h"
 #include "minimig_share.h"
@@ -794,6 +795,7 @@ static constexpr mglcfg_field mm_cfg_fields[] =
 	MMF("cd_audio_buffer",   cd_audio_buffer,     MGLCFG_U8),
 	MMF("floppy0_path",      floppy_path[0],      MGLCFG_STR),
 	MMF("floppy1_path",      floppy_path[1],      MGLCFG_STR),
+	MMF("armcpu",            armcpu,              MGLCFG_U8),
 };
 #undef MMHF
 #undef MMF
@@ -1788,6 +1790,9 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 	}
 
 	ApplyConfiguration(1);
+	// the config may ask for the ARM CPU; it also clears out an armcpu left
+	// running from before (a Main restart), which a fresh one replaces
+	armcpu_restart();
 	return(result);
 }
 
@@ -1799,6 +1804,8 @@ void minimig_reset()
 	akiko_cd32_init();
 	cdtv_cd_init();
 	a2065_start();
+	// a reset of the machine is a reset of the CPU on the ARM too
+	armcpu_restart();
 }
 
 void minimig_set_kickstart(const char *name)
@@ -2341,7 +2348,10 @@ void minimig_ConfigMemory(unsigned char memory)
 
 void minimig_ConfigCPU(unsigned char cpu)
 {
-	spi_uio_cmd8(UIO_MM2_CPU, cpu);
+	// With the ARM CPU the core runs its 68000 path, which is where the bus
+	// proxy sits; the CPU byte itself is left alone for when it is switched
+	// off again.
+	spi_uio_cmd8(UIO_MM2_CPU, armcpu_wanted() ? 0x00 : cpu);
 }
 
 void minimig_ConfigChipset(mm_configTYPE *config)
