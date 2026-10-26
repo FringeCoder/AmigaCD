@@ -8791,6 +8791,8 @@ void HandleUI(void)
 				if (minimig_config.armcpu == 1)
 				{
 					minimig_config.armcpu = 0;
+					// off the bus before the core's CPU setting changes under it
+					armcpu_stop();
 					if (minimig_config.cpu & 0x2)
 						minimig_config.cpu = (minimig_config.cpu & 0x1c) | (minus ? 0x02 : 0x03);
 					minimig_ConfigCPU(minimig_config.cpu);

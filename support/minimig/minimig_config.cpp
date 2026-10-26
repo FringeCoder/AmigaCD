@@ -1101,6 +1101,13 @@ static void ApplyConfiguration(char reloadkickstart)
 	if (force_reload_kickstart) reloadkickstart = 1;
 	force_reload_kickstart = 0;
 
+	// The CPU halt below stops the bus proxy mid-cycle, and armcpu's bridge
+	// read then never completes: the AXI transaction holds the interconnect
+	// and the whole HPS freezes, Linux and network included (2026-10-26, OSD
+	// Reset with the ARM CPU running). So armcpu is stopped before any halt
+	// and started again once the CPU runs.
+	armcpu_stop();
+
 	minimig_ConfigCPU(minimig_config.cpu);
 
 	if (!reloadkickstart)
