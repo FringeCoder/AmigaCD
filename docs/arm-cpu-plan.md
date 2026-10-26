@@ -586,6 +586,65 @@ MMU and no save states either. It does not replace the 68030; only a JIT
 would. 50 MHz and Fast score the same, so the FPGA 68030 is bound by its
 fast RAM there, not by its clock.
 
+## Step 4: a JIT, Amiberry's, measured on the ARM, 2026-10-26
+
+The interpreters top out at about a 25 MHz 68030 (step 3c). Amiberry's
+32-bit ARM JIT is the candidate for more, and `tools/armuae` runs it on its
+own: Amiberry v5.7.4's CPU core and JIT (fetched at 6d672cd, GPL-3, not
+vendored), with the whole 24-bit space as host memory and no chipset. It is
+a prototype to answer one question before the FPGA is touched: is the JIT
+worth the bus window it needs?
+
+**Why v5.7.4:** it is the last release that builds the 32-bit ARM JIT. 7.x
+enables the JIT only for x86-64 and AArch64, and its 32-bit ARM JIT no
+longer compiles (it refers to `regs` fields and 64-bit helpers the 32-bit
+path does not have).
+
+**What it took**, each found on the board:
+
+- `regs.natmem_offset` must be set: 5.7.4's JIT reads `NATMEM_OFFSET` from
+  `regs`, and with zero there the first compiled store faults at the 68k
+  address itself.
+- `pissoff` and `natmem_offset` must lie within 4 KB of `regs`
+  (`patch_newcpu.py`): the JIT loads them as `[regs, #imm12]`. Out of range
+  it reads the wrong words, and compiled code never pays out its cycles.
+- No `-DARM_HAS_DIV`: the Cortex-A9 has no SDIV/UDIV, unlike the Pi's A7
+  and A53, and the first 68k divide died on SIGILL.
+- The JIT translates only while the 68k's instruction cache is on (CACR),
+  as Kickstart sets it. Without it every block is interpreted while it is
+  recorded, which is slower than the plain interpreter.
+- Time is paid out of `pissoff`, as `events.cpp` does: compiled code calls
+  `do_cycles(0)` and leaves the debt there.
+
+**Measured** on the MiSTer's ARM, one core, no FPGA access, 68020, code in
+ROM and data in fast RAM (`bench/bench.c`, a Dhrystone-shaped workload of
+record copies, string work, calls, arrays and a divide):
+
+| core | bench.c passes/s | vs Musashi | register loop passes/s |
+|---|---|---|---|
+| Musashi (armcpu) | 10,767 | 1x | |
+| Amiberry 5.7.4 interpreter | 21,332 | 2.0x | 1,220,231 |
+| Amiberry 5.7.4 JIT | 255,607 | 23.7x | 66,652,456 |
+
+All three write the same checksum of the benchmark's state at pass 20000
+(`3787132a`), so the JIT computes this workload correctly.
+
+Scaled to SysInfo's 5685 Dhrystones for Musashi, 23.7x would be on the
+order of 130,000, beyond an A4000/060. That holds only for code in ARM
+memory. Chip RAM and the chipset stay at the bus's 0.35-0.65 us an access.
+
+**What it means for the FPGA side:** the JIT fetches opcodes through host
+pointers and has no fallback for code in a bank without host memory, so
+code in chip RAM needs chip RAM as a host mapping: a flat 16 MB window
+through the full h2f AXI bridge, mapped into natmem, instead of the 1 MB
+banked lightweight-bridge window. The byte order already matches (the
+window is in 68k order and UAE's natmem is big-endian). Misaligned 68020
+accesses on device memory would go through the kernel's alignment fixup.
+
+Not yet: a 68040 or 68060 model (5.7.4 has the interpreter tables; the JIT
+runs the same 32-bit code), the FPU in the JIT, Kickstart on armuae, and the
+armcpu bus behind it.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
