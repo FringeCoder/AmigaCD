@@ -514,6 +514,61 @@ ROM code run at 2-3 times a 7 MHz 68000. Chip-bound code runs at about a
 to itself (maxcpus=1, as BigMig does) -- every run here shares Linux's
 scheduler.
 
+## Step 3c: the OSD option, the reset freeze, and Moira, 2026-10-26
+
+**OSD option** (AmigaCD a2b3e02e, 3991a9d9): on a core with the proxy (an
+`.rbf` under a path containing `lwbridge`, and `/media/fat/armcpu` present)
+the Settings page's CPU row gets one more step, "ARM 68020", after the
+machine's own CPUs; on the 68000 machines it is the only other step, so the
+row is live there too. Main then starts armcpu as its own process
+(`support/minimig/minimig_armcpu.cpp`: double fork, `-c 0 -R -P -m 6 -F 8
+-C 68020`) and tells the core "68000". The flag is `minimig_config.armcpu`,
+in the struct's tail padding, so the file size is unchanged. Save states are
+refused while it is on.
+
+**The reset freeze.** The first OSD Reset with the ARM CPU running froze the
+whole board: no ping, no ssh, a power cycle. `ApplyConfiguration` halts the
+CPU (`SPI_CPU_HLT`) while armcpu was still running. The halt stops the phase
+enables, so the proxy's own no-DTACK timeout (counted in enPhi1) never
+fires, armcpu's bridge read is never answered, and an unanswered
+lightweight-bridge read stops the HPS. Two fixes:
+
+- Main (b5d2066a): armcpu is stopped before every CPU halt
+  (`ApplyConfiguration`, `BootInit`) and before the core's CPU setting
+  changes; the existing `armcpu_restart()` calls start it again afterwards.
+- Core (AmigaCD_MiSTer 338c026): a watchdog in `armcpu_bridge.v` on
+  clk_100m. After 2^20 clocks (~10 ms) of a word cycle it answers a read
+  with 0xFFFFFFFF, drops OWN and sets STATUS[9]. `tb_armcpu` stops the phase
+  enables mid-cycle and checks the result; with the watchdog removed, the
+  bench hangs as the board did. Fit seed 4, +0.015 ns slow 100C.
+
+With both, two OSD Resets with the ARM CPU running passed, and armcpu was
+restarted each time.
+
+A false lead on the way: "Error validating disk / Key 880 checksum error"
+on the SysInfo disk came from the VD demo disk in **DF1**. It appeared on
+every CPU and on the live pair; with DF1 ejected, SysInfo boots. Eject DF1
+before benchmarking.
+
+**Moira** (AmigaCD 1c6bcf07): `cpu_moira.cpp` puts Moira (vAmiga's core,
+MIT, vendored in `tools/armcpu/moira` with `MoiraConfig.h` set for speed)
+behind the Musashi calls armcpu.c makes; `make armcpu-moira` builds it, and
+`test_armcpu.py moira` runs the host tests on it. Moira executes the 68000,
+68010, 68EC020 and 68020 only; its 68030/68040 exist for the disassembler.
+SysInfo, `-P -R -C 68020`, both builds gcc 10.2 `-O3 -flto`:
+
+| core | Dhrystones | MIPS | vs A600 |
+|---|---|---|---|
+| Musashi | 5685 | 5.99 | 10.74x |
+| Moira | 3970 | 4.14 | 7.50x |
+
+Moira runs Workbench and SysInfo correctly, but it is 30% slower here, and
+on the host (a register loop from ROM, x86 `-O3`) it is slower still: 87 vs
+120 M instructions/s as a 68000, 64 vs 126 as a 68020. Musashi stays the
+default. The Musashi figure is up from 4783 with the gcc 13 build; the
+toolchain alone moves it by about 19%. A 68040/68060 needs a JIT
+(Amiberry's ARM32 UAE JIT, or Emu68), not another interpreter.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
