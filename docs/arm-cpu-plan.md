@@ -453,10 +453,17 @@ What the first runs found:
   had booted, Kickstart trusted the old ExecBase and its capture vectors.
 - **The disk then in DF0 does not boot on the fx68k either** on this core
   and binary (a white screen), so it is no test of the ARM CPU; the boot was
-  checked with the drives empty. Booting real software from floppy is the
-  next check.
+  checked with the drives empty, and from floppy with Juggler (below).
 - **Single-stepping hides timing faults:** the debug trace now uses
   Musashi's instruction hook so a traced run keeps normal timing.
+
+**Floppy, 2026-10-26:** Workbench 1.3 boots from floppy on the ARM's
+68000: `Juggler.adf` (games/Amiga/shared/26042026/DEMOS) in DF0, the screen
+white at 3 s as the boot starts from the ARM's own RESET, and the Workbench
+screen with the disk's "Movie" icon by ~10 s, the same as the fx68k on the
+same disk. The armcpu log shows the stages: Kickstart clearing memory in the
+first second, disk loads in bursts between idle-loop waits, Workbench
+loading, then idle.
 
 Where it stands against the goal: the ARM is the CPU of an otherwise
 unchanged machine, the other CPU choices are untouched, and Kickstart and
