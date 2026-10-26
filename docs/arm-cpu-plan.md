@@ -645,6 +645,55 @@ Not yet: a 68040 or 68060 model (5.7.4 has the interpreter tables; the JIT
 runs the same 32-bit code), the FPU in the JIT, Kickstart on armuae, and the
 armcpu bus behind it.
 
+## Step 4b: the flat window, and the JIT on the real Amiga, 2026-10-26
+
+**The window** (AmigaCD_MiSTer `claude/lwbridge-echo` 628d728): the full
+HPS-to-FPGA bridge, 32 bits wide, maps the 68k's 24-bit space flat at ARM
+physical 0xC0000000. A second `lw_echo` (FLAT, no registers) turns its
+accesses into bus requests, and `sys/bus_merge.sv` joins them with the
+lightweight bridge's for the core; bit 24 of the core's bus address marks a
+flat access. `tb_armcpu` covers it (17310 checks). The fit missed timing on
+8 seeds (best −0.281 ns, in the scaler and the TG68K read gate, not the new
+logic); the lab core is `_Test/lwbridge-flat/amigacd.rbf` (32253156).
+
+**armuae `-b`** (AmigaCD 058cabd7) runs Amiberry's core on that window:
+- natmem *is* the window, with the 8 MB fast RAM board and the ROM copy
+  mapped over it in ARM memory;
+- chip and slow RAM are direct banks, the I/O areas bank functions;
+- the overlay is emulated on the ARM, because the RESET line does not bring
+  it back on this chipset;
+- every access is a real 16- or 32-bit load or store.
+
+Amiberry 5.7.4's own `do_put_mem_word` works a byte at a time, and the
+custom chips decode the whole data bus on every cycle, so a word written as
+two bytes reached INTENA as `$40FF` for `$C020`.
+
+On the way, a false alarm: Python probes made every INTENA/DMACON set-write
+set all bits. That was ctypes reading before it writes (a read at
+`$DFF09A` is a `$FFFF` write on this chipset). Two benches,
+`tb_proxy_custom` and `tb_proxy_minimig` (the proxy against the whole
+`minimig.v`), proved the proxy correct; C probes are in
+`tools/armuae/probe`.
+
+**Result:** Kickstart 1.3 reaches the insert-disk screen on the interpreter.
+Kickstart 3.1 (AmigaVision.rom) does on the JIT, running from the ARM fast
+RAM. SysInfo 4.4 on the JIT (68020, 24-bit, caches on):
+
+| CPU | Dhrystones | MIPS | vs A600 |
+|---|---|---|---|
+| core's 68030, 50 MHz or Fast | 7,857 | 8.28 | 14.85x |
+| ARM, Musashi | 5,685 | 5.99 | 10.74x |
+| **ARM, Amiberry JIT** | **180,644** | **188.56** | **341.48x** |
+
+That is 9.9x SysInfo's A4000/040 reference, for code in fast RAM. Chip RAM
+and the chipset still cost a bus cycle each (SysInfo's chip speed: 2.83x an
+A600).
+
+Not yet: the fit closing, armuae started from Main's OSD instead of armcpu,
+a 68040/68060 model with 32-bit addressing (natmem is 16 MB, so the JIT's
+direct accesses above it need guarding), the FPU in the JIT, and a
+Workbench boot from disk.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
