@@ -218,8 +218,19 @@ static void cia_track(uaecptr a, uae_u8 v)
 static void REGPARAM2 cia_bput(uaecptr a, uae_u32 v) { ram_bput(a, v); cia_track(a, (uae_u8)v); }
 static void REGPARAM2 cia_wput(uaecptr a, uae_u32 v) { ram_wput(a, v); cia_track(a + 1, (uae_u8)v); }
 static void REGPARAM2 cia_lput(uaecptr a, uae_u32 v) { ram_lput(a, v); cia_track(a + 1, (uae_u8)(v >> 16)); cia_track(a + 3, (uae_u8)v); }
+// DEBUG: CIA-A's ICR and SDR as the CPU reads them, on change (the keyboard)
+static uae_u32 n_icra_rd;
+static uae_u32 REGPARAM2 cia_bget(uaecptr a)
+{
+	uae_u32 v = ram_bget(a);
+	static int n_icr;
+	if ((a & 0xFFFFFF) == 0xBFED01) n_icra_rd++;
+	if ((a & 0xFFFFFF) == 0xBFED01 && ((v & 8) || n_icr < 5)) { n_icr++; fprintf(stderr, "ICR %02x\n", v); }
+	if ((a & 0xFFFFFF) == 0xBFEC01) { static uae_u32 last = 0x100; if (v != last) fprintf(stderr, "SDR %02x\n", v); last = v; }
+	return v;
+}
 static addrbank ciaw_bank = {
-	ram_lget, ram_wget, ram_bget, cia_lput, cia_wput, cia_bput,
+	ram_lget, ram_wget, cia_bget, cia_lput, cia_wput, cia_bput,
 	io_xlate, io_check, NULL, _T("cia"), _T("CIA"), ram_lget, ram_wget,
 	ABFLAG_IO, S_READ, S_WRITE
 };
@@ -379,11 +390,16 @@ static double since(const struct timespec *a)
 	return (b.tv_sec - a->tv_sec) + (b.tv_nsec - a->tv_nsec) / 1e9;
 }
 
+static uae_u32 n_lev[8];               // rising edges to each interrupt level, per report
+
 static void slice(void)
 {
 	if (bridge) {
 		uae_u32 st = ctl[3];
+		static int ipl_prev;
 		ipl_now = st & 7;                 // Paula's level
+		if (ipl_now != ipl_prev && ipl_now) n_lev[ipl_now]++;
+		ipl_prev = ipl_now;
 		if (st & 0x200) {
 			fprintf(stderr, "armuae: the bridge gave up a bus cycle (watchdog), stopping\n");
 			stop = 1;
@@ -397,7 +413,11 @@ static void slice(void)
 			// the bridge's own count of 68k word cycles: every access, the JIT's direct ones too
 			static uae_u32 l_words;
 			uae_u32 w = ctl[6];
-			printf("          bus: %u word cycles/s\n", w - l_words);
+			printf("          bus: %u word cycles/s, interrupts/s by level: %u %u %u %u %u %u %u\n", w - l_words,
+			       n_lev[1], n_lev[2], n_lev[3], n_lev[4], n_lev[5], n_lev[6], n_lev[7]);
+			printf("          CIA-A ICR reads: %u, SDR %02x\n", n_icra_rd, natmem_offset[0xBFEC01]);
+			n_icra_rd = 0;
+			memset(n_lev, 0, sizeof(n_lev));
 			l_words = w;
 		}
 		if (counting) {
