@@ -94,6 +94,11 @@
 
 #include "m68k.h"
 
+// the 68k core armcpu.c is built on: Musashi, or Moira through cpu_moira.cpp
+#ifndef ARMCPU_CORE
+#define ARMCPU_CORE "Musashi"
+#endif
+
 #define LW_BASE     0xFF200000UL   /* the lightweight bridge */
 #define LW_SPAN     0x200000UL
 #define PX_CTL      0x080000UL     /* armcpu_bridge control */
@@ -662,7 +667,7 @@ int main(int argc, char **argv)
 	}
 	m68k_pulse_reset();
 
-	printf("armcpu: Musashi %s on cpu %d, %s, mode %u (%s%s), ROM %s\n", cpu_name, cpu,
+	printf("armcpu: %s %s on cpu %d, %s, mode %u (%s%s), ROM %s\n", ARMCPU_CORE, cpu_name, cpu,
 	       dev ? dev : "the bridge", mode, mode & 2 ? "FAST" : "68000-timed reads",
 	       mode & 4 ? ", FASTW" : ", 68000-timed writes", rom_path);
 	printf("  reset: SSP %08x PC %08x; chip RAM %u KB (measured on the chip bus); fast RAM %d MB in ARM memory\n",

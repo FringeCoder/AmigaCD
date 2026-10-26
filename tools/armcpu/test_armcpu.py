@@ -3,6 +3,7 @@
 the bridge (MEASUREMENT ONLY, see armcpu.c).
 
     python3 test_armcpu.py            # builds armcpu for the host and runs it
+    python3 test_armcpu.py moira      # the same on Moira (cpu_moira.cpp)
 
 The file is the bridge's 2 MB: armcpu_bridge's MAGIC and the 68000 bit set by
 hand at 0x080000, the 68k window at 0x100000 in the 68k's byte order (the
@@ -15,13 +16,25 @@ given back at the end.
 import mmap, os, struct, subprocess, sys, tempfile
 
 here = os.path.dirname(os.path.abspath(__file__))
-exe = os.path.join(tempfile.gettempdir(), "armcpu_host")
+moira = "moira" in sys.argv[1:]
+exe = os.path.join(tempfile.gettempdir(), "armcpu_host_moira" if moira else "armcpu_host")
 m = os.path.join(here, "musashi")
-subprocess.check_call(["gcc", "-O2", "-Wall", "-std=gnu99", "-I", here, "-I", m,
-                       '-DMUSASHI_CNF="armcpu_conf.h"', "-o", exe,
-                       os.path.join(here, "armcpu.c"), os.path.join(m, "m68kcpu.c"),
-                       os.path.join(m, "m68kops.c"), os.path.join(m, "m68kdasm.c"),
-                       os.path.join(m, "softfloat", "softfloat.c"), "-lm"])
+if not moira:
+    subprocess.check_call(["gcc", "-O2", "-Wall", "-std=gnu99", "-I", here, "-I", m,
+                           '-DMUSASHI_CNF="armcpu_conf.h"', "-o", exe,
+                           os.path.join(here, "armcpu.c"), os.path.join(m, "m68kcpu.c"),
+                           os.path.join(m, "m68kops.c"), os.path.join(m, "m68kdasm.c"),
+                           os.path.join(m, "softfloat", "softfloat.c"), "-lm"])
+else:
+    mo = os.path.join(here, "moira")
+    obj = exe + ".o"
+    subprocess.check_call(["gcc", "-O2", "-Wall", "-std=gnu99", "-I", here, "-I", m,
+                           '-DMUSASHI_CNF="armcpu_conf.h"', '-DARMCPU_CORE="Moira"', "-c", "-o", obj,
+                           os.path.join(here, "armcpu.c")])
+    subprocess.check_call(["g++", "-O1", "-std=c++20", "-I", here, "-I", m, "-I", mo,
+                           "-o", exe, obj, os.path.join(here, "cpu_moira.cpp")] +
+                          [os.path.join(mo, f) for f in ("Moira.cpp", "MoiraCore68000.cpp",
+                           "MoiraCore68010.cpp", "MoiraCore68020.cpp", "MoiraDebugger.cpp")] + ["-lm"])
 
 def w(*words):
     return b"".join(struct.pack(">H", x) for x in words)
@@ -146,8 +159,13 @@ struct.pack_into("<I", mm, 0x80000, 0x41435055)
 struct.pack_into("<I", mm, 0x8000C, 0x100)
 mm.flush()
 r = subprocess.run([exe, "-d", f.name, "-r", rom4.name, "-t", "1", "-C", "68040", "-q"], capture_output=True, text=True, timeout=60)
-good = r.returncode != 0 and "FSAVE" in r.stderr and struct.unpack_from("<I", mm, 0x80004)[0] == 0
-print(("ok   " if good else "FAIL ") + "a run Musashi ends itself still gives the bus back (exit %d)" % r.returncode)
+if not moira:
+    good = r.returncode != 0 and "FSAVE" in r.stderr and struct.unpack_from("<I", mm, 0x80004)[0] == 0
+    print(("ok   " if good else "FAIL ") + "a run Musashi ends itself still gives the bus back (exit %d)" % r.returncode)
+else:
+    # Moira has no 68040 to run: refused, and the bus is not left held
+    good = r.returncode == 2 and "68020 only" in r.stderr and struct.unpack_from("<I", mm, 0x80004)[0] == 0
+    print(("ok   " if good else "FAIL ") + "Moira refuses a 68040 and leaves the bus free (exit %d)" % r.returncode)
 ok = ok and good
 
 # refusals: no MAGIC, not a 68000, and no lwbridge core without -d
