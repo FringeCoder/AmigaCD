@@ -198,10 +198,11 @@ static addrbank ovl_bank = {
 static void map(addrbank *b, uae_u32 start, uae_u32 size);
 static int ovl = 1;
 static uae_u8 cia_pra, cia_ddra;
+static addrbank *chip_ram_bank = &wram_bank;   // what the overlay gives way to (-c: counted)
 static void set_ovl(int on)
 {
 	ovl = on;
-	map(on ? &ovl_bank : &wram_bank, 0x000000, 0x080000);
+	map(on ? &ovl_bank : chip_ram_bank, 0x000000, 0x080000);
 }
 static void cia_track(uaecptr a, uae_u8 v)
 {
@@ -220,6 +221,45 @@ static void REGPARAM2 cia_lput(uaecptr a, uae_u32 v) { ram_lput(a, v); cia_track
 static addrbank ciaw_bank = {
 	ram_lget, ram_wget, ram_bget, cia_lput, cia_wput, cia_bput,
 	io_xlate, io_check, NULL, _T("cia"), _T("CIA"), ram_lget, ram_wget,
+	ABFLAG_IO, S_READ, S_WRITE
+};
+
+// -c: count the CPU's bus traffic, by area, instead of letting the JIT address
+// chip and slow RAM directly. MEASUREMENT: it slows the CPU, and instruction
+// fetches (through pointers) are not counted, so it is a lower bound.
+enum { R_CHIP, R_CIA, R_SLOW, R_CUSTOM, R_OTHER, R_N };
+static const char *const r_name[R_N] = { "chip", "CIA", "slow", "custom", "other" };
+static int counting;
+static uae_u64 n_rd[R_N], n_wr[R_N];
+static inline int region(uaecptr a)
+{
+	a &= 0xFFFFFF;
+	return a < 0x200000 ? R_CHIP : a < 0xA00000 ? R_OTHER : a < 0xC00000 ? R_CIA :
+	       a < 0xD80000 ? R_SLOW : a < 0xE00000 ? R_CUSTOM : R_OTHER;
+}
+static uae_u32 REGPARAM2 cnt_lget(uaecptr a) { n_rd[region(a)]++; return ram_lget(a); }
+static uae_u32 REGPARAM2 cnt_wget(uaecptr a) { n_rd[region(a)]++; return ram_wget(a); }
+static uae_u32 REGPARAM2 cnt_bget(uaecptr a) { n_rd[region(a)]++; return ram_bget(a); }
+static void REGPARAM2 cnt_lput(uaecptr a, uae_u32 v) { n_wr[region(a)]++; ram_lput(a, v); }
+static void REGPARAM2 cnt_wput(uaecptr a, uae_u32 v) { n_wr[region(a)]++; ram_wput(a, v); }
+static void REGPARAM2 cnt_bput(uaecptr a, uae_u32 v) { n_wr[region(a)]++; ram_bput(a, v); }
+static void REGPARAM2 cntcia_lput(uaecptr a, uae_u32 v) { n_wr[R_CIA]++; cia_lput(a, v); }
+static void REGPARAM2 cntcia_wput(uaecptr a, uae_u32 v) { n_wr[R_CIA]++; cia_wput(a, v); }
+static void REGPARAM2 cntcia_bput(uaecptr a, uae_u32 v) { n_wr[R_CIA]++; cia_bput(a, v); }
+static addrbank cnt_ram_bank = {   // chip/slow RAM through functions; code still runs there
+	cnt_lget, cnt_wget, cnt_bget, cnt_lput, cnt_wput, cnt_bput,
+	ram_xlate, ram_check, NULL, _T("cntram"), _T("bus RAM, counted"), cnt_lget, cnt_wget,
+	ABFLAG_RAM, S_READ, S_WRITE   // RAM, so fetches work (as I/O the boot stops at $F80CA0);
+	                              // S_READ/S_WRITE make the JIT call the functions too
+};
+static addrbank cnt_io_bank = {
+	cnt_lget, cnt_wget, cnt_bget, cnt_lput, cnt_wput, cnt_bput,
+	io_xlate, io_check, NULL, _T("cntio"), _T("bus I/O, counted"), cnt_lget, cnt_wget,
+	ABFLAG_IO, S_READ, S_WRITE
+};
+static addrbank cnt_cia_bank = {
+	cnt_lget, cnt_wget, cnt_bget, cntcia_lput, cntcia_wput, cntcia_bput,
+	io_xlate, io_check, NULL, _T("cntcia"), _T("CIA, counted"), cnt_lget, cnt_wget,
 	ABFLAG_IO, S_READ, S_WRITE
 };
 
@@ -277,7 +317,8 @@ static void map(addrbank *b, uae_u32 start, uae_u32 size)
 	b->allocated_size = b->reserved_size = 0x1000000;
 	for (uae_u32 a = start; a < start + size; a += 0x10000) {
 		mem_banks[bankindex(a)] = b;
-		baseaddr[bankindex(a)] = b->baseaddr ? natmem_offset : (uae_u8 *)b + 1;
+		// -c: data through the counting functions; fetches still use b->baseaddr
+		baseaddr[bankindex(a)] = b->baseaddr && b != &cnt_ram_bank ? natmem_offset : (uae_u8 *)b + 1;
 	}
 	// the 24-bit space mirrors through the 4 GB the bank table spans
 	for (uae_u32 m = 1; m < MEMORY_BANKS / 256; m++)
@@ -352,6 +393,23 @@ static void slice(void)
 	if (since(&t_last) >= 1.0) {
 		uae_u32 n = count_addr ? ld32((uae_u32 *)(natmem_offset + count_addr)) : 0;
 		printf("  %5.1f s: PC %08x, count %u (+%u/s)\n", since(&t0), m68k_getpc(), n, (n - n_last));
+		if (ctl) {
+			// the bridge's own count of 68k word cycles: every access, the JIT's direct ones too
+			static uae_u32 l_words;
+			uae_u32 w = ctl[6];
+			printf("          bus: %u word cycles/s\n", w - l_words);
+			l_words = w;
+		}
+		if (counting) {
+			static uae_u64 l_rd[R_N], l_wr[R_N];
+			printf("          reads/s:");
+			for (int r = 0; r < R_N; r++) printf(" %s %llu", r_name[r], (unsigned long long)(n_rd[r] - l_rd[r]));
+			printf("\n          writes/s:");
+			for (int r = 0; r < R_N; r++) printf(" %s %llu", r_name[r], (unsigned long long)(n_wr[r] - l_wr[r]));
+			printf("\n");
+			memcpy(l_rd, n_rd, sizeof(l_rd));
+			memcpy(l_wr, n_wr, sizeof(l_wr));
+		}
 		fflush(stdout);
 		n_last = n;
 		clock_gettime(CLOCK_MONOTONIC, &t_last);
@@ -435,7 +493,7 @@ int main(int argc, char **argv)
 	const char *rom_path = NULL;
 	int model = 68020, jit_kb = 0, opt;
 	int force = 0;
-	while ((opt = getopt(argc, argv, "r:C:j:t:a:v:bm:f")) != -1) {
+	while ((opt = getopt(argc, argv, "r:C:j:t:a:v:bm:fc")) != -1) {
 		switch (opt) {
 		case 'r': rom_path = optarg; break;
 		case 'C': model = atoi(optarg); break;
@@ -446,6 +504,7 @@ int main(int argc, char **argv)
 		case 'b': bridge = 1; break;
 		case 'm': bmode = (unsigned)strtoul(optarg, NULL, 0) & 6; break;
 		case 'f': force = 1; break;
+		case 'c': counting = 1; break;
 		default:
 			fprintf(stderr, "usage: %s -r rom [-C model] [-j KB] [-t s] [-a addr] [-v addr] [-b [-m mode] [-f]]\n", argv[0]);
 			return 2;
@@ -513,11 +572,12 @@ int main(int argc, char **argv)
 
 	for (int i = 0; i < MEMORY_BANKS; i++) { mem_banks[i] = &io_bank; baseaddr[i] = (uae_u8 *)&io_bank + 1; }
 	if (bridge) {
-		map(&wram_bank, 0x000000, 0x200000);  // chip RAM (and the ROM, while the overlay is on)
+		if (counting) chip_ram_bank = &cnt_ram_bank;
+		map(chip_ram_bank, 0x000000, 0x200000);  // chip RAM (and the ROM, while the overlay is on)
 		map(&fast_bank, 0x200000, 0x800000);  // the board, once autoconfig has placed it
-		map(&ciaw_bank,  0xA00000, 0x200000);  // the CIAs (CIA-A's PA0 is the overlay)
-		map(&wram_bank, 0xC00000, 0x180000);  // slow RAM
-		map(&wio_bank,  0xD80000, 0x100000);  // the custom chips, RTC, IDE
+		map(counting ? &cnt_cia_bank : &ciaw_bank, 0xA00000, 0x200000);  // the CIAs (CIA-A's PA0 is the overlay)
+		map(chip_ram_bank, 0xC00000, 0x180000);  // slow RAM
+		map(counting ? &cnt_io_bank : &wio_bank, 0xD80000, 0x100000);  // the custom chips, RTC, IDE
 		map(&wio_bank,  0xE00000, 0x080000);
 		map(&ac_bank,   0xE80000, 0x080000);  // autoconfig
 		map(&wio_bank,  0xF00000, 0x080000);

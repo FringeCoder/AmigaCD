@@ -694,10 +694,55 @@ ejected), Kickstart 3.1 on the JIT boots it to the Workbench screen with the
 disk's Movie icon in about 40 s. Opening Movie went to a black screen; the
 run's time limit ended before it could be judged either way.
 
-Not yet: the fit closing, armuae started from Main's OSD instead of armcpu,
+Not yet: armuae started from Main's OSD instead of armcpu,
 a 68040/68060 model with 32-bit addressing (natmem is 16 MB, so the JIT's
 direct accesses above it need guarding), the FPU in the JIT, and a
 Workbench boot from disk.
+
+## Step 4c: where the JIT's bus time goes, and timing closed, 2026-10-26
+
+**Question:** would chip RAM in ARM memory make the JIT faster? Chip RAM
+must stay in the FPGA's SDRAM (the chipset's DMA reads it every line), so
+the candidate was a read cache on the ARM, kept coherent by an FPGA log of
+blitter and disk DMA writes to chip RAM.
+
+**Latency on the ARM** (ns): uncached DDR3 read 137-141; lightweight
+bridge register 376; flat window word read, FAST, 564; long read, FAST,
+886; long read, 68000-timed, 2271; long write, FASTW, back to back, 627;
+long write, 68000-timed, 2018.
+
+**Traffic**, `armuae -b -c` (counting banks: chip and slow RAM through
+functions, with the JIT told to call them too) cross-checked with the
+bridge's WORDS register (68k word cycles per second, every access counted):
+Kickstart 3.1 on the JIT, the VD demo disk in DF0.
+
+| phase | bus words/s | chip rd/s | chip wr/s | custom rd/s | CIA rd+wr/s |
+|---|---|---|---|---|---|
+| demo loader, code in chip RAM | 880k | 63-66k | 12k | 720k | ~60 |
+| later, a ROM wait loop | 632k | 0 | 0 | 210k | 420k |
+
+The bus is busy (630-890k word cycles/s, at ~0.6 us each about half the
+ARM's time), but it is the CPU polling custom registers and the CIAs, which
+no cache may answer. Chip RAM reads are at most ~65k/s, about 5% of the
+ARM's time. **The read cache is not worth building on this evidence.**
+A workload that reads chip RAM hard from the CPU would change this; Amiga
+code mostly avoids that.
+
+`-c` traps: a counted bank flagged as I/O stops the boot at `$F80CA0`
+(instruction fetches need it to be RAM with a base address), and RAM banks
+are reached directly, by the interpreter through the base-address table and
+by the JIT unless the bank's JIT flags say S_READ/S_WRITE.
+
+**Timing closed:** the flat core with the mvp merge (AmigaCD_MiSTer
+`claude/lwbridge-echo` 0a07dfb, run 40384564815) fit on seed 7 of 16:
+setup +0.105 ns, hold +0.143. It is `_Test/lwbridge-flat/amigacd.rbf`
+(c8ed79ab); the old seed-1 core is kept beside it. The JIT boots the demo
+disk on it as on seed 1.
+
+**Board trap:** `killall armuae` followed at once by `load_core` froze the
+DE10-Nano (no ping). Reprogramming the FPGA while an ARM access is still in
+flight on the HPS-to-FPGA bridge hangs the ARM; wait for armuae to exit
+before loading a core.
 
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
