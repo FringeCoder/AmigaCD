@@ -216,7 +216,8 @@
  */
 #ifndef M68K_INSTRUCTION_HOOK
 #define M68K_INSTRUCTION_HOOK       M68K_OPT_SPECIFY_HANDLER
-#define M68K_INSTRUCTION_CALLBACK(pc) armcpu_instr_hook(pc)
+#define M68K_INSTRUCTION_CALLBACK(pc) do { if (armcpu_debug) armcpu_instr_hook(pc); } while (0)
+extern int armcpu_debug;              /* -D: only then is the hook called */
 void armcpu_instr_hook(unsigned int pc);
 #endif
 

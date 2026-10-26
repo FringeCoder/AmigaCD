@@ -19,6 +19,15 @@
  *         (default 6, both)
  *     -c  pin to this ARM core (default 0; Main_MiSTer runs on 1)
  *     -F  fast RAM in ARM memory, in MB: 0, 1, 2, 4 or 8 (default 8)
+ *     -C  the CPU Musashi plays: 68000 (default), 68010, 68EC020, 68020,
+ *         68030 or 68040 (with its FPU). The address bus stays 24 bits wide,
+ *         as on an EC020: the Amiga behind the proxy has no more.
+ *     -R  the ARM core to itself, for this run only: every interrupt that can
+ *         move and every task that can move go to the other core, and the
+ *         emulator runs SCHED_FIFO with its memory locked. All of it is put
+ *         back on exit; nothing is written that outlives the run (no kernel
+ *         command line, no ini). Linux's RT throttling still leaves the
+ *         core's own kernel threads 5%.
  *     -P  fast RAM first: the board's memory goes into exec's list at
  *         priority 5 instead of 0, ahead of slow RAM -- what Workbench 1.3's
  *         FastMemFirst does on a real A500 -- so programs load into ARM
@@ -77,7 +86,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -107,7 +118,8 @@ static uint64_t n_rom, n_bus_rd, n_bus_wr;
 
 /* -D: what led up to the PC leaving the ROM */
 #define RING 8192
-static int debug;
+int armcpu_debug;
+#define debug armcpu_debug
 static struct { uint32_t pc, sr, a7; uint8_t ovl, ipl; } ring[RING];
 static unsigned ring_n;
 static int level;
@@ -409,6 +421,99 @@ static void armcpu_reset_instr(void)
 
 static void on_signal(int s) { (void)s; stop = 1; }
 
+/* ---- -R: the core to ourselves, undone on exit --------------------------------- */
+#define MAX_SAVED 512
+static struct { int irq; char mask[16]; } saved_irq[MAX_SAVED];
+static int n_saved_irq;
+static struct { pid_t pid; cpu_set_t set; } saved_task[MAX_SAVED];
+static int n_saved_task;
+
+static void isolate(int cpu)
+{
+	int other = cpu ? 0 : 1;
+	char path[300], buf[16];
+	DIR *d = opendir("/proc/irq");
+	struct dirent *e;
+	while (d && (e = readdir(d)) && n_saved_irq < MAX_SAVED) {
+		if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+		snprintf(path, sizeof(path), "/proc/irq/%s/smp_affinity", e->d_name);
+		FILE *f = fopen(path, "r");
+		if (!f) continue;
+		if (!fgets(buf, sizeof(buf), f)) { fclose(f); continue; }
+		fclose(f);
+		f = fopen(path, "w");
+		if (!f) continue;
+		int ok = fprintf(f, "%x", 1 << other) > 0;
+		if (fclose(f) == 0 && ok) {
+			saved_irq[n_saved_irq].irq = atoi(e->d_name);
+			strncpy(saved_irq[n_saved_irq].mask, buf, sizeof(buf) - 1);
+			n_saved_irq++;
+		}
+	}
+	if (d) closedir(d);
+
+	d = opendir("/proc");
+	while (d && (e = readdir(d)) && n_saved_task < MAX_SAVED) {
+		pid_t pid = atoi(e->d_name);
+		if (pid <= 0 || pid == getpid()) continue;
+		cpu_set_t was, now;
+		if (sched_getaffinity(pid, sizeof(was), &was)) continue;
+		if (!CPU_ISSET(cpu, &was)) continue;
+		CPU_ZERO(&now);
+		CPU_SET(other, &now);
+		if (sched_setaffinity(pid, sizeof(now), &now) == 0) {   /* per-CPU kthreads refuse */
+			saved_task[n_saved_task].pid = pid;
+			saved_task[n_saved_task].set = was;
+			n_saved_task++;
+		}
+	}
+	if (d) closedir(d);
+
+	mlockall(MCL_CURRENT | MCL_FUTURE);
+	struct sched_param sp = { .sched_priority = 50 };
+	if (sched_setscheduler(0, SCHED_FIFO, &sp))
+		fprintf(stderr, "warning: SCHED_FIFO: %s\n", strerror(errno));
+	printf("  -R: %d interrupts and %d tasks moved off cpu %d, SCHED_FIFO 50\n", n_saved_irq, n_saved_task, cpu);
+}
+
+static void unisolate(void)
+{
+	static int done;
+	if (done) return;
+	done = 1;
+	struct sched_param sp = { .sched_priority = 0 };
+	sched_setscheduler(0, SCHED_OTHER, &sp);
+	for (int i = 0; i < n_saved_task; i++)
+		sched_setaffinity(saved_task[i].pid, sizeof(cpu_set_t), &saved_task[i].set);
+	for (int i = 0; i < n_saved_irq; i++) {
+		char path[64];
+		snprintf(path, sizeof(path), "/proc/irq/%d/smp_affinity", saved_irq[i].irq);
+		FILE *f = fopen(path, "w");
+		if (f) { fputs(saved_irq[i].mask, f); fclose(f); }
+	}
+	if (n_saved_irq || n_saved_task)
+		printf("  -R: %d interrupts and %d tasks put back\n", n_saved_irq, n_saved_task);
+}
+
+/* However the run ends -- the time limit, Ctrl-C, Musashi's fatalerror()
+ * (it calls exit(1), from the FPU code for one) or a crash -- the bus goes
+ * back to the fx68k and -R's moves are undone. A run that died without this
+ * left the Amiga held in reset and its interrupts on one core. */
+static int owning;
+
+static void release_all(void)
+{
+	if (owning && ctl) { ctl[1] = 0; owning = 0; }
+	unisolate();
+}
+
+static void on_fatal(int sig)
+{
+	release_all();
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
 static int lw_core_loaded(void)
 {
 	DIR *d = opendir("/proc");
@@ -438,10 +543,12 @@ int main(int argc, char **argv)
 	const char *rom_path = "/media/fat/games/Amiga500HD/1.3-scsi-patched.rom";
 	const char *dev = NULL;
 	double seconds = 20;
-	int cpu = 0, quiet = 0, force = 0, warm = 0, fast_mb = 8, opt;
+	int cpu = 0, quiet = 0, force = 0, warm = 0, fast_mb = 8, rt = 0, opt;
+	unsigned cpu_type = M68K_CPU_TYPE_68000;
+	const char *cpu_name = "68000";
 	unsigned mode = 6;
 
-	while ((opt = getopt(argc, argv, "r:t:m:c:F:M:Pd:qfwDh")) != -1) {
+	while ((opt = getopt(argc, argv, "r:t:m:c:C:F:M:PRd:qfwDh")) != -1) {
 		switch (opt) {
 		case 'r': rom_path = optarg; break;
 		case 't': seconds = atof(optarg); break;
@@ -454,6 +561,19 @@ int main(int argc, char **argv)
 		case 'w': warm = 1; break;
 		case 'F': fast_mb = atoi(optarg); break;
 		case 'P': fast_first = 1; break;
+		case 'R': rt = 1; break;
+		case 'C': {
+			static const struct { const char *n; unsigned t; } types[] = {
+				{ "68000", M68K_CPU_TYPE_68000 }, { "68010", M68K_CPU_TYPE_68010 },
+				{ "68EC020", M68K_CPU_TYPE_68EC020 }, { "68020", M68K_CPU_TYPE_68020 },
+				{ "68030", M68K_CPU_TYPE_68030 }, { "68040", M68K_CPU_TYPE_68040 },
+			};
+			int found = 0;
+			for (unsigned k = 0; k < sizeof(types) / sizeof(types[0]); k++)
+				if (!strcasecmp(optarg, types[k].n)) { cpu_type = types[k].t; cpu_name = types[k].n; found = 1; }
+			if (!found) { fprintf(stderr, "-C: 68000, 68010, 68EC020, 68020, 68030 or 68040\n"); return 2; }
+			break;
+		}
 		case 'M':
 			if (n_clicks < MAX_CLICKS &&
 			    sscanf(optarg, "%lf:%d:%d", &clicks[n_clicks].t, &clicks[n_clicks].x, &clicks[n_clicks].y) == 3)
@@ -461,7 +581,7 @@ int main(int argc, char **argv)
 			else { fprintf(stderr, "-M t:x:y, at most %d\n", MAX_CLICKS); return 2; }
 			break;
 		default:
-			fprintf(stderr, "usage: %s [-r rom] [-t seconds] [-m mode] [-c cpu] [-F MB] [-P] [-M t:x:y] [-q] [-d file] [-f] [-w] [-D]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-r rom] [-t seconds] [-m mode] [-c cpu] [-C type] [-F MB] [-P] [-R] [-M t:x:y] [-q] [-d file] [-f] [-w] [-D]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -517,11 +637,18 @@ int main(int argc, char **argv)
 	signal(SIGTERM, on_signal);
 
 	ctrl_bits = CTRL_OWN | mode;
+	atexit(release_all);
+	signal(SIGSEGV, on_fatal);
+	signal(SIGBUS, on_fatal);
+	signal(SIGILL, on_fatal);
+	signal(SIGFPE, on_fatal);
+	signal(SIGABRT, on_fatal);
+	owning = 1;
 	ctl[1] = ctrl_bits;
 	if ((ctl[1] & 7) != ctrl_bits) { fprintf(stderr, "CTRL did not take %u\n", ctrl_bits); return 1; }
 
 	m68k_init();
-	m68k_set_cpu_type(M68K_CPU_TYPE_68000);
+	m68k_set_cpu_type(cpu_type);
 	m68k_set_reset_instr_callback(armcpu_reset_instr);
 	armcpu_reset_instr();             /* a clean machine: chipset and CIAs reset, overlay on */
 	uint32_t chip_size = chip_probe();
@@ -534,12 +661,13 @@ int main(int argc, char **argv)
 	}
 	m68k_pulse_reset();
 
-	printf("armcpu: Musashi 68000 on cpu %d, %s, mode %u (%s%s), ROM %s\n", cpu,
+	printf("armcpu: Musashi %s on cpu %d, %s, mode %u (%s%s), ROM %s\n", cpu_name, cpu,
 	       dev ? dev : "the bridge", mode, mode & 2 ? "FAST" : "68000-timed reads",
 	       mode & 4 ? ", FASTW" : ", 68000-timed writes", rom_path);
 	printf("  reset: SSP %08x PC %08x; chip RAM %u KB (measured on the chip bus); fast RAM %d MB in ARM memory\n",
 	       m68k_get_reg(NULL, M68K_REG_SP), m68k_get_reg(NULL, M68K_REG_PC), chip_size >> 10, fast_mb);
 
+	if (rt && !dev) isolate(cpu);
 	int64_t t_start = now_ns(), t_report = t_start;
 	t_run0 = t_start;
 	uint64_t cycles = 0, cyc_report = 0, rd0 = 0, wr0 = 0, rom0 = 0, fast0 = 0;
@@ -626,7 +754,7 @@ int main(int argc, char **argv)
 	       (unsigned long long)n_bus_wr, (unsigned long long)n_rom, (unsigned long long)n_fast,
 	       fast_last, m68k_get_reg(NULL, M68K_REG_PC));
 
-	ctl[1] = 0;
+	release_all();
 	printf("  bus given back: the 68000 restarts from its reset vector\n");
 	return 0;
 }

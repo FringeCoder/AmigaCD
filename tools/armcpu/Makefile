@@ -7,6 +7,10 @@
 BASE   ?= arm-none-linux-gnueabihf
 CC      = $(BASE)-gcc
 CFLAGS  = -O2 -Wall -std=gnu99 -I. -Imusashi -DMUSASHI_CNF='"armcpu_conf.h"'
+# the Cortex-A9, ARM state, and whole-program optimisation so Musashi's
+# memory callbacks can be inlined into the opcode handlers
+TUNE   ?= -O3 -mcpu=cortex-a9 -marm -flto
+CFLAGS += $(TUNE)
 SRCS    = armcpu.c musashi/m68kcpu.c musashi/m68kops.c musashi/m68kdasm.c musashi/softfloat/softfloat.c
 
 armcpu: $(SRCS) armcpu_conf.h

@@ -136,6 +136,20 @@ for name, good in fastchecks.items():
     print(("ok   " if good else "FAIL ") + name)
     ok = ok and good
 
+# A run that Musashi ends itself still gives the bus back: as a 68040, FSAVE
+# (A0) is one of the FPU forms Musashi does not handle, and it calls exit(1).
+die = (struct.pack(">II", 0x00080000, 0x00F80008) + w(0xF310, 0x60FE))
+rom4 = tempfile.NamedTemporaryFile(delete=False, suffix=".rom")
+rom4.write(die + bytes(0x80000 - len(die))); rom4.close()
+mm[:] = bytes(0x200000)
+struct.pack_into("<I", mm, 0x80000, 0x41435055)
+struct.pack_into("<I", mm, 0x8000C, 0x100)
+mm.flush()
+r = subprocess.run([exe, "-d", f.name, "-r", rom4.name, "-t", "1", "-C", "68040", "-q"], capture_output=True, text=True, timeout=60)
+good = r.returncode != 0 and "FSAVE" in r.stderr and struct.unpack_from("<I", mm, 0x80004)[0] == 0
+print(("ok   " if good else "FAIL ") + "a run Musashi ends itself still gives the bus back (exit %d)" % r.returncode)
+ok = ok and good
+
 # refusals: no MAGIC, not a 68000, and no lwbridge core without -d
 struct.pack_into("<I", mm, 0x8000C, 0); mm.flush()
 r = subprocess.run([exe, "-d", f.name, "-r", rom.name, "-t", "0.1"], capture_output=True, text=True, timeout=30)
