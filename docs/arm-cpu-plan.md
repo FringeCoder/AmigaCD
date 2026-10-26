@@ -739,6 +739,16 @@ setup +0.105 ns, hold +0.143. It is `_Test/lwbridge-flat/amigacd.rbf`
 (c8ed79ab); the old seed-1 core is kept beside it. The JIT boots the demo
 disk on it as on seed 1.
 
+**A game, Another World** (floppy, `-c`, 2026-10-26): it reaches its
+cracktro, which draws with the CPU: chip RAM reads 310-490k/s and writes
+75-165k/s, roughly a quarter and a tenth of the ARM's time. After the click
+the screen stays black and the CPU sits in one loop (at `$49AD2`; under
+`-c` it polls chip RAM 1.3M times a second). Most likely the trackloader's
+CPU-timed delays at JIT speed; the game itself was never reached. Floppy
+games with their own loaders are unlikely to run on this CPU; WHDLoad
+installs (AmigaVision's hardfile) are the realistic route, and Frontier on
+it is the next measurement for a bridge write FIFO.
+
 **Board trap:** `killall armuae` followed at once by `load_core` froze the
 DE10-Nano (no ping). Reprogramming the FPGA while an ARM access is still in
 flight on the HPS-to-FPGA bridge hangs the ARM; wait for armuae to exit
