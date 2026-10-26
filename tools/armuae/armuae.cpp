@@ -9,6 +9,10 @@
 //
 //   armuae -r rom [-C 68000|68020|68030|68040|68060] [-j KB] [-t s] [-a addr]
 //
+// -b runs it on the MiSTer's real Amiga instead (bridge mode, below). Only a
+// core with the flat window can take it: one installed under a path holding
+// "lwbridge-flat" (AmigaCD_MiSTer claude/lwbridge-echo 628d728 or later).
+//
 // -j sets the JIT's translation cache (0: interpreter). -a names a long
 // the ROM's program counts in, reported per second; -v a long to print at
 // the end (bench.c's checksum at $408).
@@ -25,7 +29,10 @@
 #include "newcpu.h"
 #include "uae.h"
 #include "compemu.h"
+#include <dirent.h>
+#include <fcntl.h>
 #include <getopt.h>
+#include <unistd.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -77,14 +84,185 @@ static addrbank io_bank = {
 };
 addrbank dummy_bank, kickmem_bank, rtarea_bank, a3000lmem_bank, a3000hmem_bank, chipmem_bank;
 
+// ---- bridge mode (-b): the real Amiga, through the FPGA ----------------------------
+//
+// natmem is the core's flat window, the full HPS-to-FPGA bridge at ARM
+// physical 0xC0000000, where every access is a cycle on the 68k's bus: chip
+// RAM, slow RAM, the custom chips and the CIAs are what the machine has, at
+// their own addresses. Two pieces are mapped over it in ARM memory: an 8 MB
+// fast RAM at $200000, offered by autoconfig as armcpu's board is, and a copy
+// of the Kickstart at $F80000 (the core serves the same ROM at $000000 while
+// the overlay is on). armcpu_bridge's control registers, on the lightweight
+// bridge, take the bus (OWN, with FAST and FASTW), give the RESET instruction
+// its line, and report the interrupt level.
+//
+// Chip and slow RAM are direct banks, so the JIT reads and writes them in
+// place; the I/O areas go through bank functions over the same window. The
+// 68k's misaligned word and long accesses become ARM ones on device memory,
+// which the kernel fixes up (/proc/cpu/alignment).
+#define LW_BASE     0xFF200000UL
+#define LW_SPAN     0x200000UL
+#define PX_CTL      0x080000UL
+#define PX_MAGIC    0x41435055UL
+#define HF_BASE     0xC0000000UL
+#define CTRL_OWN    1u
+#define CTRL_RESET  8u
+static int bridge;                    // -b
+static unsigned bmode = 6;            // FAST and FASTW
+static volatile uae_u32 *ctl;
+static int owning;
+
+// armcpu's fast RAM board: 8 MB Zorro II, first in the autoconfig chain
+static uae_u8 ac_rom[16] = { 0xE0, 0x01, 0x80, 0x00, 0x07, 0xDB };
+static int ac_mine = 1;
+static uae_u8 ac_lo;
+static uae_u32 fast_base = 0xFFFFFFFF;
+
+static uae_u32 ac_nibble(uaecptr a)
+{
+	uae_u32 o = a & 0xFF;
+	if (o & 1) return 0xFF;
+	if (o >= 0x40) return 0x00;
+	uae_u8 r = ac_rom[o >> 2];
+	uae_u8 n = (o & 2) ? (r & 0x0F) : (r >> 4);
+	if (o >= 0x04) n = ~n & 0x0F;
+	return n << 4;
+}
+static uae_u32 REGPARAM2 ac_bget(uaecptr a) { return ac_mine ? ac_nibble(a) : ram_bget(a); }
+static uae_u32 REGPARAM2 ac_wget(uaecptr a) { return ac_mine ? (ac_nibble(a) << 8) | ac_nibble(a + 1) : ram_wget(a); }
+static uae_u32 REGPARAM2 ac_lget(uaecptr a) { return ac_mine ? (ac_wget(a) << 16) | ac_wget(a + 2) : ram_lget(a); }
+static void REGPARAM2 ac_bput(uaecptr a, uae_u32 v)
+{
+	if (!ac_mine) { ram_bput(a, v); return; }
+	switch (a & 0xFF) {
+	case 0x4A: ac_lo = (v >> 4) & 0x0F; break;
+	case 0x48:
+		fast_base = ((uae_u32)((v >> 4) & 0x0F) << 20) | ((uae_u32)ac_lo << 16);
+		ac_mine = 0;
+		if (fast_base != 0x200000)
+			fprintf(stderr, "armuae: fast RAM configured at %06x, mapped at $200000 only\n", fast_base);
+		break;
+	case 0x4C: ac_mine = 0; break;          // shut up
+	}
+}
+static void REGPARAM2 ac_wput(uaecptr a, uae_u32 v) { ac_bput(a, v >> 8); }
+static void REGPARAM2 ac_lput(uaecptr a, uae_u32 v) { ac_bput(a, v >> 24); }
+
+static addrbank wio_bank = {       // the window, through functions: I/O
+	ram_lget, ram_wget, ram_bget, ram_lput, ram_wput, ram_bput,
+	io_xlate, io_check, NULL, _T("wio"), _T("bus I/O"), ram_lget, ram_wget,
+	ABFLAG_IO, S_READ, S_WRITE
+};
+static addrbank wram_bank = {      // the window, direct: chip and slow RAM
+	ram_lget, ram_wget, ram_bget, ram_lput, ram_wput, ram_bput,
+	ram_xlate, ram_check, NULL, _T("wram"), _T("bus RAM"), ram_lget, ram_wget,
+	ABFLAG_RAM, 0, 0
+};
+static addrbank fast_bank = {      // ARM memory: the fast RAM board
+	ram_lget, ram_wget, ram_bget, ram_lput, ram_wput, ram_bput,
+	ram_xlate, ram_check, NULL, _T("fast"), _T("Fast RAM"), ram_lget, ram_wget,
+	ABFLAG_RAM, 0, 0
+};
+static addrbank ac_bank = {        // autoconfig: the board, then whatever follows on the bus
+	ac_lget, ac_wget, ac_bget, ac_lput, ac_wput, ac_bput,
+	io_xlate, io_check, NULL, _T("autoconfig"), _T("Autoconfig"), ac_lget, ac_wget,
+	ABFLAG_IO, S_READ, S_WRITE
+};
+
+// The overlay is the ARM's to give, as in armcpu: this machine's chipset does
+// not put the ROM back at $000000 for the RESET line (measured: after the
+// pulse, $4 reads chip RAM). While it is on, reads of $000000-$07FFFF come
+// from the ROM copy and writes go to chip RAM; CIA-A's PA0 turns it off.
+static uae_u8 *rom_copy(uaecptr a) { return natmem_offset + 0xF80000 + (a & 0x7FFFF); }
+static uae_u32 REGPARAM2 ovl_lget(uaecptr a) { return do_get_mem_long((uae_u32 *)rom_copy(a)); }
+static uae_u32 REGPARAM2 ovl_wget(uaecptr a) { return do_get_mem_word((uae_u16 *)rom_copy(a)); }
+static uae_u32 REGPARAM2 ovl_bget(uaecptr a) { return *rom_copy(a); }
+static uae_u8 *REGPARAM2 ovl_xlate(uaecptr a) { return rom_copy(a); }
+static addrbank ovl_bank = {
+	ovl_lget, ovl_wget, ovl_bget, ram_lput, ram_wput, ram_bput,
+	ovl_xlate, ram_check, NULL, _T("overlay"), _T("ROM overlay"), ovl_lget, ovl_wget,
+	ABFLAG_IO, S_READ, S_WRITE
+};
+static void map(addrbank *b, uae_u32 start, uae_u32 size);
+static int ovl = 1;
+static uae_u8 cia_pra, cia_ddra;
+static void set_ovl(int on)
+{
+	ovl = on;
+	map(on ? &ovl_bank : &wram_bank, 0x000000, 0x080000);
+}
+static void cia_track(uaecptr a, uae_u8 v)
+{
+	if ((a & 0xFF0000) != 0xBF0000 || (a & 0x1001) != 0x0001) return;   // CIA-A, odd byte
+	switch ((a >> 8) & 15) {
+	case 0: cia_pra  = v; break;
+	case 2: cia_ddra = v; break;
+	default: return;
+	}
+	int on = !((cia_ddra & 1) && !(cia_pra & 1));
+	if (on != ovl) set_ovl(on);
+}
+static void REGPARAM2 cia_bput(uaecptr a, uae_u32 v) { ram_bput(a, v); cia_track(a, (uae_u8)v); }
+static void REGPARAM2 cia_wput(uaecptr a, uae_u32 v) { ram_wput(a, v); cia_track(a + 1, (uae_u8)v); }
+static void REGPARAM2 cia_lput(uaecptr a, uae_u32 v) { ram_lput(a, v); cia_track(a + 1, (uae_u8)(v >> 16)); cia_track(a + 3, (uae_u8)v); }
+static addrbank ciaw_bank = {
+	ram_lget, ram_wget, ram_bget, cia_lput, cia_wput, cia_bput,
+	io_xlate, io_check, NULL, _T("cia"), _T("CIA"), ram_lget, ram_wget,
+	ABFLAG_IO, S_READ, S_WRITE
+};
+
+static void release_bus(void)
+{
+	if (owning && ctl) { ctl[1] = 0; owning = 0; }
+}
+
+// the chipset's reset line, as the 68000's RESET drives it (~17 us)
+static void bus_reset_pulse(void)
+{
+	ctl[1] = CTRL_OWN | bmode | CTRL_RESET;
+	usleep(20);
+	ctl[1] = CTRL_OWN | bmode;
+	ac_mine = 1;
+	fast_base = 0xFFFFFFFF;
+	cia_pra = cia_ddra = 0;
+	set_ovl(1);
+}
+
+static int flat_core_loaded(void)
+{
+	DIR *d = opendir("/proc");
+	struct dirent *e;
+	int found = 0;
+	if (!d) return 0;
+	while (!found && (e = readdir(d))) {
+		char path[300], buf[4096];
+		if (e->d_name[0] < '1' || e->d_name[0] > '9') continue;
+		snprintf(path, sizeof(path), "/proc/%s/cmdline", e->d_name);
+		FILE *f = fopen(path, "r");
+		if (!f) continue;
+		size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+		fclose(f);
+		buf[n] = 0;
+		for (size_t i = 0; i < n; i += strlen(buf + i) + 1) {
+			size_t l = strlen(buf + i);
+			if (l > 4 && !strcmp(buf + i + l - 4, ".rbf") && strstr(buf + i, "lwbridge-flat")) found = 1;
+		}
+	}
+	closedir(d);
+	return found;
+}
+
 static void map(addrbank *b, uae_u32 start, uae_u32 size)
 {
-	b->baseaddr = b->flags & ABFLAG_IO ? NULL : natmem_offset + start;
-	b->baseaddr_direct_r = b->flags & ABFLAG_IO ? NULL : natmem_offset + start;
-	b->baseaddr_direct_w = b->flags & ABFLAG_RAM ? natmem_offset + start : NULL;
-	b->start = b->startaccessmask = start;
-	b->mask = 0xFFFFFF;                    // offsets from start stay inside the bank
-	b->allocated_size = b->reserved_size = size;
+	// Every direct bank is natmem at its own address, so a bank is described
+	// as natmem from address 0: the same bank can then be mapped at several
+	// places (chip and slow RAM, and back and forth under the overlay).
+	b->baseaddr = b->flags & ABFLAG_IO ? NULL : natmem_offset;
+	b->baseaddr_direct_r = b->flags & ABFLAG_IO ? NULL : natmem_offset;
+	b->baseaddr_direct_w = b->flags & ABFLAG_RAM ? natmem_offset : NULL;
+	b->start = b->startaccessmask = 0;
+	b->mask = 0xFFFFFF;
+	b->allocated_size = b->reserved_size = 0x1000000;
 	for (uae_u32 a = start; a < start + size; a += 0x10000) {
 		mem_banks[bankindex(a)] = b;
 		baseaddr[bankindex(a)] = b->baseaddr ? natmem_offset : (uae_u8 *)b + 1;
@@ -150,6 +328,14 @@ static double since(const struct timespec *a)
 
 static void slice(void)
 {
+	if (bridge) {
+		uae_u32 st = ctl[3];
+		ipl_now = st & 7;                 // Paula's level
+		if (st & 0x200) {
+			fprintf(stderr, "armuae: the bridge gave up a bus cycle (watchdog), stopping\n");
+			stop = 1;
+		}
+	}
 	doint();                              // a level change becomes SPCFLAG_INT
 	if (since(&t_last) >= 1.0) {
 		uae_u32 n = count_addr ? do_get_mem_long((uae_u32 *)(natmem_offset + count_addr)) : 0;
@@ -190,9 +376,14 @@ void do_cycles_ce020(int c) { do_cycles_slow(c); }
 void event2_newevent_xx(int, evt_t, uae_u32 data, evfunc2 func) { func(data); }
 
 // ---- the RESET instruction: the chipset's reset line ---------------------------------
-void custom_reset(bool, bool) { regs.natmem_offset = natmem_offset; }
+void custom_reset(bool, bool)
+{
+	regs.natmem_offset = natmem_offset;
+	if (bridge) bus_reset_pulse();
+}
 
 static void on_signal(int) { stop = 1; }
+static void on_fatal(int sig) { release_bus(); signal(sig, SIG_DFL); raise(sig); }
 
 // SIGSEGV: what the host faulted on, for JIT debugging
 #include <ucontext.h>
@@ -206,9 +397,9 @@ static void on_segv(int, siginfo_t *si, void *uc)
 	uae_u32 *ip = (uae_u32 *)u->uc_mcontext.arm_pc;
 	fprintf(stderr, "  code: %08x %08x [%08x] %08x %08x\n", ip[-2], ip[-1], ip[0], ip[1], ip[2]);
 #else
-	(void)u; fprintf(stderr, "SEGV: addr %p
-", si->si_addr);
+	(void)u; fprintf(stderr, "SEGV: addr %p\n", si->si_addr);
 #endif
+	release_bus();
 	_exit(3);
 }
 
@@ -220,6 +411,9 @@ static void on_where(int)
 	int n = snprintf(buf, sizeof(buf), "where: 68k PC %08x, spcflags %08x, pissoff %d, currcycle %lld\n",
 	                 regs.pc, (unsigned)regs.spcflags, pissoff, (long long)currcycle);
 	(void)n; fputs(buf, stderr);
+	n = snprintf(buf, sizeof(buf), "  ipl_now %d, STATUS %08x, intmask %d, ipl_pin %d, sr %04x\n",
+	             ipl_now, bridge ? ctl[3] : 0, regs.intmask, regs.ipl_pin, regs.sr);
+	fputs(buf, stderr);
 	void *bt[32];
 	backtrace_symbols_fd(bt, backtrace(bt, 32), 2);
 }
@@ -228,7 +422,8 @@ int main(int argc, char **argv)
 {
 	const char *rom_path = NULL;
 	int model = 68020, jit_kb = 0, opt;
-	while ((opt = getopt(argc, argv, "r:C:j:t:a:v:")) != -1) {
+	int force = 0;
+	while ((opt = getopt(argc, argv, "r:C:j:t:a:v:bm:f")) != -1) {
 		switch (opt) {
 		case 'r': rom_path = optarg; break;
 		case 'C': model = atoi(optarg); break;
@@ -236,20 +431,58 @@ int main(int argc, char **argv)
 		case 't': seconds = atof(optarg); break;
 		case 'a': count_addr = strtoul(optarg, NULL, 0) & 0xFFFFFC; break;
 		case 'v': check_addr = strtoul(optarg, NULL, 0) & 0xFFFFFE; break;
+		case 'b': bridge = 1; break;
+		case 'm': bmode = (unsigned)strtoul(optarg, NULL, 0) & 6; break;
+		case 'f': force = 1; break;
 		default:
-			fprintf(stderr, "usage: %s -r rom [-C model] [-j KB] [-t s] [-a addr]\n", argv[0]);
+			fprintf(stderr, "usage: %s -r rom [-C model] [-j KB] [-t s] [-a addr] [-v addr] [-b [-m mode] [-f]]\n", argv[0]);
 			return 2;
 		}
 	}
 	if (!rom_path) { fprintf(stderr, "-r rom\n"); return 2; }
 
-	#ifdef MAP_32BIT
+	if (bridge) {
+		if (!force && !flat_core_loaded()) {
+			fprintf(stderr, "no running core has \"lwbridge-flat\" in its path: without the flat window "
+			                "an access to it can hang the ARM (-f overrides)\n");
+			return 2;
+		}
+		int memfd = open("/dev/mem", O_RDWR | O_SYNC);
+		if (memfd < 0) { perror("/dev/mem"); return 1; }
+		volatile uae_u8 *lw = (volatile uae_u8 *)mmap(NULL, LW_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, LW_BASE);
+		if (lw == MAP_FAILED) { perror("mmap lw"); return 1; }
+		ctl = (volatile uae_u32 *)(lw + PX_CTL);
+		if (ctl[0] != PX_MAGIC) { fprintf(stderr, "no armcpu_bridge: control register 0 reads %08x\n", ctl[0]); return 1; }
+		if (!(ctl[3] & 0x100)) { fprintf(stderr, "the CPU is not set to 68000: the proxy only replaces the fx68k\n"); return 1; }
+		// natmem is the window; fast RAM and the ROM copy go over it
+		natmem_offset = (uae_u8 *)mmap(NULL, NATMEM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, HF_BASE);
+		if (natmem_offset == MAP_FAILED) { perror("mmap window"); return 1; }
+		if (mmap(natmem_offset + 0x200000, 0x800000, PROT_READ | PROT_WRITE,
+		         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED ||
+		    mmap(natmem_offset + 0xF80000, 0x080000, PROT_READ | PROT_WRITE,
+		         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
+			perror("mmap fast/ROM over the window");
+			return 1;
+		}
+		atexit(release_bus);
+		signal(SIGBUS, on_fatal);
+		signal(SIGILL, on_fatal);
+		signal(SIGFPE, on_fatal);
+		signal(SIGABRT, on_fatal);
+		signal(SIGHUP, on_signal);
+		owning = 1;
+		ctl[1] = CTRL_OWN | bmode;
+		if ((ctl[1] & 7) != (CTRL_OWN | bmode)) { fprintf(stderr, "CTRL did not take %u\n", CTRL_OWN | bmode); return 1; }
+	}
+	else {
+#ifdef MAP_32BIT
 	// x86-64's JIT addresses natmem with 32-bit displacements
 	natmem_offset = (uae_u8 *)mmap(NULL, NATMEM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
 #else
 	natmem_offset = (uae_u8 *)mmap(NULL, NATMEM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #endif
 	if (natmem_offset == MAP_FAILED) { perror("natmem"); return 1; }
+	}
 	natmem_reserved_size = NATMEM_SIZE;
 	regs.natmem_offset = natmem_offset;   // 5.7.4's JIT reads NATMEM_OFFSET from regs
 
@@ -258,12 +491,26 @@ int main(int argc, char **argv)
 	size_t got = fread(natmem_offset + 0xF80000, 1, 0x80000, f);
 	fclose(f);
 	if (got == 0x40000) memcpy(natmem_offset + 0xFC0000, natmem_offset + 0xF80000, 0x40000);
-	memcpy(natmem_offset, natmem_offset + 0xF80000, 8);   // the overlay's reset vectors
+	if (!bridge)
+		memcpy(natmem_offset, natmem_offset + 0xF80000, 8);   // the overlay's reset vectors
 
 	for (int i = 0; i < MEMORY_BANKS; i++) { mem_banks[i] = &io_bank; baseaddr[i] = (uae_u8 *)&io_bank + 1; }
-	map(&io_bank, 0xA00000, 0x580000);
-	map(&ram_bank, 0x000000, 0xA00000);   // chip RAM and the Zorro II fast RAM space
-	map(&rom_bank, 0xF80000, 0x080000);
+	if (bridge) {
+		map(&wram_bank, 0x000000, 0x200000);  // chip RAM (and the ROM, while the overlay is on)
+		map(&fast_bank, 0x200000, 0x800000);  // the board, once autoconfig has placed it
+		map(&ciaw_bank,  0xA00000, 0x200000);  // the CIAs (CIA-A's PA0 is the overlay)
+		map(&wram_bank, 0xC00000, 0x180000);  // slow RAM
+		map(&wio_bank,  0xD80000, 0x100000);  // the custom chips, RTC, IDE
+		map(&wio_bank,  0xE00000, 0x080000);
+		map(&ac_bank,   0xE80000, 0x080000);  // autoconfig
+		map(&wio_bank,  0xF00000, 0x080000);
+		map(&rom_bank,  0xF80000, 0x080000);
+	}
+	else {
+		map(&io_bank, 0xA00000, 0x580000);
+		map(&ram_bank, 0x000000, 0xA00000);   // chip RAM and the Zorro II fast RAM space
+		map(&rom_bank, 0xF80000, 0x080000);
+	}
 	dummy_bank = kickmem_bank = rtarea_bank = a3000lmem_bank = a3000hmem_bank = io_bank;
 	chipmem_bank = ram_bank;
 
@@ -298,8 +545,8 @@ int main(int argc, char **argv)
 	// the JIT is built by build_comp(), which build_cpufunctbl() calls on reset
 	init_m68k();
 	events_schedule();
-	printf("armuae: Amiberry 5.7.4 68k core, %d, %s, ROM %s\n", model,
-	       currprefs.cachesize ? "JIT" : "interpreter", rom_path);
+	printf("armuae: Amiberry 5.7.4 68k core, %d, %s, %s, ROM %s\n", model,
+	       currprefs.cachesize ? "JIT" : "interpreter", bridge ? "the Amiga through the flat window" : "no chipset", rom_path);
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	t_last = t0;
 	quit_program = UAE_RESET_HARD;
@@ -310,5 +557,9 @@ int main(int argc, char **argv)
 	if (check_addr)
 		printf("  long at %06x: %08x (count %u)\n", check_addr,
 		       do_get_mem_long((uae_u32 *)(natmem_offset + check_addr)), n);
+	if (bridge) {
+		release_bus();
+		printf("  bus given back: the 68000 restarts from its reset vector\n");
+	}
 	return 0;
 }
