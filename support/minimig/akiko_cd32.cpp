@@ -531,14 +531,18 @@ static uint8_t  cd_reannounce_count  = 0;
 //   2026-09-03.
 //
 //   The real ceiling is structural, not observational: drive_t.track[] in
-//   ide.h is track_t[50], and ide_cdrom.cpp:198 refuses to grow track_cnt past
-//   that, so real_tracks (= track_cnt - 1) can never exceed 49. 3 + 49 = 52 is
-//   therefore every point this module can ever be asked to send, for any disc
-//   the rest of the CD pipeline can load at all. If drive_t.track[] is ever
-//   resized, this bound and that one have to move together.
+//   ide.h, which ide_cdrom.cpp refuses to grow track_cnt past. It was
+//   track_t[50] (49 real tracks, 52 points); upstream's 8328d9f0 (#1386, the
+//   2026-10-26 sync) made it track_t[100], so real_tracks (= track_cnt - 1)
+//   can reach 99 -- also the most a CD can number -- and 3 + 99 = 102 is every
+//   point this module can be asked to send. The static_assert below ties the
+//   two together, so a resize of drive_t.track[] cannot leave this bound
+//   behind a third time.
 #define AKIKO_TOC_REPEAT       3
 #define AKIKO_TOC_PUSH_PERIOD_MS 20 // 50 Hz, matches WinUAE PAL framesync (akiko.cpp:1438)
-#define AKIKO_TOC_MAX_POINTS   52
+#define AKIKO_TOC_MAX_POINTS   102
+static_assert(3 + sizeof(((drive_t *)0)->track) / sizeof(track_t) - 1 <= AKIKO_TOC_MAX_POINTS,
+              "AKIKO_TOC_MAX_POINTS must hold 0xA0-0xA2 plus every real track drive_t.track[] can hold");
 static uint8_t  toc_buffer[AKIKO_TOC_MAX_POINTS * 13];
 static uint8_t  toc_point_count     = 0;
 static int16_t  toc_push_idx        = -1;   // -1 = idle; else next slot in 3x sequence

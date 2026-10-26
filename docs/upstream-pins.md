@@ -19,7 +19,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `e698ccd` "Minimig: let the Akiko TOC carry all 99 tracks (#1384)" -- **two of four taken (the 68EC030 adapted), two already here; see "Sync 2026-10-24"** | 2026-10-24 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `8328d9f` "Minimig: CD32 with up to 99 tracks, WAV tracks in cue (#1386)" -- **taken, and the Akiko TOC bound follows it; SGI Indy not taken; see "Sync 2026-10-26"** | 2026-10-26 |
+| ^ previous merge base, superseded 2026-10-26 | | `e698ccd` "Minimig: let the Akiko TOC carry all 99 tracks (#1384)" -- two of four taken (the 68EC030 adapted), two already here; see "Sync 2026-10-24" | 2026-10-24 |
 | ^ previous merge base, superseded 2026-10-24 | | `0c98d24` "Minimig: draw FDD Turbo at its own line in System (#1379)" -- upstream rewrote its history; content-merged from `d3b8537`, see "Sync 2026-10-22" | 2026-10-22 |
 | ^ previous merge base, superseded 2026-10-22 (**no longer on upstream's master**) | | `d3b8537` "Adds PCFX system support (#1365)" -- three of four taken (one adapted), see "Sync 2026-10-17" | 2026-10-17 |
 | ^ previous merge base, superseded 2026-10-17 | | `e836aea` "Minimig: 68030 with its clocks..." -- six of seven taken (two adapted), see "Sync 2026-10-16" | 2026-10-16 |
@@ -30,7 +31,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `b988bd09` "Fix Denise (black stripes on Flink AGA), fix 68EC020 freeze" -- **all but `4ab0d5f` taken, see "Sync 2026-10-24"** -- FringeCoder/AmigaCD_MiSTer#62, merged into `cd32-native-mvp` as `b8079fce`; `430209e` and the real-floppy line still out | 2026-10-24 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `ba5adba` "Improve the timings (SDRAM pins, CPU data path) - #289" -- **all but `cf24493` taken, see "Sync 2026-10-26"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-1026` | 2026-10-26 |
+| ^ previous pin, superseded 2026-10-26 | | `b988bd09` "Fix Denise (black stripes on Flink AGA), fix 68EC020 freeze" -- all but `4ab0d5f` taken, see "Sync 2026-10-24" -- FringeCoder/AmigaCD_MiSTer#62, merged into `cd32-native-mvp` as `b8079fce`; `430209e` and the real-floppy line still out | 2026-10-24 |
 | ^ previous pin, superseded 2026-10-24 (**reverted upstream by #284**) | | `5b93485b` "Fix RTG with the 68030 MMU enabled (#281)" -- upstream rewrote its history; content-merged from `0bf2ab1`, see "Sync 2026-10-22" | 2026-10-22 |
 | ^ previous pin, superseded 2026-10-22 (**no longer on upstream's MiSTer**) | | `0bf2ab1` "68020/68030 fixes and the 68030 MMU bus error - #268" -- all ten commits since `26eb46a` taken, see "Sync 2026-10-17" -- FringeCoder/AmigaCD_MiSTer#58 | 2026-10-17 |
 | ^ previous pin, superseded 2026-10-17 | | `26eb46a` -- taken through `26eb46a` (68030 hand-ported in its own PR) -- FringeCoder/AmigaCD_MiSTer#56/#57 | 2026-10-16 |
@@ -104,6 +106,28 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-26: the 99-track table, and the core's timing work
+
+Main_MiSTer `e698ccd..8328d9f`, a fast-forward.
+
+| Upstream | Change | Here |
+|---|---|---|
+| `8328d9f` (#1386) | CD32: `drive_t.track[]` 50 -> 100, so a cue or CHD holds up to 99 tracks; WAV tracks in a cue read from their audio data, not their RIFF header | Taken, clean `cherry-pick -x`. **And the Akiko TOC bound moves with it:** `AKIKO_TOC_MAX_POINTS` was 52 because the table held 49 real tracks (see "Sync 2026-10-24" on `e698ccd`); with 99 it would have truncated a disc of 50+ tracks and wedged the BIOS at the spinning-CD splash, the bug this bound has had twice before. It is 102 now, upstream's figure, with a `static_assert` that ties it to `sizeof(drive_t::track)`, so the next resize fails the build instead. Every other track limit in the tree is already derived from the struct. |
+| `eddc655` (#1385) | SGI Indy: Ethernet and SCSI write buffer | **Not taken**: a core this fork does not build (`support/sgi` is not here), like HP 9000 and PCFX before it. |
+
+Minimig-AGA `b988bd09..ba5adba`, applied three-way (FringeCoder/AmigaCD_MiSTer
+`claude/resync-upstream-1026`, `6450b9a`):
+
+| Upstream | Change | Core |
+|---|---|---|
+| `8813609` (#287) | Blitter: a CPU write to a blitter register waits while a blit runs with BLTPRI set (Deep Core's CD32 background); ddram_ctrl's write queue and read-ahead restructured for timing | Taken. `agnus` keeps this fork's `blit_busy` output (save state quiesce) beside upstream's new `blit_nasty`. |
+| `5306e18` (#289) | sdram_ctrl plans the SDRAM pin commands a clock ahead | Taken, **adapted**: this fork's `cacheAddr` (the read cache's address a clock late, which keeps the save state / CPU address mux out of the clk_114 into `sd_addr`) stays, and upstream's new row mux reads it where upstream reads `cpuAddr`. `slot_is_dma` stays in the chip slot. `make_sim_sdram.py` expects one procedural `sd_data` driver now, not three. |
+| `a189426` (#289) | TG68K: the memory word is taken last in the long chains | Taken; the MMU's `ss_flush` port stays. |
+| `cf24493` (#289) | cpu_wrapper picks the SDRAM word, the DDR3 word or the swapped DDR3 word with one choice | **Not taken.** Here the read return already goes through `cpu_rdgate`, a registered stage between the SDRAM/DDR3 mux and the CPU, so the path upstream shortens is already cut; taking it would route around the gate. **Standing divergence.** |
+
+The physical-disc fork (`e6e62b2`) and `kblood/Main_MiSTer-cd32-cdtv`
+(`52625a4`) have not moved.
 
 ## Sync 2026-10-24: two of four taken, and the core follows with the 68EC030
 
