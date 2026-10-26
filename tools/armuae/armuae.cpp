@@ -39,6 +39,18 @@
 
 // ---- the memory map: one flat 16 MB block --------------------------------------
 #define NATMEM_SIZE (16 << 20)
+
+// natmem as the 68k sees it, a word or a long at a time. Not Amiberry's
+// do_get_mem_word() and friends: on this target they work a byte at a time,
+// which is harmless in host memory and wrong on the bus -- through the window
+// every byte is its own 68k cycle, and the custom chips decode the whole data
+// bus on every cycle, so a word written as two bytes reaches INTENA as $xxFF
+// first (measured: $C020 left INTENA at $40FF). A byte read of a register
+// that clears on read loses the other half the same way.
+static inline uae_u16 ld16(void *p) { return __builtin_bswap16(*(volatile uae_u16 *)p); }
+static inline uae_u32 ld32(void *p) { return __builtin_bswap32(*(volatile uae_u32 *)p); }
+static inline void st16(void *p, uae_u16 v) { *(volatile uae_u16 *)p = __builtin_bswap16(v); }
+static inline void st32(void *p, uae_u32 v) { *(volatile uae_u32 *)p = __builtin_bswap32(v); }
 // natmem_offset lives in newcpu.cpp, beside regs (patch_newcpu.py)
 size_t natmem_reserved_size;
 bool canbang = true;
@@ -50,11 +62,11 @@ addrbank *thread_mem_banks[MEMORY_BANKS];
 uae_u8 *baseaddr[MEMORY_BANKS];
 uae_u8 ce_banktype[65536], ce_cachable[65536];
 
-static uae_u32 REGPARAM2 ram_lget(uaecptr a) { return do_get_mem_long((uae_u32 *)(natmem_offset + (a & 0xFFFFFF))); }
-static uae_u32 REGPARAM2 ram_wget(uaecptr a) { return do_get_mem_word((uae_u16 *)(natmem_offset + (a & 0xFFFFFF))); }
+static uae_u32 REGPARAM2 ram_lget(uaecptr a) { return ld32((uae_u32 *)(natmem_offset + (a & 0xFFFFFF))); }
+static uae_u32 REGPARAM2 ram_wget(uaecptr a) { return ld16((uae_u16 *)(natmem_offset + (a & 0xFFFFFF))); }
 static uae_u32 REGPARAM2 ram_bget(uaecptr a) { return natmem_offset[a & 0xFFFFFF]; }
-static void REGPARAM2 ram_lput(uaecptr a, uae_u32 v) { do_put_mem_long((uae_u32 *)(natmem_offset + (a & 0xFFFFFF)), v); }
-static void REGPARAM2 ram_wput(uaecptr a, uae_u32 v) { do_put_mem_word((uae_u16 *)(natmem_offset + (a & 0xFFFFFF)), v); }
+static void REGPARAM2 ram_lput(uaecptr a, uae_u32 v) { st32((uae_u32 *)(natmem_offset + (a & 0xFFFFFF)), v); }
+static void REGPARAM2 ram_wput(uaecptr a, uae_u32 v) { st16((uae_u16 *)(natmem_offset + (a & 0xFFFFFF)), v); }
 static void REGPARAM2 ram_bput(uaecptr a, uae_u32 v) { natmem_offset[a & 0xFFFFFF] = (uae_u8)v; }
 static uae_u8 *REGPARAM2 ram_xlate(uaecptr a) { return natmem_offset + (a & 0xFFFFFF); }
 static int REGPARAM2 ram_check(uaecptr, uae_u32) { return 1; }
@@ -174,8 +186,8 @@ static addrbank ac_bank = {        // autoconfig: the board, then whatever follo
 // pulse, $4 reads chip RAM). While it is on, reads of $000000-$07FFFF come
 // from the ROM copy and writes go to chip RAM; CIA-A's PA0 turns it off.
 static uae_u8 *rom_copy(uaecptr a) { return natmem_offset + 0xF80000 + (a & 0x7FFFF); }
-static uae_u32 REGPARAM2 ovl_lget(uaecptr a) { return do_get_mem_long((uae_u32 *)rom_copy(a)); }
-static uae_u32 REGPARAM2 ovl_wget(uaecptr a) { return do_get_mem_word((uae_u16 *)rom_copy(a)); }
+static uae_u32 REGPARAM2 ovl_lget(uaecptr a) { return ld32((uae_u32 *)rom_copy(a)); }
+static uae_u32 REGPARAM2 ovl_wget(uaecptr a) { return ld16((uae_u16 *)rom_copy(a)); }
 static uae_u32 REGPARAM2 ovl_bget(uaecptr a) { return *rom_copy(a); }
 static uae_u8 *REGPARAM2 ovl_xlate(uaecptr a) { return rom_copy(a); }
 static addrbank ovl_bank = {
@@ -282,13 +294,13 @@ void memory_restore(void) { }
 void restore_banks(void) { }
 
 // UAE's own accessors, as memory.cpp has them
-uae_u32 memory_get_longi(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? do_get_mem_long((uae_u32 *)(ab->baseaddr_direct_r + ((a - ab->startaccessmask) & ab->mask))) : call_mem_get_func(ab->lgeti, a); }
-uae_u32 memory_get_wordi(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? do_get_mem_word((uae_u16 *)(ab->baseaddr_direct_r + ((a - ab->startaccessmask) & ab->mask))) : call_mem_get_func(ab->wgeti, a); }
-uae_u32 memory_get_long(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? do_get_mem_long((uae_u32 *)(ab->baseaddr_direct_r + ((a - ab->startaccessmask) & ab->mask))) : call_mem_get_func(ab->lget, a); }
-uae_u32 memory_get_word(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? do_get_mem_word((uae_u16 *)(ab->baseaddr_direct_r + ((a - ab->startaccessmask) & ab->mask))) : call_mem_get_func(ab->wget, a); }
+uae_u32 memory_get_longi(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? ld32((uae_u32 *)(ab->baseaddr_direct_r + ((a - ab->startaccessmask) & ab->mask))) : call_mem_get_func(ab->lgeti, a); }
+uae_u32 memory_get_wordi(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? ld16((uae_u16 *)(ab->baseaddr_direct_r + ((a - ab->startaccessmask) & ab->mask))) : call_mem_get_func(ab->wgeti, a); }
+uae_u32 memory_get_long(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? ld32((uae_u32 *)(ab->baseaddr_direct_r + ((a - ab->startaccessmask) & ab->mask))) : call_mem_get_func(ab->lget, a); }
+uae_u32 memory_get_word(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? ld16((uae_u16 *)(ab->baseaddr_direct_r + ((a - ab->startaccessmask) & ab->mask))) : call_mem_get_func(ab->wget, a); }
 uae_u32 memory_get_byte(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? ab->baseaddr_direct_r[(a - ab->startaccessmask) & ab->mask] : call_mem_get_func(ab->bget, a); }
-void memory_put_long(uaecptr a, uae_u32 v) { addrbank *ab = &get_mem_bank(a); if (ab->baseaddr_direct_w) do_put_mem_long((uae_u32 *)(ab->baseaddr_direct_w + ((a - ab->startaccessmask) & ab->mask)), v); else call_mem_put_func(ab->lput, a, v); }
-void memory_put_word(uaecptr a, uae_u32 v) { addrbank *ab = &get_mem_bank(a); if (ab->baseaddr_direct_w) do_put_mem_word((uae_u16 *)(ab->baseaddr_direct_w + ((a - ab->startaccessmask) & ab->mask)), v); else call_mem_put_func(ab->wput, a, v); }
+void memory_put_long(uaecptr a, uae_u32 v) { addrbank *ab = &get_mem_bank(a); if (ab->baseaddr_direct_w) st32((uae_u32 *)(ab->baseaddr_direct_w + ((a - ab->startaccessmask) & ab->mask)), v); else call_mem_put_func(ab->lput, a, v); }
+void memory_put_word(uaecptr a, uae_u32 v) { addrbank *ab = &get_mem_bank(a); if (ab->baseaddr_direct_w) st16((uae_u16 *)(ab->baseaddr_direct_w + ((a - ab->startaccessmask) & ab->mask)), v); else call_mem_put_func(ab->wput, a, v); }
 void memory_put_byte(uaecptr a, uae_u32 v) { addrbank *ab = &get_mem_bank(a); if (ab->baseaddr_direct_w) ab->baseaddr_direct_w[(a - ab->startaccessmask) & ab->mask] = (uae_u8)v; else call_mem_put_func(ab->bput, a, v); }
 uae_u8 *memory_get_real_address(uaecptr a) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? ab->baseaddr_direct_r + ((a - ab->startaccessmask) & ab->mask) : ab->xlateaddr(a); }
 int memory_valid_address(uaecptr a, uae_u32 size) { addrbank *ab = &get_mem_bank(a); return ab->baseaddr_direct_r ? 1 : ab->check(a, size); }
@@ -338,7 +350,7 @@ static void slice(void)
 	}
 	doint();                              // a level change becomes SPCFLAG_INT
 	if (since(&t_last) >= 1.0) {
-		uae_u32 n = count_addr ? do_get_mem_long((uae_u32 *)(natmem_offset + count_addr)) : 0;
+		uae_u32 n = count_addr ? ld32((uae_u32 *)(natmem_offset + count_addr)) : 0;
 		printf("  %5.1f s: PC %08x, count %u (+%u/s)\n", since(&t0), m68k_getpc(), n, (n - n_last));
 		fflush(stdout);
 		n_last = n;
@@ -473,6 +485,11 @@ int main(int argc, char **argv)
 		owning = 1;
 		ctl[1] = CTRL_OWN | bmode;
 		if ((ctl[1] & 7) != (CTRL_OWN | bmode)) { fprintf(stderr, "CTRL did not take %u\n", CTRL_OWN | bmode); return 1; }
+		// a cold start, as armcpu makes it: no ExecBase at $4 (Kickstart would
+		// take the last session's for a warm reboot and reuse its lists), and
+		// no 'HELP' at $0 with an alert at $100
+		for (uae_u32 a = 0; a < 8; a += 2) *(volatile uae_u16 *)(natmem_offset + a) = 0;
+		for (uae_u32 a = 0x100; a < 0x108; a += 2) *(volatile uae_u16 *)(natmem_offset + a) = 0;
 	}
 	else {
 #ifdef MAP_32BIT
@@ -552,11 +569,11 @@ int main(int argc, char **argv)
 	quit_program = UAE_RESET_HARD;
 	m68k_go(1);
 	double t = since(&t0);
-	uae_u32 n = count_addr ? do_get_mem_long((uae_u32 *)(natmem_offset + count_addr)) : 0;
+	uae_u32 n = count_addr ? ld32((uae_u32 *)(natmem_offset + count_addr)) : 0;
 	printf("  ran %.2f s: PC %08x, count %u, %.0f/s\n", t, m68k_getpc(), n, n / t);
 	if (check_addr)
 		printf("  long at %06x: %08x (count %u)\n", check_addr,
-		       do_get_mem_long((uae_u32 *)(natmem_offset + check_addr)), n);
+		       ld32((uae_u32 *)(natmem_offset + check_addr)), n);
 	if (bridge) {
 		release_bus();
 		printf("  bus given back: the 68000 restarts from its reset vector\n");
