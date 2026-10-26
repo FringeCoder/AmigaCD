@@ -181,7 +181,7 @@ static track_t *get_track_from_lba(drive_t *drive, uint32_t lba, bool &index0)
 		uint32_t start_lba = i ? drive->track[i-1].start + drive->track[i-1].length : 0;
 		uint32_t end_lba = drive->track[i].start + drive->track[i].length;
 
-		if (lba >= start_lba && lba <= end_lba)
+		if (lba >= start_lba && lba < end_lba)
 		{
 			ret = &drive->track[i];
 			//In the "pregap" section
@@ -1283,7 +1283,12 @@ void cdrom_read(ide_config *ide)
 	}
 
 
-	if (drive->chd_f) {
+	if (!track)
+	{
+		ide->null = 1;
+		memset(ide_buf, 0, cnt * 2048);
+	}
+	else if (drive->chd_f) {
 
 		// Use the per-LBA track from get_track_from_lba above for mode2,
 		// sectorSize and chd_offset -- not drive->data_num. Same bug class
@@ -2431,7 +2436,7 @@ void ide_cdda_send_sector()
 	bool needs_swap = false;
 	track_t *track = get_track_from_lba(drv, drv->play_start_lba, is_index0);
 
-	if (!track->attr)
+	if (track && !track->attr)
 	{
 		if (drv->chd_f)
 		{
