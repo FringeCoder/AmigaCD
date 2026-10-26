@@ -635,6 +635,7 @@ int main(int argc, char **argv)
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
+	signal(SIGHUP, on_signal);    /* the shell that started it went away: stop cleanly */
 
 	ctrl_bits = CTRL_OWN | mode;
 	atexit(release_all);
