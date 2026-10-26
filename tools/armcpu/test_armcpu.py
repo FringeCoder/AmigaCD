@@ -97,6 +97,45 @@ good = r.returncode == 0 and taken > 100
 print(("ok   " if good else "FAIL ") + "a level that stays up is taken again (%d times)" % taken)
 ok = ok and good
 
+# Fast RAM in ARM memory: the emulated Zorro II board answers $E80000 with its
+# ROM nibbles until Kickstart -- here the ROM -- writes its base, keeps its
+# memory off the bus, then leaves $E80000 to the bus; RESET puts it back.
+ac = (struct.pack(">II", 0x00080000, 0x00F80008) +
+    w(0x13FC, 0x0003, 0x00BF, 0xE201) +           # DDRA
+    w(0x13FC, 0x0000, 0x00BF, 0xE001) +           # OVL off
+    w(0x1039, 0x00E8, 0x0000, 0x13C0, 0x0000, 0x0300) +   # er_Type high nibble -> $300
+    w(0x1039, 0x00E8, 0x0002, 0x13C0, 0x0000, 0x0301) +   # er_Type low nibble  -> $301
+    w(0x1039, 0x00E8, 0x0004, 0x13C0, 0x0000, 0x0302) +   # er_Product high (inverted)
+    w(0x1039, 0x00E8, 0x0006, 0x13C0, 0x0000, 0x0303) +   # er_Product low (inverted)
+    w(0x13FC, 0x0000, 0x00E8, 0x004A) +           # base low nibble
+    w(0x13FC, 0x0020, 0x00E8, 0x0048) +           # base high nibble: $200000
+    w(0x33FC, 0xBEEF, 0x0020, 0x0000) +           # move.w #$BEEF,$200000
+    w(0x3239, 0x0020, 0x0000, 0x33C1, 0x0000, 0x0304) +   # read it back -> $304
+    w(0x1039, 0x00E8, 0x0000, 0x13C0, 0x0000, 0x0306) +   # $E80000 is the bus now
+    w(0x4E70) +                                   # reset: the board is back
+    w(0x1039, 0x00E8, 0x0000, 0x13C0, 0x0000, 0x0307) +
+    w(0x60FE))
+rom3 = tempfile.NamedTemporaryFile(delete=False, suffix=".rom")
+rom3.write(ac + b"\0" * (0x80000 - len(ac))); rom3.close()
+mm[:] = b"\0" * 0x200000
+struct.pack_into("<I", mm, 0x80000, 0x41435055)
+struct.pack_into("<I", mm, 0x8000C, 0x100)
+mm.flush()
+r = subprocess.run([exe, "-d", f.name, "-r", rom3.name, "-t", "0.2"], capture_output=True, text=True, timeout=60)
+print(r.stdout[-400:], r.stderr[-300:])
+fastchecks = {
+    "fast RAM: er_Type nibbles E, 0 (8 MB Zorro II memory)": at(0x300, 2) == bytes([0xE0, 0x00]),
+    "fast RAM: er_Product nibbles read inverted": at(0x302, 2) == bytes([0xF0, 0xE0]),
+    "fast RAM: a write at its base reads back": at(0x304, 2) == bytes([0xBE, 0xEF]),
+    "fast RAM: its memory never reaches the bus": at(0x000, 2) != bytes([0xBE, 0xEF]),
+    "fast RAM: configured, $E80000 is the bus's": at(0x306, 1) == bytes([0x00]),
+    "fast RAM: RESET puts the board back": at(0x307, 1) == bytes([0xE0]),
+    "fast RAM: the run reports the board at $200000": "board last at 200000" in r.stdout,
+}
+for name, good in fastchecks.items():
+    print(("ok   " if good else "FAIL ") + name)
+    ok = ok and good
+
 # refusals: no MAGIC, not a 68000, and no lwbridge core without -d
 struct.pack_into("<I", mm, 0x8000C, 0); mm.flush()
 r = subprocess.run([exe, "-d", f.name, "-r", rom.name, "-t", "0.1"], capture_output=True, text=True, timeout=30)

@@ -5,11 +5,11 @@
  * (AmigaCD_MiSTer claude/lwbridge-echo: rtl/armcpu_bridge.v and
  * rtl/proxy68k.v, behind the lightweight HPS-to-FPGA bridge) makes 68000
  * bus cycles for whoever owns it. This owns it: Musashi (tools/armcpu/
- * musashi, MIT) runs the 68000, Kickstart sits in ARM memory, and every
- * other access -- chip RAM, the custom chips, the CIAs, autoconfig, slow and
- * fast RAM in the core -- goes over the bridge.
+ * musashi, MIT) runs the 68000, Kickstart and 8 MB of fast RAM sit in ARM
+ * memory, and every other access -- chip RAM, the custom chips, the CIAs,
+ * the core's own autoconfig boards, slow RAM -- goes over the bridge.
  *
- *   armcpu [-r rom] [-t seconds] [-m mode] [-c cpu] [-q] [-d file] [-f]
+ *   armcpu [-r rom] [-t seconds] [-m mode] [-c cpu] [-F MB] [-q] [-d file] [-f]
  *     -r  Kickstart image (default /media/fat/games/Amiga500HD/
  *         1.3-scsi-patched.rom); 256 KB is mirrored, 512 KB fills
  *         $F80000-$FFFFFF
@@ -18,6 +18,7 @@
  *     -m  armcpu_bridge CTRL bits besides OWN: 2 FAST reads, 4 FASTW writes
  *         (default 6, both)
  *     -c  pin to this ARM core (default 0; Main_MiSTer runs on 1)
+ *     -F  fast RAM in ARM memory, in MB: 0, 1, 2, 4 or 8 (default 8)
  *     -q  no progress lines
  *     -d  host test: map this file as the bridge (MAGIC and the 68000 bit
  *         already in it); test_armcpu.py checks what lands in it
@@ -43,6 +44,14 @@
  * Musashi again each time, which autovectors (Musashi drops a level once it
  * has taken it; the Amiga's stay up until the handler clears them). RESET pulls the CPU's reset output for the
  * instruction's 124 clocks (CTRL bit 3), which resets the chipset and CIAs.
+ *
+ * Fast RAM: an emulated Zorro II memory board, first in the autoconfig
+ * chain. Until Kickstart configures it, this answers $E80000-$E8FFFF itself
+ * with the board's ROM nibbles (inverted where the spec says); the base
+ * Kickstart writes to $4A and then $48 maps the board, and a write to $4C
+ * shuts it up. Either way the board leaves the chain and $E8xxxx goes to the
+ * bus again, where the core's own boards configure as before. Accesses inside
+ * the board never touch the bus. RESET unconfigures it, as on a real board.
  *
  * Taking the bus holds the fx68k in reset; giving it back restarts the
  * machine from its own reset vector.
@@ -150,12 +159,106 @@ static inline int is_rom(uint32_t a)
 	return a >= 0xF80000 || (ovl && a < 0x080000);
 }
 
+/* ---- fast RAM: a Zorro II board in ARM memory ------------------------------------ */
+
+static uint8_t *fast;                    /* the board's memory, 68k byte order */
+static uint32_t fast_size;               /* 0: no board */
+static uint32_t fast_base = 0xFFFFFFFFu; /* where autoconfig put it */
+static int      ac_mine;                 /* the board is the one at $E80000 */
+static uint8_t  ac_lo;                   /* the nibble written to $4A */
+static uint64_t n_fast;
+
+/* er_Type (Zorro II, memory into the free list, size), er_Product, er_Flags
+ * (prefers the 8 MB space), reserved, manufacturer $07DB (the "hackers" ID),
+ * serial and the diagnostic vector all 0 */
+static uint8_t ac_rom[16] = { 0xE0, 0x01, 0x80, 0x00, 0x07, 0xDB };
+
+static uint32_t fast_last = 0xFFFFFFFFu; /* where it was last configured */
+
+static inline int is_fast(uint32_t a)
+{
+	return fast_base != 0xFFFFFFFFu && a - fast_base < fast_size;
+}
+
+static void fast_reset(void)
+{
+	ac_mine   = fast_size != 0;
+	fast_base = 0xFFFFFFFFu;
+}
+
+/* a byte read of the board's config space: each byte register is two nibbles
+ * at $E8xxx0/2, high nibble first, in bits 7-4; all but er_Type and the
+ * interrupt registers ($40 up) read inverted */
+static uint8_t ac_read(uint32_t a)
+{
+	uint32_t o = a & 0xFF;
+	if (o & 1) return 0xFF;
+	if (o >= 0x40) return 0x00;
+	uint8_t r = ac_rom[o >> 2];
+	uint8_t n = (o & 2) ? (r & 0x0F) : (r >> 4);
+	if (o >= 0x04) n = ~n & 0x0F;
+	return n << 4;
+}
+
+static void ac_write(uint32_t a, uint8_t v)
+{
+	switch (a & 0xFF) {
+	case 0x4A: ac_lo = v >> 4; break;
+	case 0x48:
+		fast_base = ((uint32_t)(v >> 4) << 20) | ((uint32_t)ac_lo << 16);
+		fast_last = fast_base;
+		ac_mine = 0;
+		event("fast RAM configured at %06x (%x)", fast_base, 0);
+		break;
+	case 0x4C:
+		ac_mine = 0;
+		event("fast RAM shut up (%x %x)", 0, 0);
+		break;
+	}
+}
+
+static inline int is_ac(uint32_t a)
+{
+	return ac_mine && (a & 0xFF0000) == 0xE80000;
+}
+
+/* ---- chip RAM size ---------------------------------------------------------------
+ * FAST and FASTW reach chip RAM through the SDRAM CPU port, which answers all
+ * of $000000-$1FFFFF; the chip bus wraps at the machine's real chip size, as
+ * Agnus does, and Kickstart sizes chip RAM by looking for that wrap. Without
+ * it Kickstart finds 2 MB and puts screens where Agnus cannot fetch. So the
+ * size is measured once over the chip bus (68000 timing), and chip addresses
+ * are wrapped to it here, whichever path they then take. */
+static uint32_t chip_mask = 0x1FFFFF;
+
+static void armcpu_reset_instr(void);
+
+static uint32_t chip_probe(void)
+{
+	const uint32_t t = 0x00F000;           /* clear of $0-$107, which exec reads at boot */
+	ctl[1] = CTRL_OWN;                     /* the chip bus, no FAST */
+	bus_wr8(0xBFE201, 0x03);               /* CIA-A DDRA, then PRA: the overlay off, */
+	bus_wr8(0xBFE001, 0x00);               /* as Kickstart does before it sizes */
+	for (int k = 3; k >= 1; k--) bus_wr16(t + k * 0x80000, (uint16_t)(0xA500 + k));
+	bus_wr16(t, 0x5AA5);
+	uint32_t size = 0x200000;
+	for (int k = 1; k < 4; k++)
+		if (bus_rd16(t + k * 0x80000) != (uint16_t)(0xA500 + k)) { size = k * 0x80000; break; }
+	if (size == 0x180000) size = 0x200000;  /* not a size chip RAM comes in */
+	ctl[1] = ctrl_bits;
+	armcpu_reset_instr();                  /* the CIAs, and the overlay, as reset left them */
+	return size;
+}
+
 /* ---- Musashi's memory interface ---------------------------------------------- */
 
 unsigned int m68k_read_memory_8(unsigned int a)
 {
 	a &= 0xFFFFFF;
 	if (is_rom(a)) { n_rom++; return rom[a & 0x7FFFF]; }
+	if (is_fast(a)) { n_fast++; return fast[a - fast_base]; }
+	if (is_ac(a)) return ac_read(a);
+	if (a < 0x200000) a &= chip_mask;
 	return bus_rd8(a);
 }
 
@@ -163,6 +266,9 @@ unsigned int m68k_read_memory_16(unsigned int a)
 {
 	a &= 0xFFFFFF;
 	if (is_rom(a)) { n_rom++; return (rom[a & 0x7FFFF] << 8) | rom[(a + 1) & 0x7FFFF]; }
+	if (is_fast(a)) { n_fast++; return (fast[a - fast_base] << 8) | fast[a - fast_base + 1]; }
+	if (is_ac(a)) return (ac_read(a) << 8) | ac_read(a + 1);
+	if (a < 0x200000) a &= chip_mask;
 	return bus_rd16(a);
 }
 
@@ -178,7 +284,10 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
 {
 	a &= 0xFFFFFF;
 	if (a >= 0xF80000) return;                    /* ROM */
+	if (is_fast(a)) { n_fast++; fast[a - fast_base] = (uint8_t)v; return; }
+	if (is_ac(a)) { ac_write(a, (uint8_t)v); return; }
 	cia_track(a, (uint8_t)v);
+	if (a < 0x200000) a &= chip_mask;
 	bus_wr8(a, (uint8_t)v);
 }
 
@@ -186,7 +295,10 @@ void m68k_write_memory_16(unsigned int a, unsigned int v)
 {
 	a &= 0xFFFFFF;
 	if (a >= 0xF80000) return;
+	if (is_fast(a)) { n_fast++; fast[a - fast_base] = (uint8_t)(v >> 8); fast[a - fast_base + 1] = (uint8_t)v; return; }
+	if (is_ac(a)) { ac_write(a, (uint8_t)(v >> 8)); return; }   /* the even byte */
 	cia_track(a + 1, (uint8_t)v);                 /* a word write: CIA-A on the low byte */
+	if (a < 0x200000) a &= chip_mask;
 	bus_wr16(a, (uint16_t)v);
 }
 
@@ -210,6 +322,7 @@ static void armcpu_reset_instr(void)
 	cia_pra = cia_ddra = 0;
 	ovl = 1;
 	bank_cur = 0xFFFFFFFFu;
+	fast_reset();
 }
 
 /* ---- the run -------------------------------------------------------------------- */
@@ -245,10 +358,10 @@ int main(int argc, char **argv)
 	const char *rom_path = "/media/fat/games/Amiga500HD/1.3-scsi-patched.rom";
 	const char *dev = NULL;
 	double seconds = 20;
-	int cpu = 0, quiet = 0, force = 0, warm = 0, opt;
+	int cpu = 0, quiet = 0, force = 0, warm = 0, fast_mb = 8, opt;
 	unsigned mode = 6;
 
-	while ((opt = getopt(argc, argv, "r:t:m:c:d:qfwDh")) != -1) {
+	while ((opt = getopt(argc, argv, "r:t:m:c:F:d:qfwDh")) != -1) {
 		switch (opt) {
 		case 'r': rom_path = optarg; break;
 		case 't': seconds = atof(optarg); break;
@@ -259,11 +372,24 @@ int main(int argc, char **argv)
 		case 'f': force = 1; break;
 		case 'D': debug = 1; break;
 		case 'w': warm = 1; break;
+		case 'F': fast_mb = atoi(optarg); break;
 		default:
-			fprintf(stderr, "usage: %s [-r rom] [-t seconds] [-m mode] [-c cpu] [-q] [-d file] [-f]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-r rom] [-t seconds] [-m mode] [-c cpu] [-F MB] [-q] [-d file] [-f] [-w] [-D]\n", argv[0]);
 			return 2;
 		}
 	}
+
+	/* Zorro II sizes: 1, 2, 4 MB are codes 5, 6, 7 and 8 MB is code 0 */
+	switch (fast_mb) {
+	case 0: break;
+	case 1: ac_rom[0] = 0xE5; break;
+	case 2: ac_rom[0] = 0xE6; break;
+	case 4: ac_rom[0] = 0xE7; break;
+	case 8: ac_rom[0] = 0xE0; break;
+	default: fprintf(stderr, "-F: 0, 1, 2, 4 or 8 MB\n"); return 2;
+	}
+	fast_size = (uint32_t)fast_mb << 20;
+	if (fast_size && !(fast = calloc(1, fast_size))) { fprintf(stderr, "out of memory for fast RAM\n"); return 1; }
 
 	FILE *rf = fopen(rom_path, "rb");
 	if (!rf) { perror(rom_path); return 1; }
@@ -311,16 +437,24 @@ int main(int argc, char **argv)
 	m68k_set_cpu_type(M68K_CPU_TYPE_68000);
 	m68k_set_reset_instr_callback(armcpu_reset_instr);
 	armcpu_reset_instr();             /* a clean machine: chipset and CIAs reset, overlay on */
-	if (!warm) { bus_wr16(4, 0); bus_wr16(6, 0); }   /* no ExecBase: a cold start */
+	uint32_t chip_size = chip_probe();
+	chip_mask = chip_size - 1;
+	/* a cold start: no ExecBase at $4, and no 'HELP' at $0 with a crash at
+	 * $100 -- exec shows that as the last alert before the reset */
+	if (!warm) {
+		for (uint32_t a = 0; a < 8; a += 2) bus_wr16(a, 0);
+		for (uint32_t a = 0x100; a < 0x108; a += 2) bus_wr16(a, 0);
+	}
 	m68k_pulse_reset();
 
 	printf("armcpu: Musashi 68000 on cpu %d, %s, mode %u (%s%s), ROM %s\n", cpu,
 	       dev ? dev : "the bridge", mode, mode & 2 ? "FAST" : "68000-timed reads",
 	       mode & 4 ? ", FASTW" : ", 68000-timed writes", rom_path);
-	printf("  reset: SSP %08x PC %08x\n", m68k_get_reg(NULL, M68K_REG_SP), m68k_get_reg(NULL, M68K_REG_PC));
+	printf("  reset: SSP %08x PC %08x; chip RAM %u KB (measured on the chip bus); fast RAM %d MB in ARM memory\n",
+	       m68k_get_reg(NULL, M68K_REG_SP), m68k_get_reg(NULL, M68K_REG_PC), chip_size >> 10, fast_mb);
 
 	int64_t t_start = now_ns(), t_report = t_start;
-	uint64_t cycles = 0, cyc_report = 0, rd0 = 0, wr0 = 0, rom0 = 0;
+	uint64_t cycles = 0, cyc_report = 0, rd0 = 0, wr0 = 0, rom0 = 0, fast0 = 0;
 	int dumped = 0;
 	while (!stop) {
 		/* Paula's level, handed over every slice: the Amiga's interrupts are
@@ -334,8 +468,8 @@ int main(int argc, char **argv)
 		if (debug) {
 			uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC) & 0xFFFFFF;
 			uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7) & 0xFFFFFF;
-			if ((ovl && pc < 0x80000) ||
-			    sp < 0x400 || (sp > 0x200000 && sp < 0xC00000) || sp > 0xD80000) { dumped = 1; break; }
+			if ((ovl && pc < 0x80000) || sp < 0x400 ||
+			    (sp > 0x200000 && sp < 0xC00000 && !is_fast(sp - 1)) || sp > 0xD80000) { dumped = 1; break; }
 		}
 
 		int64_t t = now_ns();
@@ -343,12 +477,12 @@ int main(int argc, char **argv)
 		if (t - t_report >= 1000000000LL) {
 			double dt = (t - t_report) / 1e9;
 			if (!quiet)
-				printf("  %5.1f s: %6.2f MHz of 68000, bus %7.0f reads/s %7.0f writes/s, ROM %8.0f/s, PC %06x SR %04x IPL %d\n",
+				printf("  %5.1f s: %6.2f MHz of 68000, bus %7.0f reads/s %7.0f writes/s, ROM %8.0f/s, fast %8.0f/s, PC %06x SR %04x IPL %d\n",
 				       (t - t_start) / 1e9, (cycles - cyc_report) / dt / 1e6,
-				       (n_bus_rd - rd0) / dt, (n_bus_wr - wr0) / dt, (n_rom - rom0) / dt,
+				       (n_bus_rd - rd0) / dt, (n_bus_wr - wr0) / dt, (n_rom - rom0) / dt, (n_fast - fast0) / dt,
 				       m68k_get_reg(NULL, M68K_REG_PC), m68k_get_reg(NULL, M68K_REG_SR), level);
 			fflush(stdout);
-			t_report = t; cyc_report = cycles; rd0 = n_bus_rd; wr0 = n_bus_wr; rom0 = n_rom;
+			t_report = t; cyc_report = cycles; rd0 = n_bus_rd; wr0 = n_bus_wr; rom0 = n_rom; fast0 = n_fast;
 		}
 	}
 	if (debug) {
@@ -366,10 +500,25 @@ int main(int argc, char **argv)
 		printf("debug: last %u of %u events:\n", n_events < 64 ? n_events : 64, n_events);
 		for (unsigned i = n_events > 64 ? n_events - 64 : 0; i < n_events; i++) printf("  %s\n", events[i % 64]);
 	}
+	/* exec's memory list, as the 68000 sees it: ExecBase at $4, MemList at
+	 * +$142, each MemHeader with its attributes, bounds and free bytes */
+	{
+		uint32_t eb = m68k_read_memory_32(4), node = eb ? m68k_read_memory_32(eb + 0x142) : 0;
+		printf("  exec memory list (ExecBase %06x):\n", eb);
+		for (int i = 0; i < 8 && node && m68k_read_memory_32(node); i++) {
+			printf("    %06x attr %04x pri %4d  %06x-%06x  free %7u\n", node,
+			       m68k_read_memory_16(node + 0x0E), (int8_t)m68k_read_memory_8(node + 0x09),
+			       m68k_read_memory_32(node + 0x14), m68k_read_memory_32(node + 0x18),
+			       m68k_read_memory_32(node + 0x1C));
+			node = m68k_read_memory_32(node);
+		}
+	}
 	double total = (now_ns() - t_start) / 1e9;
-	printf("  ran %.1f s: %llu 68000 cycles (%.2f MHz), %llu bus reads, %llu bus writes, %llu ROM reads; PC %06x\n",
+	printf("  ran %.1f s: %llu 68000 cycles (%.2f MHz), %llu bus reads, %llu bus writes, %llu ROM reads, "
+	       "%llu fast RAM accesses (board last at %06x); PC %06x\n",
 	       total, (unsigned long long)cycles, cycles / total / 1e6, (unsigned long long)n_bus_rd,
-	       (unsigned long long)n_bus_wr, (unsigned long long)n_rom, m68k_get_reg(NULL, M68K_REG_PC));
+	       (unsigned long long)n_bus_wr, (unsigned long long)n_rom, (unsigned long long)n_fast,
+	       fast_last, m68k_get_reg(NULL, M68K_REG_PC));
 
 	ctl[1] = 0;
 	printf("  bus given back: the 68000 restarts from its reset vector\n");
