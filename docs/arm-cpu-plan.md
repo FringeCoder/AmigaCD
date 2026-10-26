@@ -465,6 +465,27 @@ same disk. The armcpu log shows the stages: Kickstart clearing memory in the
 first second, disk loads in bursts between idle-loop waits, Workbench
 loading, then idle.
 
+**Fast RAM in ARM memory, 2026-10-26** (AmigaCD 69bc8dc9): armcpu presents
+an emulated Zorro II memory board, 8 MB by default, first in the autoconfig
+chain; Kickstart configures it at $200000 and it joins exec's memory list,
+its memory never touching the bus. Two fixes came with it:
+
+- **Chip RAM size.** FAST and FASTW reach chip RAM through the SDRAM CPU
+  port, which answers all of $000000-$1FFFFF, so Kickstart sized chip RAM at
+  2 MB where the chip bus has 512 KB on the A500 profile (screens could land
+  where Agnus cannot fetch). armcpu measures the size over the chip bus at
+  start, with the overlay off as Kickstart has it, and wraps chip addresses
+  to it: Kickstart now finds 512 KB, as on the fx68k.
+- **A stale crash record.** A crashed run leaves 'HELP' at $0 and its alert
+  at $100, which exec shows after the next reset; the cold start now clears
+  them along with ExecBase.
+
+Workbench 1.3 boots with the memory list chip 512 KB (pri -10), slow RAM
+512 KB at $C00000 (pri 0) and the ARM board 8 MB at $200000 (pri 0). With
+equal priority Kickstart 1.3 allocates from slow RAM first, as a real A500
+with both does, so the board is barely used during the boot; a
+CPU-bound benchmark that runs from it is the next measurement.
+
 Where it stands against the goal: the ARM is the CPU of an otherwise
 unchanged machine, the other CPU choices are untouched, and Kickstart and
 ROM code run at 2-3 times a 7 MHz 68000. Chip-bound code runs at about a
