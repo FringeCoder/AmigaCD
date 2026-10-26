@@ -19,6 +19,16 @@
  *         (default 6, both)
  *     -c  pin to this ARM core (default 0; Main_MiSTer runs on 1)
  *     -F  fast RAM in ARM memory, in MB: 0, 1, 2, 4 or 8 (default 8)
+ *     -P  fast RAM first: the board's memory goes into exec's list at
+ *         priority 5 instead of 0, ahead of slow RAM -- what Workbench 1.3's
+ *         FastMemFirst does on a real A500 -- so programs load into ARM
+ *         memory (the MemHeader's ln_Pri is set as Kickstart writes it)
+ *     -M  a scripted mouse click, "t:x:y" (repeatable): at t seconds the
+ *         pointer is pushed into the top-left corner, moved x, y counts from
+ *         there in small steps, and the left button clicked -- for programs
+ *         that have to be clicked (SysInfo's SPEED) with no mouse attached.
+ *         It works on what the CPU reads, JOY0DAT's counters and CIA-A PRA's
+ *         fire bit, so only a 68000 run by armcpu sees it
  *     -q  no progress lines
  *     -d  host test: map this file as the bridge (MAGIC and the 68000 bit
  *         already in it); test_armcpu.py checks what lands in it
@@ -167,6 +177,14 @@ static uint32_t fast_base = 0xFFFFFFFFu; /* where autoconfig put it */
 static int      ac_mine;                 /* the board is the one at $E80000 */
 static uint8_t  ac_lo;                   /* the nibble written to $4A */
 static uint64_t n_fast;
+static int      fast_first;              /* -P */
+
+/* -P: the MemHeader expansion.library builds at the board's base carries
+ * ln_Pri at +9; give it 5 as it is written, before it is enqueued */
+static inline uint8_t fast_pri(uint32_t off, uint8_t v)
+{
+	return (fast_first && off == 9) ? 5 : v;
+}
 
 /* er_Type (Zorro II, memory into the free list, size), er_Product, er_Flags
  * (prefers the 8 MB space), reserved, manufacturer $07DB (the "hackers" ID),
@@ -222,6 +240,58 @@ static inline int is_ac(uint32_t a)
 	return ac_mine && (a & 0xFF0000) == 0xE80000;
 }
 
+/* ---- a scripted mouse -------------------------------------------------------------
+ * Intuition reads the mouse as JOY0DAT's two 8-bit counters (Y high, X low)
+ * once a frame and moves the pointer by the difference; the left button is
+ * CIA-A PRA bit 6, low when pressed. A click is offered as changes to what
+ * those reads return: first a run of large negative steps, which drives the
+ * pointer into the top-left corner however acceleration scales them, then
+ * steps of 2 counts (under the acceleration threshold) to x, y, then the
+ * button held for a few frames. */
+#define MAX_CLICKS 8
+static struct { double t; int x, y; } clicks[MAX_CLICKS];
+static int n_clicks, click_i;
+static int64_t t_run0;
+static int ms_phase;            /* 0 idle, 1 into the corner, 2 to the target, 3 button down */
+static int ms_left, ms_tx, ms_ty;
+static uint8_t ms_ox, ms_oy;    /* what is added to the counters */
+
+static void mouse_step(void)
+{
+	if (ms_phase == 0 && click_i < n_clicks &&
+	    (now_ns() - t_run0) / 1e9 >= clicks[click_i].t) {
+		ms_phase = 1; ms_left = 40;
+		ms_tx = clicks[click_i].x; ms_ty = clicks[click_i].y;
+		event("mouse: click %d (%d)", click_i, 0);
+	}
+	switch (ms_phase) {
+	case 1:
+		ms_ox -= 60; ms_oy -= 60;
+		if (--ms_left == 0) ms_phase = 2;
+		break;
+	case 2: {
+		int dx = ms_tx > 2 ? 2 : ms_tx, dy = ms_ty > 2 ? 2 : ms_ty;
+		ms_ox += dx; ms_oy += dy; ms_tx -= dx; ms_ty -= dy;
+		if (!ms_tx && !ms_ty) { ms_phase = 3; ms_left = 10; }
+		break;
+	}
+	case 3:
+		if (--ms_left == 0) { ms_phase = 0; click_i++; }
+		break;
+	}
+}
+
+static inline uint16_t mouse_joy0(uint16_t v)
+{
+	mouse_step();
+	return (uint16_t)((((v >> 8) + ms_oy) & 0xFF) << 8 | ((v + ms_ox) & 0xFF));
+}
+
+static inline uint8_t mouse_pra(uint8_t v)
+{
+	return ms_phase == 3 ? (uint8_t)(v & ~0x40) : v;
+}
+
 /* ---- chip RAM size ---------------------------------------------------------------
  * FAST and FASTW reach chip RAM through the SDRAM CPU port, which answers all
  * of $000000-$1FFFFF; the chip bus wraps at the machine's real chip size, as
@@ -259,6 +329,10 @@ unsigned int m68k_read_memory_8(unsigned int a)
 	if (is_fast(a)) { n_fast++; return fast[a - fast_base]; }
 	if (is_ac(a)) return ac_read(a);
 	if (a < 0x200000) a &= chip_mask;
+	if (n_clicks) {
+		if (a == 0xBFE001) return mouse_pra(bus_rd8(a));
+		if ((a & ~1u) == 0xDFF00A) { uint16_t j = mouse_joy0(bus_rd16(0xDFF00A)); return (a & 1) ? (j & 0xFF) : (j >> 8); }
+	}
 	return bus_rd8(a);
 }
 
@@ -269,6 +343,7 @@ unsigned int m68k_read_memory_16(unsigned int a)
 	if (is_fast(a)) { n_fast++; return (fast[a - fast_base] << 8) | fast[a - fast_base + 1]; }
 	if (is_ac(a)) return (ac_read(a) << 8) | ac_read(a + 1);
 	if (a < 0x200000) a &= chip_mask;
+	if (n_clicks && a == 0xDFF00A) return mouse_joy0(bus_rd16(a));
 	return bus_rd16(a);
 }
 
@@ -284,7 +359,7 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
 {
 	a &= 0xFFFFFF;
 	if (a >= 0xF80000) return;                    /* ROM */
-	if (is_fast(a)) { n_fast++; fast[a - fast_base] = (uint8_t)v; return; }
+	if (is_fast(a)) { n_fast++; fast[a - fast_base] = fast_pri(a - fast_base, (uint8_t)v); return; }
 	if (is_ac(a)) { ac_write(a, (uint8_t)v); return; }
 	cia_track(a, (uint8_t)v);
 	if (a < 0x200000) a &= chip_mask;
@@ -295,7 +370,12 @@ void m68k_write_memory_16(unsigned int a, unsigned int v)
 {
 	a &= 0xFFFFFF;
 	if (a >= 0xF80000) return;
-	if (is_fast(a)) { n_fast++; fast[a - fast_base] = (uint8_t)(v >> 8); fast[a - fast_base + 1] = (uint8_t)v; return; }
+	if (is_fast(a)) {
+		n_fast++;
+		fast[a - fast_base] = fast_pri(a - fast_base, (uint8_t)(v >> 8));
+		fast[a - fast_base + 1] = fast_pri(a - fast_base + 1, (uint8_t)v);
+		return;
+	}
 	if (is_ac(a)) { ac_write(a, (uint8_t)(v >> 8)); return; }   /* the even byte */
 	cia_track(a + 1, (uint8_t)v);                 /* a word write: CIA-A on the low byte */
 	if (a < 0x200000) a &= chip_mask;
@@ -361,7 +441,7 @@ int main(int argc, char **argv)
 	int cpu = 0, quiet = 0, force = 0, warm = 0, fast_mb = 8, opt;
 	unsigned mode = 6;
 
-	while ((opt = getopt(argc, argv, "r:t:m:c:F:d:qfwDh")) != -1) {
+	while ((opt = getopt(argc, argv, "r:t:m:c:F:M:Pd:qfwDh")) != -1) {
 		switch (opt) {
 		case 'r': rom_path = optarg; break;
 		case 't': seconds = atof(optarg); break;
@@ -373,8 +453,15 @@ int main(int argc, char **argv)
 		case 'D': debug = 1; break;
 		case 'w': warm = 1; break;
 		case 'F': fast_mb = atoi(optarg); break;
+		case 'P': fast_first = 1; break;
+		case 'M':
+			if (n_clicks < MAX_CLICKS &&
+			    sscanf(optarg, "%lf:%d:%d", &clicks[n_clicks].t, &clicks[n_clicks].x, &clicks[n_clicks].y) == 3)
+				n_clicks++;
+			else { fprintf(stderr, "-M t:x:y, at most %d\n", MAX_CLICKS); return 2; }
+			break;
 		default:
-			fprintf(stderr, "usage: %s [-r rom] [-t seconds] [-m mode] [-c cpu] [-F MB] [-q] [-d file] [-f] [-w] [-D]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-r rom] [-t seconds] [-m mode] [-c cpu] [-F MB] [-P] [-M t:x:y] [-q] [-d file] [-f] [-w] [-D]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -454,6 +541,7 @@ int main(int argc, char **argv)
 	       m68k_get_reg(NULL, M68K_REG_SP), m68k_get_reg(NULL, M68K_REG_PC), chip_size >> 10, fast_mb);
 
 	int64_t t_start = now_ns(), t_report = t_start;
+	t_run0 = t_start;
 	uint64_t cycles = 0, cyc_report = 0, rd0 = 0, wr0 = 0, rom0 = 0, fast0 = 0;
 	int dumped = 0;
 	while (!stop) {
@@ -481,6 +569,24 @@ int main(int argc, char **argv)
 				       (t - t_start) / 1e9, (cycles - cyc_report) / dt / 1e6,
 				       (n_bus_rd - rd0) / dt, (n_bus_wr - wr0) / dt, (n_rom - rom0) / dt, (n_fast - fast0) / dt,
 				       m68k_get_reg(NULL, M68K_REG_PC), m68k_get_reg(NULL, M68K_REG_SR), level);
+			if (n_clicks) {
+				/* where Intuition has the pointer: IntuitionBase MouseY/MouseX
+				 * at +68/+70, found by name in ExecBase's LibList (+$17A) */
+				uint32_t eb = m68k_read_memory_32(4), lib = eb ? m68k_read_memory_32(eb + 0x17A) : 0;
+				for (int i = 0; i < 40 && lib && m68k_read_memory_32(lib); i++) {
+					uint32_t nm = m68k_read_memory_32(lib + 10);
+					char name[20];
+					for (int k = 0; k < 19; k++) name[k] = (char)m68k_read_memory_8(nm + k);
+					name[19] = 0;
+					if (!strncmp(name, "intuition.library", 17)) {
+						printf("  %5.1f s: pointer at %d,%d (click %d of %d, phase %d)\n", (t - t_start) / 1e9,
+						       (int16_t)m68k_read_memory_16(lib + 70), (int16_t)m68k_read_memory_16(lib + 68),
+						       click_i, n_clicks, ms_phase);
+						break;
+					}
+					lib = m68k_read_memory_32(lib);
+				}
+			}
 			fflush(stdout);
 			t_report = t; cyc_report = cycles; rd0 = n_bus_rd; wr0 = n_bus_wr; rom0 = n_rom; fast0 = n_fast;
 		}
