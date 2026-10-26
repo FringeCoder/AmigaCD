@@ -486,6 +486,26 @@ equal priority Kickstart 1.3 allocates from slow RAM first, as a real A500
 with both does, so the board is barely used during the boot; a
 CPU-bound benchmark that runs from it is the next measurement.
 
+**Benchmark, 2026-10-26:** SysInfo 4.4 (the author's ADF, linked from
+Aminet util/moni/SysInfo) boots on Kickstart 1.3 on the ARM's 68000. Its
+SPEED test needs a click, which armcpu now scripts (`-M t:x:y`) by changing
+what the CPU reads from JOY0DAT and CIA-A PRA. `-P` puts the ARM board
+ahead of slow RAM in exec's list, as Workbench 1.3's FastMemFirst does.
+
+| SysInfo SPEED | program in slow RAM (over the bus) | program in ARM fast RAM (`-P`) |
+|---|---|---|
+| Dhrystones | 388 | 3665 |
+| MIPS | 0.40 | 3.82 |
+| vs A600 (68000, 7 MHz) | 0.73x | 6.92x |
+| vs A1200 (68EC020, 14 MHz) | 0.31x | 3.01x |
+| vs A3000 (68030, 25 MHz) | 0.08x | 0.72x |
+| chip speed vs A600 | 1.16x | 1.20x |
+
+Code that lives in ARM memory runs at about seven times an A600 under
+Musashi; code in chip or slow RAM pays the bus for every fetch and runs
+below a real 68000. That is the case for keeping programs in fast RAM, and
+for a JIT later rather than more bus speed.
+
 Where it stands against the goal: the ARM is the CPU of an otherwise
 unchanged machine, the other CPU choices are untouched, and Kickstart and
 ROM code run at 2-3 times a 7 MHz 68000. Chip-bound code runs at about a
