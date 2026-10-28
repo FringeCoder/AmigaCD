@@ -264,9 +264,9 @@ typedef struct
 #define AMIGACD_CD_DELAY_LEGACY2 14
 // CD sector delivery rate.
 //
-// mmcd_fast is the floor the core has always shipped with (see
-// AKIKO_SECTOR_PERIOD_US in akiko_pace.h): roughly 588 sectors/s, about 8x,
-// and not a rate any real machine produces. It exists because sectors
+// mmcd_fast is the floor the core has always shipped with: 8x, 600 sectors/s
+// since the core took the pacing over (AKIKO_RATE_8X in akiko_pace.h; 588/s
+// when the Main slept for it), and not a rate any real machine produces. It exists because sectors
 // delivered faster than ~0.4 ms apart would not boot with Z2 fast RAM on.
 //
 // mmcd_2x is what a CD32 actually is -- a 2x unit, 150 sectors/s -- which is

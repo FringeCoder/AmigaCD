@@ -8,6 +8,8 @@
 
 void cdtv_cd_init(void);
 void cdtv_cd_poll(void);
+// A save state was restored: drop a READ or SEEK still in flight.
+void cdtv_cd_state_restored(void);
 
 // Called from ide_cdrom.cpp::cdrom_parse on every CD mount/unmount. Pass the
 // CHD path on mount, empty string on unmount. The driver uses it to decide

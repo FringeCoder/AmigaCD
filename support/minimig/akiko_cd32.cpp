@@ -172,12 +172,17 @@ static void akiko_diag(const char *fmt, ...);
 // faster than once per N ms. Protects against pathological save loops.
 #define AKIKO_NVRAM_MIN_SAVE_INTERVAL_MS 60000
 
+// Where the core reads the sector rate (akiko.v cd_rate). Not upstream's
+// [54:53] -- the save state's restore request and slot on this core -- and not
+// [58:56], which hold the A2065 mode (minimig_a2065.h).
+#define AKIKO_RATE_STATUS "[62:61]"
+
 // PBX sector size (raw Mode-1/Mode-2 frame).
 #define AKIKO_SECTOR_BYTES 2352
 
 // Ext-bus block write shaping: how many words go out per burst, and the gap
-// between bursts. Transport shaping only -- the sector delivery RATE LIMIT is
-// AKIKO_SECTOR_PERIOD_US in akiko_pace.h, not these.
+// between bursts. Transport shaping only -- the sector delivery RATE is the
+// core's (akiko.v, set by akiko_send_rate()), not these.
 //
 // That distinction is new, and it is the point of this pair of comments. These
 // two constants were the rate limit until 2026-09-14, by accident: usleep(10)
@@ -913,7 +918,7 @@ static uint16_t akiko_read_status(void)
 
 // Forward decl: cmd_subq (early in dispatch table) reads the FPGA sector
 // counter via the helper defined later in the M4 PBX block.
-static uint8_t akiko_read_sec_counter(void);
+static uint16_t akiko_read_sec_counter(void);
 
 // Active-poll barrier: read status repeatedly until the masked bit matches
 // `want_set`, or `max_iters` reached. Each iteration is a SPI status read
@@ -1855,17 +1860,21 @@ static void cmd_bad(const uint8_t *cmd, uint8_t err_code)
 // M4 PBX sector channel
 // -----------------------------------------------------------------------------
 
-// Read the FPGA's current cdrom_sector_counter (1-byte read on the sec
+// Read the FPGA's current cdrom_sector_counter (one word on the sec
 // sub-channel, 0xF500). The bridge presents hps_sec_status on every read
-// strobe; one word is enough.
-static uint8_t akiko_read_sec_counter(void)
+// strobe; one word is enough. All 16 bits, as upstream has it since
+// Main_MiSTer edfe8d7: at 8 bits the counter wrapped after 256 sectors in one
+// ENABLE period and base+counter served the start of the read again. A core
+// with the 8-bit counter (ours until it takes Minimig-AGA 3192739) gives a
+// zero high byte -- fastchip.v pads it -- so it reads exactly as before.
+static uint16_t akiko_read_sec_counter(void)
 {
 	EnableIO();
 	spi8(UIO_DMA_READ);
 	spi32_w(AKIKO_SECTOR_ADDR);
 	uint16_t w = spi_w(0);
 	DisableIO();
-	return (uint8_t)(w & 0xff);
+	return w;
 }
 
 // -----------------------------------------------------------------------------
@@ -2241,52 +2250,37 @@ int akiko_cd32_nvram_clear(void)
 	return 1;
 }
 
+// The sector rate, for the core to pace PBX ships at (akiko.v, status[62:61]).
+//
+// Compared against what cur_status holds rather than a copy of our own, so a
+// status reset anywhere else is put right on the next push instead of leaving
+// the core at 8x. user_io_status_set() resends the whole status word, so it is
+// called only on a change.
+//
+// Read per push, as the sleep it replaces read its period: changing the OSD
+// setting then has an effect on the disc already in the drive, and a READ that
+// commands the other speed is paced at it from its first sector.
+static_assert(mmcd_fast == 0 && mmcd_2x == 1 && mmcd_drive == 2,
+              "akiko_cd_rate_bits() takes mm_cdSpeed by value");
+static void akiko_send_rate(void)
+{
+	const uint32_t rate = (uint32_t)akiko_cd_rate_bits(minimig_config.cd_speed,
+	                                                   cdrom_speed);
+	if (user_io_status_get(AKIKO_RATE_STATUS) == rate) return;
+	user_io_status_set(AKIKO_RATE_STATUS, rate);
+	akiko_diag("[akiko] sector rate code %u (cd_speed=%u, commanded %dx)",
+	           rate, (unsigned)minimig_config.cd_speed, cdrom_speed);
+}
+
 // Push one sector to the akiko sector_buffer as 1176 16-bit words over the
 // ext bus. The old hps_io disk-slot path (UIO_SECTOR_RD on a dedicated VDNUM
 // slot, ~0.95 ms/sector) is gone: akiko.v takes words now, and the word-wide
 // push is both faster and does not burn a virtual disk slot.
 static void akiko_push_sector(const uint8_t *buf)
 {
-	// Hold each sector to AKIKO_SECTOR_PERIOD_US from the start of the last
-	// one. Measured from start to start rather than slept after the write, so
-	// the time a CHD miss or a physical-drive seek already spent counts towards
-	// the interval instead of being added to it -- a slow sector is never made
-	// slower by this.
-	static int64_t prev_us = -1;
-
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	int64_t now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
-
-	// Read per push rather than latched at mount: changing the setting then has
-	// an effect on the disc already in the drive, which is how you would want
-	// to compare the two without reloading a game to do it.
-	// mmcd_drive runs at the rate the guest ASKED for. Every PLAY/READ carries
-	// one in bit 6 of cmd[8]; cmd_multi has always parsed it into cdrom_speed and
-	// then ignored it, so a CD32 commanding 2x was served at about 8x.
-	int64_t period_us;
-	switch (minimig_config.cd_speed) {
-	case mmcd_2x:    period_us = AKIKO_SECTOR_PERIOD_2X_US; break;
-	case mmcd_drive: period_us = (cdrom_speed >= 2) ? AKIKO_SECTOR_PERIOD_2X_US
-	                                                : AKIKO_SECTOR_PERIOD_1X_US; break;
-	default:         period_us = AKIKO_SECTOR_PERIOD_US; break;
-	}
-
-	// Only the streaming interval is slept here. A SEEK is not: it is waited out
-	// by declining the request until the head arrives, in akiko_handle_sec_req.
-	//
-	// This is the whole difference between a model and an outage. usleep() here
-	// blocks the binary's single main loop, which also services the bridge and
-	// the OSD, and a sector interval is 6.7 ms at 2x -- survivable. A modelled
-	// seek is up to half a second, and sleeping that cost the test machine its
-	// network the first time this was run on hardware.
-	const int64_t wait_us = akiko_pace_delay_us(prev_us, now_us, period_us);
-	if (wait_us > 0) {
-		usleep((useconds_t)wait_us);
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		now_us = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
-	}
-	prev_us = now_us;
+	// No sleep here any more: the core holds each ship to the rate, so the
+	// sector goes out the moment it is asked for. See akiko_pace.h.
+	akiko_send_rate();
 
 	akiko_ext_block_write(AKIKO_SECTOR_ADDR, buf, AKIKO_SECTOR_BYTES);
 }
@@ -2924,7 +2918,7 @@ static bool akiko_handle_sec_req(void)
 	last_sec_req_ms = now_ms;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts0);
-	uint8_t counter = akiko_read_sec_counter();
+	uint16_t counter = akiko_read_sec_counter();
 	clock_gettime(CLOCK_MONOTONIC, &ts1);
 
 	uint8_t buf[AKIKO_SECTOR_BYTES];
@@ -3460,7 +3454,7 @@ void akiko_cd32_poll(void)
 		uint32_t idle = (uint32_t)GetTimer(0) - cd_sec_last_ms;
 		if (idle >= 1500) {
 			cd_stall_reported = true;
-			uint8_t ctr = akiko_read_sec_counter();
+			uint16_t ctr = akiko_read_sec_counter();
 			akiko_diag("[akiko] STALL %u ms: base=%d pushed=%u fpga_ctr=%u%s",
 			           idle, cd_data_lba_base, cd_sec_pushed, ctr,
 			           (ctr > cd_sec_pushed)

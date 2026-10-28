@@ -19,7 +19,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `8328d9f` "Minimig: CD32 with up to 99 tracks, WAV tracks in cue (#1386)" -- **taken, and the Akiko TOC bound follows it; SGI Indy not taken; see "Sync 2026-10-26"** | 2026-10-26 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `bfb5cd0` "Minimig: CD read speed for the CD32 and CDTV drive" -- **seven of thirteen taken (two adapted); the CD read speed setting NOT taken, its status bits are our save state's; see "Sync 2026-10-28"** | 2026-10-28 |
+| ^ previous merge base, superseded 2026-10-28 | | `8328d9f` "Minimig: CD32 with up to 99 tracks, WAV tracks in cue (#1386)" -- taken, and the Akiko TOC bound follows it; SGI Indy not taken; see "Sync 2026-10-26" | 2026-10-26 |
 | ^ previous merge base, superseded 2026-10-26 | | `e698ccd` "Minimig: let the Akiko TOC carry all 99 tracks (#1384)" -- two of four taken (the 68EC030 adapted), two already here; see "Sync 2026-10-24" | 2026-10-24 |
 | ^ previous merge base, superseded 2026-10-24 | | `0c98d24` "Minimig: draw FDD Turbo at its own line in System (#1379)" -- upstream rewrote its history; content-merged from `d3b8537`, see "Sync 2026-10-22" | 2026-10-22 |
 | ^ previous merge base, superseded 2026-10-22 (**no longer on upstream's master**) | | `d3b8537` "Adds PCFX system support (#1365)" -- three of four taken (one adapted), see "Sync 2026-10-17" | 2026-10-17 |
@@ -31,7 +32,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `ba5adba` "Improve the timings (SDRAM pins, CPU data path) - #289" -- **all but `cf24493` taken, see "Sync 2026-10-26"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-1026` | 2026-10-26 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `06db70b` "CD read speed; fix CPU (Pierre le Chef) and Denise (Alien 3)" -- **all taken, three adapted (`ce1f386` as the core half of our own CD rate), see "Sync 2026-10-28"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-28 |
+| ^ previous pin, superseded 2026-10-28 | | `ba5adba` "Improve the timings (SDRAM pins, CPU data path) - #289" -- **all but `cf24493` taken, see "Sync 2026-10-26"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-1026` | 2026-10-26 |
 | ^ previous pin, superseded 2026-10-26 | | `b988bd09` "Fix Denise (black stripes on Flink AGA), fix 68EC020 freeze" -- all but `4ab0d5f` taken, see "Sync 2026-10-24" -- FringeCoder/AmigaCD_MiSTer#62, merged into `cd32-native-mvp` as `b8079fce`; `430209e` and the real-floppy line still out | 2026-10-24 |
 | ^ previous pin, superseded 2026-10-24 (**reverted upstream by #284**) | | `5b93485b` "Fix RTG with the 68030 MMU enabled (#281)" -- upstream rewrote its history; content-merged from `0bf2ab1`, see "Sync 2026-10-22" | 2026-10-22 |
 | ^ previous pin, superseded 2026-10-22 (**no longer on upstream's MiSTer**) | | `0bf2ab1` "68020/68030 fixes and the 68030 MMU bus error - #268" -- all ten commits since `26eb46a` taken, see "Sync 2026-10-17" -- FringeCoder/AmigaCD_MiSTer#58 | 2026-10-17 |
@@ -106,6 +108,41 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-28: the CD fixes, the core with them, and a status-bit collision
+
+Main_MiSTer `8328d9f..bfb5cd0`, cherry-picked (`-x`) onto
+`claude/resync-upstream-70pn9b`.
+
+| Upstream | Change | Here |
+|---|---|---|
+| `89f4313` (#1387) | CD track boundaries: a track's end LBA is exclusive, and a read outside every track returns zeros instead of dereferencing NULL | Taken, clean. `get_track_from_lba()` is static to `ide_cdrom.cpp`. |
+| `86b40e9` (#1391) | HORI FFB Racing Wheel as a wheel | Taken, clean. |
+| `02fbd26` (#1392) | MRA files mount images the way MGL does (`<file>` only) | Taken; one conflict in `mgl_parse()`, resolved by keeping both lines -- our `xml_path` capture (the `<minimig>` MGL config reads it) and upstream's `mgl_from_mra`. |
+| `52e81c9` (#1394) | Lingering ROM load screen | Taken, clean. |
+| `2bc93a9` (#1395) | Early SPD infoframe | Taken, clean. |
+| `edfe8d7` | CD32: the sector counter read in 16 bits, so a read past 256 sectors in one ENABLE period no longer serves its start again | Taken, **adapted** by hand (`akiko_cd32.cpp` is ours almost throughout): the read and both callers that hold the value. Safe against our core as it is: `fastchip.v:143` pads the bridge's 8-bit output with a zero high byte, so it reads as before until the core takes Minimig-AGA `3192739`. |
+| `1f55555` | CDTV: a data READ stops the CD audio (one pickup, as WinUAE) | Taken, **adapted**: upstream's sits on `a97efe2`'s paced read pump; here the same stop goes where the READ is armed (our own pump since, see the next rows). |
+| `4f2da7a`, `a97efe2`, `0437012` | "CD read speed" 1x/2x/4x for CD32 and CDTV; CD32 seek delay; CDTV read paced from the poll; CDTV seek takes 500 ms | **Taken as a mechanism, not as written.** As written the setting is extcfg bits 21-22 = `status[54:53]`, which on our core are the save state's restore request and slot (`AmigaCD.sv:1947-1953`): changing the speed would have fired a restore. Instead: our own `cd_speed` (Fast / CD32 2x / Drive) stays the setting and the on-disk format; the Main sends the rate the core should pace CD32 sectors at on `status[62:61]` (`akiko_send_rate()`, codes in `akiko_pace.h`: 0 = 8x so an older Main is not slowed down, 1/2/3 = 1x/2x/4x) and no longer sleeps in the main loop; Drive sends what the guest commanded. The CDTV READ is a pump in the poll (from `a97efe2`), at 1x in Drive (the CR-511 is 1x), 2x in CD32 2x, and the old 1 ms gap in Fast; the CDTV SEEK takes 500 ms and raises a status change in Drive mode only (`0437012`). **Decided 2026-10-28 (owner): CDTV stays authentic in Drive mode** -- 1x, about 3x slower to load than the old unpaced loop; Fast is the setting for the old speed. Our CD32 seek model (distance based) stays; upstream's WinUAE tick formula (`4f2da7a`) is not taken. |
+| `a9da97c` (#1389) | Bandai Pippin | **Not taken**: sits on the Mac fast-SCSI work (`6ddadac`, MacPPC7300) this fork never took, like `79787d3`. |
+| `1270309` (#1378) | PC-8801: one disk of a multi-disk D88 | **Not taken**: `support/pc88` is not here. Its `user_io_file_mount()` signature change goes with it. |
+| `bfb5cd0` | Merge of the five Minimig commits above | Nothing of its own. |
+
+**The core sync**, Minimig-AGA `ba5adba..06db70b`, applied three-way
+(FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b`):
+
+| Upstream | Change | Core |
+|---|---|---|
+| `1abd1fa` | Akiko writes the PBX status long last, byte 2 last of all: the Core Design loader (Chuck Rock, Premiere) polls a slot and takes it when byte 2's $8000 mark goes, not on the interrupt | Taken, **adapted** by hand into this fork's PBX engine. And extended: a stale ship (one the next READ overtook, `pbx_ship_invalid`) now writes no status at all, so a polling loader cannot take the previous read's sector from it either -- the same reasoning as the existing rule that it raises no interrupt. `tb_akiko_pbx_dma` gained a write-order check on every slot and a stale-ship status check; both falsified. |
+| `3192739` | The sector counter to the Main in 16 bits | Taken; `akiko.v` by hand. **The save state keeps 8 bits** (`SS_O_SECCNT`): widening it would move every field after it. A state saved past sector 255 of one ENABLE period restores the counter mod 256, as before. Pairs with `edfe8d7` above. Bench check added (the counter past 255 reaches `hps_sec_status`), falsified. |
+| `f1af4fe` | cpu_wrapper: TG68K's skipped CLR/Scc read stays off the chip bus (CLR.W INTREQ set every request; Pierre le Chef) | Taken; conflicts around this fork's save state park and the CDTV bridge gate. `skip_rd` also excludes `cdtv_selack`, as upstream excludes `fastchip_selack`. **Not covered by a bench**: the cpuwrap bench's TG68K stub ties `skipfetch` low. |
+| `c1f14c3` | Denise keeps BPLAM to the last pixel of the window (Alien 3) | Taken, clean. Not covered by a bench. |
+| `ce1f386` | Akiko paces sectors at the CD read speed from `status[54:53]` | **Taken, adapted** (separate commit after the sync): at most one PBX ship starts per period, the period running from each start (upstream's runs free); the rate comes from `status[62:61]`, sent by the Main, not snooped from the READ command into a register the save state does not carry; 382500 clocks at 1x for our 28.6875 MHz clk_sys (upstream's 378334 is for 28.375 MHz). `tb_akiko_pbx_dma` Test J checks the spacing at all four rates; falsified four ways. |
+| `06db70b` | Merge | Nothing of its own. |
+
+The physical-disc fork (`e6e62b2`) and `kblood/Main_MiSTer-cd32-cdtv`
+(`52625a4`) have not moved. Menu_MiSTer is already at upstream `fa83dc1` and
+Template_MiSTer `sys/` at `5dda373`: nothing to take there.
 
 ## Sync 2026-10-26: the 99-track table, and the core's timing work
 
