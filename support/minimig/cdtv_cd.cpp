@@ -40,6 +40,7 @@
 #include "../physical_disc/physical_disc.h" // physical CD-ROM drive media
 #include "cdtv_cd.h"
 #include "minimig_config.h"
+#include "akiko_pace.h"            // cdtv_sector_period_us, CDTV_SEEK_US
 
 // -----------------------------------------------------------------------------
 // Debug
@@ -177,6 +178,31 @@ static uint8_t  cd_audio_status    = 0x15;
 // Last LBA we pumped, preserved across natural-end so SUBQ keeps reporting
 // the right position after the pump tears down.
 static int32_t  cdtv_last_lba      = 0;
+
+// The READ in flight, delivered by cdtv_read_pump() one sector per poll when
+// it is due. It used to be one synchronous loop inside cdtv_dispatch, with a
+// 1 ms usleep per sector: ~4 ms of main loop per sector, a 64-sector read
+// holding input, the OSD and every other bridge for a quarter of a second,
+// and no way to give the drive its real rate. Upstream did the same in
+// Main_MiSTer a97efe2. Commands wait while it runs, as they did behind the
+// loop: cdtv_cd_poll does not drain the command FIFO until it is done.
+static drive_t *cdtv_rd_drv      = NULL;
+static uint32_t cdtv_rd_lba      = 0;
+static uint16_t cdtv_rd_cnt      = 0;    // sectors pushed so far
+static uint16_t cdtv_rd_left     = 0;    // sectors still to push; 0 = idle
+static int64_t  cdtv_rd_start_us = 0;
+static int64_t  cdtv_rd_period_us = 0;
+
+// A SEEK in progress (Drive mode only): commands wait until it is over, and
+// its end raises a status change. 0 = none.
+static int64_t  cdtv_seek_end_us = 0;
+
+static int64_t cdtv_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+}
 
 // Phase-1e: STCH inject retry budget. The cdtv_bridge ilatch is wiped while
 // CPU is held in reset (minimig.v:474 `reset = sys_reset | ~_cpu_reset_in`),
@@ -562,6 +588,65 @@ static bool cdtv_cdda_pump(void)
 }
 
 // MSF (binary M:S:F packed as 0xMMSSFF) → LBA, with 150-frame pre-gap.
+// Deliver the READ in flight: at most one sector a poll, and only when it is
+// due. Due times run from the start of the READ (start + n periods), so a slow
+// sector -- a CHD miss, a physical drive -- is caught up on rather than
+// pushing the rest later.
+static void cdtv_read_pump(void)
+{
+	if (!cdtv_rd_left) return;
+	if (cdtv_rd_cnt && cdtv_now_us() < cdtv_rd_start_us + (int64_t)cdtv_rd_cnt * cdtv_rd_period_us)
+		return;
+
+	const uint32_t lba = cdtv_rd_lba + cdtv_rd_cnt;
+	uint8_t raw[2352];
+	if (cdrom_read_raw_sector(cdtv_rd_drv, lba, raw) != 0) {
+		cdtv_dbg("READ DATA chd_read failed at lba=%u", lba);
+		cdtv_rd_left = 0;
+		cd_error     = 1;
+		cd_finished  = 1;
+		return;
+	}
+
+	const uint8_t *src;
+	uint16_t       len;
+	// Pick the wanted bytes out of the 2352-byte raw frame per
+	// MODE SET. WinUAE cdtv.cpp dispatch in cmd_read_data:
+	//   2048: user data only, sync+header stripped (offset 16)
+	//   2336: user data + EDC/ECC (offset 16, len 2336)
+	//   2352: full raw frame
+	//   2052: 2048 + 4 subheader bytes (offset 16, len 2052)
+	//   2340: full minus 12 sync bytes (offset 12, len 2340)
+	//   512 / 1024: subset of user data starting at offset 16
+	switch (cd_sectorsize) {
+		case 2048: src = raw + 16; len = 2048; break;
+		case 2052: src = raw + 16; len = 2052; break;
+		case 2336: src = raw + 16; len = 2336; break;
+		case 2340: src = raw + 12; len = 2340; break;
+		case 2352: src = raw;      len = 2352; break;
+		default:   src = raw + 16; len = cd_sectorsize; break;
+	}
+
+	// The credit gate still stands between a stalled drain and silent
+	// corruption, and still waits for room itself (CDTV_SEC_WAIT_MS): a sector
+	// at a time it is the only thing here that can block, and only while the
+	// drain is genuinely held -- a save state freeze, which is what it is for.
+	if (!cdtv_push_sector(src, len)) {
+		// Credit gate gave up — the bridge FIFO never made room.
+		// Report an error rather than push bytes the overflow
+		// guard would drop, which would corrupt the transfer
+		// invisibly and leave the title reading garbage.
+		cdtv_dbg("READ DATA aborted at lba=%u — sector FIFO stalled", lba);
+		cdtv_rd_left = 0;
+		cd_error     = 1;
+		cd_finished  = 1;
+		return;
+	}
+
+	cdtv_rd_cnt++;
+	if (!--cdtv_rd_left) cd_finished = 1;
+}
+
 static uint32_t cdtv_msf_to_lba(uint32_t msf)
 {
 	uint32_t m = (msf >> 16) & 0xff;
@@ -923,6 +1008,8 @@ static void cdtv_dispatch(void)
 
 		case 0x01: /* seek */
 			cd_finished = 1;
+			if (minimig_config.cd_speed == mmcd_drive)
+				cdtv_seek_end_us = cdtv_now_us() + CDTV_SEEK_US;
 			rlen = 0;
 			break;
 
@@ -976,58 +1063,16 @@ static void cdtv_dispatch(void)
 			// already in the ring. No-op on CHD.
 			if (drv->phys) physical_disc_seek_hint((int)lba);
 
-			uint8_t raw[2352];
-			bool    failed = false;
-			// Stream one sector per loop iteration. The bridge's staging FIFO
-			// is 8 KB, so one 2 KB cooked sector fits with margin.
-			for (uint16_t s = 0; s < nsec; s++) {
-				if (cdrom_read_raw_sector(drv, lba + s, raw) != 0) {
-					cdtv_dbg("READ DATA chd_read failed at lba=%u", lba + s);
-					failed = true;
-					break;
-				}
-
-				const uint8_t *src;
-				uint16_t       len;
-				// Pick the wanted bytes out of the 2352-byte raw frame per
-				// MODE SET. WinUAE cdtv.cpp dispatch in cmd_read_data:
-				//   2048: user data only, sync+header stripped (offset 16)
-				//   2336: user data + EDC/ECC (offset 16, len 2336)
-				//   2352: full raw frame
-				//   2052: 2048 + 4 subheader bytes (offset 16, len 2052)
-				//   2340: full minus 12 sync bytes (offset 12, len 2340)
-				//   512 / 1024: subset of user data starting at offset 16
-				switch (cd_sectorsize) {
-					case 2048: src = raw + 16; len = 2048; break;
-					case 2052: src = raw + 16; len = 2052; break;
-					case 2336: src = raw + 16; len = 2336; break;
-					case 2340: src = raw + 12; len = 2340; break;
-					case 2352: src = raw;      len = 2352; break;
-					default:   src = raw + 16; len = cd_sectorsize; break;
-				}
-
-				if (!cdtv_push_sector(src, len)) {
-					// Credit gate gave up — the bridge FIFO never made room.
-					// Report an error rather than push bytes the overflow
-					// guard would drop, which would corrupt the transfer
-					// invisibly and leave the title reading garbage.
-					cdtv_dbg("READ DATA aborted at lba=%u — sector FIFO stalled", lba + s);
-					failed = true;
-					break;
-				}
-
-				// Pace producer ≈ drain rate. Bridge drain FSM pumps ~280 ns/byte
-				// → ~575 µs per 2 KB sector. SPI push is ~1.6 µs/byte → 3.3 ms per
-				// sector. Bare push edges past drain across many sectors and can
-				// fill the 8 KB FIFO. The credit gate in cdtv_push_sector is now
-				// what makes that SAFE; this sleep is kept purely as pacing so the
-				// timing of a normal read is unchanged from before the gate
-				// existed, and so the common case never has to spin on the credit.
-				if (s + 1 < nsec) usleep(1000);
-			}
-
-			if (failed) cd_error = 1;
-			cd_finished = 1;
+			// Armed, not streamed: cdtv_read_pump() delivers it, one sector
+			// a poll at the drive's rate. cd_finished goes up when the last
+			// sector is out, as it did at the end of the loop this replaced.
+			cdtv_rd_drv       = drv;
+			cdtv_rd_lba       = lba;
+			cdtv_rd_cnt       = 0;
+			cdtv_rd_left      = nsec;
+			cdtv_rd_start_us  = cdtv_now_us();
+			cdtv_rd_period_us = cdtv_sector_period_us(minimig_config.cd_speed);
+			if (!nsec) cd_finished = 1;
 			rlen = 0;
 			break;
 		}
@@ -1521,6 +1566,10 @@ void cdtv_cd_set_cd_path(const char *path)
 	cdtv_play_lba_next = -1;
 	cdtv_play_lba_end  = -1;
 	cdtv_play_drv      = NULL;
+	// And a READ or SEEK in flight: its drive_t may be the one going away.
+	cdtv_rd_left       = 0;
+	cdtv_rd_drv        = NULL;
+	cdtv_seek_end_us   = 0;
 	// WinUAE pattern: every operation completion sets cd_finished=1 (SEEK,
 	// MOTOR ON/OFF, INFO, PAUSE, end-of-DMA all set it). The 0x81 STATUS
 	// handler clears it after reading. So the *first* STATUS after a state
@@ -1572,6 +1621,9 @@ void cdtv_cd_init(void)
 	cdtv_play_lba_next = -1;
 	cdtv_play_lba_end  = -1;
 	cdtv_play_drv      = NULL;
+	cdtv_rd_left       = 0;
+	cdtv_rd_drv        = NULL;
+	cdtv_seek_end_us   = 0;
 	// See cdtv_cd_set_cd_path — first STATUS after media-present must show
 	// cd_finished=1 so BIOS sees the 1→0 transition.
 	cd_finished   = cd_media ? 1 : 0;
@@ -1594,6 +1646,22 @@ void cdtv_cd_init(void)
 	if (cd_save_path_active[0]) cd_save_load_pending = true;
 
 	cdtv_dbg("init media=%d isready=%d stch_retries=%d", cd_media, cd_isready, stch_retries);
+}
+
+// A save state was restored. The CDTV keeps no host half in the state file,
+// so a READ or SEEK this side was still working on belongs to the machine
+// that was running, not to the one just restored; carrying on would push its
+// sectors into the restored machine's chip RAM. Drop them. (A command the
+// restored machine had in flight when it was saved is not recovered either --
+// that was so before the READ became a pump, and is a gap of the CDTV's save
+// state, not of this.)
+void cdtv_cd_state_restored(void)
+{
+	if (cdtv_rd_left || cdtv_seek_end_us)
+		cdtv_dbg("restore: dropping READ (%u sectors left) / SEEK in flight", cdtv_rd_left);
+	cdtv_rd_left     = 0;
+	cdtv_rd_drv      = NULL;
+	cdtv_seek_end_us = 0;
 }
 
 void cdtv_cd_poll(void)
@@ -1661,6 +1729,14 @@ void cdtv_cd_poll(void)
 	// runs alongside command processing; status reads in cdtv_audio_fifo_ready
 	// share the same SPI cmd 0x63 the CR-511 dispatch already uses.
 	cdtv_cdda_pump();
+	cdtv_read_pump();
+
+	// A SEEK has run its course: the drive raises a status change, which is
+	// what the BIOS waits on, and takes commands again below.
+	if (cdtv_seek_end_us && cdtv_now_us() >= cdtv_seek_end_us) {
+		cdtv_seek_end_us = 0;
+		cdtv_inject_stch();
+	}
 
 	// Terminate the play-end STCH retry the moment the BIOS takes it. One SPI
 	// read of the sticky bridge flag, and only while a retry is outstanding --
@@ -1675,7 +1751,10 @@ void cdtv_cd_poll(void)
 	// status word's bit 6 (cdtv_req) tracks ~cmd_in_empty in the bridge,
 	// so it stays HIGH as long as there are bytes left. Cap iterations to
 	// guard against runaway loops if the FPGA is misbehaving.
-	for (int guard = 0; guard < 32; guard++) {
+	// Not while a READ is still delivering or a SEEK is still moving the
+	// head: the drive takes its next command when it is done, which is what
+	// the synchronous READ loop gave for free.
+	for (int guard = 0; guard < 32 && !cdtv_rd_left && !cdtv_seek_end_us; guard++) {
 		uint16_t status = cdtv_read_status();
 		if (!(status & CDTV_STATUS_REQ)) break;
 

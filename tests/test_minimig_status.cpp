@@ -27,6 +27,11 @@ int main()
 	check("cur_status keeps the save state, test pattern and A2065 bits",
 	      minimig_status_compose(ST(51) | ST(53) | ST(55) | ST(57), 0),
 	      ST(51) | ST(53) | ST(55) | ST(57));
+	// The CD sector rate (akiko_send_rate(), status[62:61]) is cur_status's.
+	check("cur_status keeps the CD sector rate (status[62:61])",
+	      minimig_status_compose(ST(61) | ST(62), 0), ST(61) | ST(62));
+	check("the extended config cannot set the CD sector rate",
+	      minimig_status_compose(0, ST(61) | ST(62)), 0);
 	check("cur_status cannot set an extended config bit",
 	      minimig_status_compose(0x0007FFFFu, 0), 0);
 

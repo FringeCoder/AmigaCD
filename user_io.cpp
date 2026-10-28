@@ -2150,6 +2150,9 @@ void ss_replace_restore_info(const char *text) { ss_restore_info_text = text; }
 void ss_apply_host_state(int slot)
 {
 	slot &= 3;
+	// Before the early return: the CDTV has no host block, and must hear of a
+	// restore whether or not the slot carried one.
+	cdtv_cd_state_restored();
 	if (!ss_host_len[slot]) return;
 
 	const void *hb = ss_host_blk[slot];
