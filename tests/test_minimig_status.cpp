@@ -50,6 +50,18 @@ int main()
 	check("cur_status cannot set the volume",
 	      minimig_status_compose(ST(59) | ST(60), 0), 0);
 
+	// The cartridge type (upstream b57370d, ext bit 23). Upstream's core reads
+	// it at status[55], this core's test pattern: picking the Action Replay
+	// must not turn the test pattern on, and must reach status[63].
+	check("the Action Replay goes to status[63] and nowhere else",
+	      minimig_status_compose(0, 1u << 23), ST(63));
+	check("the Action Replay does not turn on the test pattern (status[55])",
+	      minimig_status_compose(0, 1u << 23) & ST(55), 0);
+	check("cur_status cannot set the cartridge type",
+	      minimig_status_compose(ST(63), 0), 0);
+	check("the test pattern stays cur_status's beside the cartridge",
+	      minimig_status_compose(ST(55), 1u << 23), ST(55) | ST(63));
+
 	if (fails) { printf("\n%d minimig_status check(s) failed\n", fails); return 1; }
 	printf("\nall minimig_status checks passed\n");
 	return 0;
