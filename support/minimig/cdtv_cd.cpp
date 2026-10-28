@@ -954,6 +954,21 @@ static void cdtv_dispatch(void)
 
 			cdtv_dbg("READ DATA lba=%u nsec=%u sec_sz=%u", lba, nsec, cd_sectorsize);
 
+			// The drive has one pickup: a READ stops the CD audio in progress,
+			// spins the motor up and leaves the audio status at NOT SUPPORTED,
+			// as WinUAE does (Main_MiSTer 1f55555). Without it the CDDA pump
+			// picked the track up again after the read, from where it was.
+			if (cd_playing) {
+				cdtv_play_lba_next = -1;
+				cdtv_play_lba_end  = -1;
+				cdtv_play_drv      = NULL;
+				cd_playing  = 0;
+				cd_paused   = 0;
+				cd_finished = 1;
+			}
+			cd_motor = 1;
+			cd_audio_status = 0x00;
+
 			// Phase 3 item 7: hint before the streaming loop below. The loop
 			// itself reads lba..lba+nsec synchronously, but the BIOS walks a
 			// file sequentially across many READ DATA commands, so pointing
