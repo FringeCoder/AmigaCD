@@ -913,7 +913,7 @@ static uint16_t akiko_read_status(void)
 
 // Forward decl: cmd_subq (early in dispatch table) reads the FPGA sector
 // counter via the helper defined later in the M4 PBX block.
-static uint8_t akiko_read_sec_counter(void);
+static uint16_t akiko_read_sec_counter(void);
 
 // Active-poll barrier: read status repeatedly until the masked bit matches
 // `want_set`, or `max_iters` reached. Each iteration is a SPI status read
@@ -1855,17 +1855,21 @@ static void cmd_bad(const uint8_t *cmd, uint8_t err_code)
 // M4 PBX sector channel
 // -----------------------------------------------------------------------------
 
-// Read the FPGA's current cdrom_sector_counter (1-byte read on the sec
+// Read the FPGA's current cdrom_sector_counter (one word on the sec
 // sub-channel, 0xF500). The bridge presents hps_sec_status on every read
-// strobe; one word is enough.
-static uint8_t akiko_read_sec_counter(void)
+// strobe; one word is enough. All 16 bits, as upstream has it since
+// Main_MiSTer edfe8d7: at 8 bits the counter wrapped after 256 sectors in one
+// ENABLE period and base+counter served the start of the read again. A core
+// with the 8-bit counter (ours until it takes Minimig-AGA 3192739) gives a
+// zero high byte -- fastchip.v pads it -- so it reads exactly as before.
+static uint16_t akiko_read_sec_counter(void)
 {
 	EnableIO();
 	spi8(UIO_DMA_READ);
 	spi32_w(AKIKO_SECTOR_ADDR);
 	uint16_t w = spi_w(0);
 	DisableIO();
-	return (uint8_t)(w & 0xff);
+	return w;
 }
 
 // -----------------------------------------------------------------------------
@@ -2924,7 +2928,7 @@ static bool akiko_handle_sec_req(void)
 	last_sec_req_ms = now_ms;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts0);
-	uint8_t counter = akiko_read_sec_counter();
+	uint16_t counter = akiko_read_sec_counter();
 	clock_gettime(CLOCK_MONOTONIC, &ts1);
 
 	uint8_t buf[AKIKO_SECTOR_BYTES];
@@ -3460,7 +3464,7 @@ void akiko_cd32_poll(void)
 		uint32_t idle = (uint32_t)GetTimer(0) - cd_sec_last_ms;
 		if (idle >= 1500) {
 			cd_stall_reported = true;
-			uint8_t ctr = akiko_read_sec_counter();
+			uint16_t ctr = akiko_read_sec_counter();
 			akiko_diag("[akiko] STALL %u ms: base=%d pushed=%u fpga_ctr=%u%s",
 			           idle, cd_data_lba_base, cd_sec_pushed, ctr,
 			           (ctr > cd_sec_pushed)
