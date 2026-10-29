@@ -27,6 +27,11 @@ int main()
 	check("cur_status keeps the save state, test pattern and A2065 bits",
 	      minimig_status_compose(ST(51) | ST(53) | ST(55) | ST(57), 0),
 	      ST(51) | ST(53) | ST(55) | ST(57));
+	// The CD sector rate (akiko_send_rate(), status[62:61]) is cur_status's.
+	check("cur_status keeps the CD sector rate (status[62:61])",
+	      minimig_status_compose(ST(61) | ST(62), 0), ST(61) | ST(62));
+	check("the extended config cannot set the CD sector rate",
+	      minimig_status_compose(0, ST(61) | ST(62)), 0);
 	check("cur_status cannot set an extended config bit",
 	      minimig_status_compose(0x0007FFFFu, 0), 0);
 
@@ -44,6 +49,18 @@ int main()
 	      minimig_status_compose(0, 2u << 19) & ST(52), 0);
 	check("cur_status cannot set the volume",
 	      minimig_status_compose(ST(59) | ST(60), 0), 0);
+
+	// The cartridge type (upstream b57370d, ext bit 23). Upstream's core reads
+	// it at status[55], this core's test pattern: picking the Action Replay
+	// must not turn the test pattern on, and must reach status[63].
+	check("the Action Replay goes to status[63] and nowhere else",
+	      minimig_status_compose(0, 1u << 23), ST(63));
+	check("the Action Replay does not turn on the test pattern (status[55])",
+	      minimig_status_compose(0, 1u << 23) & ST(55), 0);
+	check("cur_status cannot set the cartridge type",
+	      minimig_status_compose(ST(63), 0), 0);
+	check("the test pattern stays cur_status's beside the cartridge",
+	      minimig_status_compose(ST(55), 1u << 23), ST(55) | ST(63));
 
 	if (fails) { printf("\n%d minimig_status check(s) failed\n", fails); return 1; }
 	printf("\nall minimig_status checks passed\n");

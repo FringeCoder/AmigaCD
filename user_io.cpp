@@ -1634,7 +1634,7 @@ void user_io_init(const char *path, const char *xml)
 	load_volume();
 
 	user_io_send_buttons(1);
-	if (xml && isXmlName(xml) == 2) mgl_parse(xml);
+	if (xml && isXmlName(xml)) mgl_parse(xml);
 
 	switch (core_type)
 	{
@@ -2150,6 +2150,9 @@ void ss_replace_restore_info(const char *text) { ss_restore_info_text = text; }
 void ss_apply_host_state(int slot)
 {
 	slot &= 3;
+	// Before the early return: the CDTV has no host block, and must hear of a
+	// restore whether or not the slot carried one.
+	cdtv_cd_state_restored();
 	if (!ss_host_len[slot]) return;
 
 	const void *hb = ss_host_blk[slot];

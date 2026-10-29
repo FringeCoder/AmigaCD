@@ -224,7 +224,7 @@ What it collects, and what each is good for:
 | file | answers |
 |---|---|
 | `report.txt` | uname, uptime, free space, what is running, md5s of the installed binary and cores, `MiSTer.ini`, the contents of `savestates/`, dmesg tail |
-| `akiko_dbg.log` | `sec_req timing` — the real per-sector delivery period, which is the number `AKIKO_SECTOR_PERIOD_US` was set against without ever being measured on hardware. Also `sec_req GAP` |
+| `akiko_dbg.log` | `sec_req timing` — the real per-sector delivery period. Since 2026-10-28 the core paces the sectors (akiko.v, `cd_rate`) and the Main pushes on demand, so this is the core's period as the Main sees it: 13.3 ms at 1x, 6.7 ms at 2x, 1.7 ms at Fast. Also `sec_req GAP` |
 | `ss_dbg.log` | the save state sequence, including whether each toast was drawn or **dropped** by the `menustate <= MENU_INFO` gate |
 | `cdtv_dbg.log` | the CR-511 command stream |
 | `physical_disc_stats.log` | drive hit rate and worst-case I/O latency |

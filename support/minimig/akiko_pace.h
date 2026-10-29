@@ -23,50 +23,61 @@
 //
 // Why this module exists
 // ----------------------
-// The chunk gaps were never a rate limit that anyone could read. usleep(10)
-// does not cost 10 us: it costs whatever a scheduler wakeup costs, measured at
-// ~92 us on the MiSTer and ~70 us in a desktop container. So the old form spent
-// ~1.7 ms per sector while its constants said 180 us, and the protection would
-// have vanished -- silently, at a boot far away from any related change -- the
-// moment someone widened the chunks, shrank the gap, or ran on a platform where
-// short sleeps are cheap.
+// The chunk gaps were never a rate limit anyone could read: usleep(10) costs a
+// scheduler wakeup (~92 us on the MiSTer), so 18 of them spent ~1.7 ms while
+// reading as 180 us. That became a stated floor in microseconds here, slept by
+// the Main, and on 2026-10-28 a rate the core keeps -- below.
 //
-// So the floor is stated as a floor, in one place, in microseconds of wall
-// clock, and it no longer depends on how coarse usleep happens to be.
-//
-// Kept free of MiSTer headers so it can be unit-tested with the host compiler.
-// The caller owns the clock and the sleep; this is only the arithmetic, which
-// is the part with the signed-wrap edge cases worth pinning down.
+// What is left in the Main is the drive's mechanics (the seek and the spindle
+// settle, waited out by declining requests rather than sleeping) and the
+// choice of rate. Kept free of MiSTer headers so it can be unit-tested with
+// the host compiler.
 
-// Minimum interval between the starts of two sector pushes, in microseconds.
+// The sector RATE is the core's to keep now. akiko.v starts at most one PBX
+// ship per period, at the rate the Main sends on status[62:61]; the Main pushes
+// each sector the moment Akiko asks and does not sleep. Before 2026-10-28 it
+// slept here, start to start, in the binary's one main loop -- up to 6.7 ms a
+// sector at 2x and 13.3 ms at 1x on the default Drive setting, stalling input,
+// the OSD and every other bridge for most of every period, and widening the
+// window in which a new READ can overtake a sector already fetched for the old
+// one (the core's Test H2). Upstream moved pacing into the core in
+// Minimig-AGA ce1f386; see that commit's port in AmigaCD_MiSTer for why the
+// Main, not the core, decides the rate.
 //
-// 1700 is deliberately about what the chunked form already costs, so this
-// commit changes the guarantee rather than the behaviour: the failing side of
-// the measured knee is 0.37 ms (0/3 boots) and the passing side is 1.64 ms
-// (3/3) and 1.66 ms (8/8), and we sit just above the latter.
-//
-// It is NOT the authentic rate. A CD32 is a 2x unit -- 150 sectors/s, 6667 us
-// per sector -- and nothing on real hardware feeds the pipeline faster. Moving
-// there would be more faithful and would give ~4x the margin over the knee, at
-// the cost of roughly 4x the load time and 4x this stall in the main poll loop.
-// That is a policy change, not a cleanup, and it wants its own hardware pass.
-//
-// If the ddram_ctrl fix holds on hardware, the right end state may be no floor
-// at all. Removing it is then a hardware test, not an assumption.
-#define AKIKO_SECTOR_PERIOD_US 1700
+// The codes are what akiko.v decodes, not an ordering. 0 is 8x so that an
+// older Main, which leaves the bits clear and paces by sleeping, is not slowed
+// down by a newer core.
+#define AKIKO_RATE_8X  0   // 600 sectors/s, 1667 us
+#define AKIKO_RATE_1X  1   //  75 sectors/s, 13333 us
+#define AKIKO_RATE_2X  2   // 150 sectors/s, 6667 us
+#define AKIKO_RATE_4X  3   // 300 sectors/s, 3333 us
 
-// What a CD32 actually is: a 2x unit, 150 sectors/s, one sector every 6667 us.
-// Selectable from the OSD (mm_cdSpeed in minimig_config.h) rather than
-// compiled in, because which of the two you want is a judgement about the
-// machine you are after -- faithful loading times, or short ones -- and not
-// something this file can settle. Nothing above changes: the floor stays the
-// default, so a machine nobody has touched behaves exactly as it always has.
-#define AKIKO_SECTOR_PERIOD_2X_US 6667
+// The rate to send for an OSD setting (mm_cdSpeed: 0 fast, 1 2x, 2 drive) and
+// the speed the guest last commanded (1 or 2, from bit 6 of cmd[8]).
+//
+// Fast is 8x: the 1.7 ms floor this file used to keep, which sits just above
+// the measured passing side (1.64 ms) of the Z2-fast-RAM-plus-CD boot knee --
+// below ~0.4 ms that boot failed every time. 8x is 1.667 ms, still above it.
+// The fault behind the knee (ddram_ctrl dropping a DDR3 read return, T24 in
+// the core's docs) has since been fixed, so the margin is now insurance.
+//
+// An unknown mode is Fast, as the OSD shows it.
+int akiko_cd_rate_bits(int mode, int commanded_speed);
 
-// And 1x, 75 sectors/s, which the guest does ask for: the ROM commands a rate
-// in bit 6 of cmd[8] of every PLAY/READ, and 3 of the 133 speed changes seen in
-// our logs were back down to 1x.
-#define AKIKO_SECTOR_PERIOD_1X_US 13333
+// The CDTV drive, which the core does not pace: its bridge has a FIFO and a
+// credit, not PBX slots, so the Main still spaces the sectors of a READ -- but
+// from the poll loop, one sector per poll when it is due, never by sleeping.
+//
+// The CR-511 is a 1x drive: 75 sectors/s, 13333 us, which is Drive (the
+// default). CD32 2x gives it 2x. Fast keeps what the synchronous loop did: a
+// 1 ms gap that the 3.3 ms SPI push of a sector dwarfs, i.e. as fast as the
+// push goes. An unknown mode is Fast, as the OSD shows it.
+int64_t cdtv_sector_period_us(int mode);
+
+// CDTV SEEK: the drive takes no command for half a second and then raises a
+// status change, as WinUAE has it (upstream Main_MiSTer 0437012). Drive mode
+// only, like the CD32 seek model: the other two are for loading over realism.
+#define CDTV_SEEK_US 500000
 
 // Drive mechanics: the head has to get there, and it is not instant.
 //
@@ -95,18 +106,6 @@
 // negative `from_lba` means the head position is unknown -- after a spin-up it
 // is at the lead-in, so that is what is assumed.
 int64_t akiko_seek_us(int32_t from_lba, int32_t to_lba, uint32_t span_lba);
-
-// How long to wait, in microseconds, before starting a push, so that it begins
-// at least period_us after the previous one began.
-//
-//   prev_us   when the previous push began. Negative means "no previous push",
-//             which is the first sector after a mount or a seek.
-//   now_us    now, from the same monotonic clock as prev_us.
-//
-// Returns 0 when the interval has already elapsed, so a caller that is slower
-// than the floor -- a CHD miss, a physical drive seek -- is never delayed
-// further by it.
-int64_t akiko_pace_delay_us(int64_t prev_us, int64_t now_us, int64_t period_us);
 
 // Whether a sector request should be served at all.
 //
