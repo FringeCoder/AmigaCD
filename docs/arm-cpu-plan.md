@@ -778,6 +778,51 @@ DE10-Nano (no ping). Reprogramming the FPGA while an ARM access is still in
 flight on the HPS-to-FPGA bridge hangs the ARM; wait for armuae to exit
 before loading a core.
 
+## Step 5: a DDR3 shadow of chip RAM, and a write queue, 2026-10-29
+
+**What was built.** Core: AmigaCD_MiSTer `claude/lwbridge-echo` a9bdc89,
+fit on seed 9 of 16 (setup +0.045, hold +0.247), `_Test/lwbridge-flat/
+amigacd.rbf` ef5312af. armuae: AmigaCD dc9a6606.
+- `armcpu_bridge` queues 16 requests and answers a write when it is queued;
+  reads run in order behind the writes before them.
+- `chip_mirror` copies every chipset-port chip RAM write (blitter, disk DMA,
+  Akiko/CDTV sector DMA, chip-bus CPU cycles) into a 2 MB shadow at DDR3
+  0x3B000000, as a third master behind the A2065 and the drive sounds.
+  With CTRL[4] MIRROR set, every read answer through the bridge waits until
+  the mirror is idle, so a DMA the ARM has seen end is already in DDR3; a
+  dropped write sets STATUS[10] and armuae copies the shadow afresh.
+- armuae maps the shadow read-only over natmem's chip RAM, so the JIT reads
+  it in place, and writes through to both. A store from compiled code into
+  it faults; `on_segv` makes it through the write path and drops the block,
+  as Amiberry's handler does for its I/O areas. `-n`: the old path.
+
+**Measured** (bench/chipbench.c, 4 KB a pass, passes/s):
+
+| | read | write | fast to chip copy |
+|---|---|---|---|
+| before (seed 8 core) | 1158 | 1497 | 1465 |
+| write queue only (`-n`) | 1076 | 1577 | 1587 |
+| queue + shadow | **5462** | 1617 | 1587 |
+
+Reads are 4.7x faster. Writes barely moved, for two reasons that the queue
+cannot touch: a stream of chip RAM writes drains at the SDRAM's CPU write
+slots (~280 ns a word, 0.6 us a long), and a single write already returned
+early with the old one-deep post -- what it costs the ARM is the round trip
+of a strongly-ordered store, which /dev/mem gives every mapping above Linux's
+RAM. Combining runs of writes into STM bursts was tried and gained nothing,
+and was taken out again.
+
+AmigaVision and Frontier run on the shadow (621 stores from compiled code
+handled, no resync); the bus traffic of Frontier's intro fell from a 613k to
+a 300-400k word cycle/s median. For Frontier that is roughly the read share
+(~9% of the ARM's time) won back, ~10% in all: short of the 20% hoped for,
+because the write share (~14%) stays.
+
+**What would move writes:** a mapping that lets the ARM post its stores (a
+small kernel driver mapping the window as Device or Normal non-cacheable
+memory instead of strongly ordered), and 32-bit writes through the SDRAM CPU
+port so a long is one slot instead of two.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and
