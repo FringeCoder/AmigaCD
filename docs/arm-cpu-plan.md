@@ -749,6 +749,30 @@ games with their own loaders are unlikely to run on this CPU; WHDLoad
 installs (AmigaVision's hardfile) are the realistic route, and Frontier on
 it is the next measurement for a bridge write FIFO.
 
+**AmigaVision from its hardfile, and Frontier** (2026-10-29): with
+`_Test/claude-armav.mgl` (AGA, the CPU setting at 68000 for the proxy, Gayle
+IDE, AmigaVision.hdf) armuae boots the AmigaVision launcher on the JIT in
+about 40 s, and Frontier Elite II starts from it and runs its 3D intro. Keys
+reach the guest through `tools/armuae/probe/vkey.py`, a uinput keyboard.
+(On 2026-10-26 they did not, under armuae or fx68k alike: SDR stayed `$00`
+until the board was power-cycled. `sdrpeek` reads it.)
+
+Frontier's intro, `-c`, 60 s (accesses per second; a long is one):
+
+| | min | median | max |
+|---|---|---|---|
+| bus word cycles | 224k | 613k | 1043k |
+| chip RAM reads | 67k | 146k | 257k |
+| chip RAM writes | 47k | 226k | 364k |
+| custom reads | 25k | 43k | 204k |
+
+Here the chip RAM traffic is real work, not polling. Writes take about 14%
+of the ARM's time at the median and 23% at the peak, reads about 10-13%. A
+bridge write FIFO (writes acknowledged at once, drained behind the CPU) would
+win back most of the write share, ~10-17% for this kind of program; the
+read cache about as much again. Neither is large; the write FIFO is the
+smaller change.
+
 **Board trap:** `killall armuae` followed at once by `load_core` froze the
 DE10-Nano (no ping). Reprogramming the FPGA while an ARM access is still in
 flight on the HPS-to-FPGA bridge hangs the ARM; wait for armuae to exit
