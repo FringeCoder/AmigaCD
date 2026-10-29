@@ -112,6 +112,17 @@ addrbank dummy_bank, kickmem_bank, rtarea_bank, a3000lmem_bank, a3000hmem_bank, 
 // place; the I/O areas go through bank functions over the same window. The
 // 68k's misaligned word and long accesses become ARM ones on device memory,
 // which the kernel fixes up (/proc/cpu/alignment).
+//
+// Chip RAM, from step 5 on, is read from a copy instead: the DDR3 shadow at
+// 0x3B000000, which the core's chip_mirror keeps up to date with every write
+// the chipset makes (MIRROR in CTRL). An uncached DDR3 read costs the ARM
+// ~140 ns where a read through the window costs 564-886. The shadow is mapped
+// over natmem's first 2 MB read-only, so the JIT and the fetches read it in
+// place; a write goes through shd_*put to both the shadow and, through the
+// window, chip RAM. Compiled code that stores there directly (a block
+// compiled for some other memory, run with a chip RAM address) faults, and
+// on_segv makes the store through shd_*put and has the block recompiled,
+// as Amiberry's own handler does for its I/O areas. -n turns this off.
 #define LW_BASE     0xFF200000UL
 #define LW_SPAN     0x200000UL
 #define PX_CTL      0x080000UL
@@ -119,8 +130,14 @@ addrbank dummy_bank, kickmem_bank, rtarea_bank, a3000lmem_bank, a3000hmem_bank, 
 #define HF_BASE     0xC0000000UL
 #define CTRL_OWN    1u
 #define CTRL_RESET  8u
+#define CTRL_MIRROR 0x10u
+#define SHADOW_PHYS 0x3B000000UL
+#define CHIP_SIZE   0x200000UL
 static int bridge;                    // -b
-static unsigned bmode = 6;            // FAST and FASTW
+static unsigned bmode = 6;            // FAST and FASTW (and MIRROR, with the shadow)
+static int shadow = 1;                // -n: chip RAM through the window, as before step 5
+static uae_u8 *shadow_rw, *chipwin;   // writable views of the shadow and of the window's chip RAM
+static uae_u32 n_resync, n_segv_st;
 static volatile uae_u32 *ctl;
 static int owning;
 
@@ -181,6 +198,37 @@ static addrbank ac_bank = {        // autoconfig: the board, then whatever follo
 	ABFLAG_IO, S_READ, S_WRITE
 };
 
+// chip RAM through the shadow: reads from natmem (the shadow), writes to both
+static uae_u32 REGPARAM2 shd_lget(uaecptr a) { return ld32((uae_u32 *)(natmem_offset + (a & (CHIP_SIZE - 1)))); }
+static uae_u32 REGPARAM2 shd_wget(uaecptr a) { return ld16((uae_u16 *)(natmem_offset + (a & (CHIP_SIZE - 1)))); }
+static uae_u32 REGPARAM2 shd_bget(uaecptr a) { return natmem_offset[a & (CHIP_SIZE - 1)]; }
+static void REGPARAM2 shd_lput(uaecptr a, uae_u32 v)
+{
+	a &= CHIP_SIZE - 1;
+	st32((uae_u32 *)(chipwin + a), v);
+	st32((uae_u32 *)(shadow_rw + a), v);
+}
+static void REGPARAM2 shd_wput(uaecptr a, uae_u32 v)
+{
+	a &= CHIP_SIZE - 1;
+	st16((uae_u16 *)(chipwin + a), v);
+	st16((uae_u16 *)(shadow_rw + a), v);
+}
+static void REGPARAM2 shd_bput(uaecptr a, uae_u32 v)
+{
+	a &= CHIP_SIZE - 1;
+	chipwin[a] = (uae_u8)v;
+	shadow_rw[a] = (uae_u8)v;
+}
+static addrbank shd_bank = {       // chip RAM: read from the shadow in place, written through
+	shd_lget, shd_wget, shd_bget, shd_lput, shd_wput, shd_bput,
+	ram_xlate, ram_check, NULL, _T("shadow"), _T("chip RAM, DDR3 shadow"), shd_lget, shd_wget,
+	ABFLAG_RAM, 0, S_WRITE
+};
+static void REGPARAM2 chip_lput(uaecptr a, uae_u32 v) { if (shadow) shd_lput(a, v); else ram_lput(a, v); }
+static void REGPARAM2 chip_wput(uaecptr a, uae_u32 v) { if (shadow) shd_wput(a, v); else ram_wput(a, v); }
+static void REGPARAM2 chip_bput(uaecptr a, uae_u32 v) { if (shadow) shd_bput(a, v); else ram_bput(a, v); }
+
 // The overlay is the ARM's to give, as in armcpu: this machine's chipset does
 // not put the ROM back at $000000 for the RESET line (measured: after the
 // pulse, $4 reads chip RAM). While it is on, reads of $000000-$07FFFF come
@@ -191,7 +239,7 @@ static uae_u32 REGPARAM2 ovl_wget(uaecptr a) { return ld16((uae_u16 *)rom_copy(a
 static uae_u32 REGPARAM2 ovl_bget(uaecptr a) { return *rom_copy(a); }
 static uae_u8 *REGPARAM2 ovl_xlate(uaecptr a) { return rom_copy(a); }
 static addrbank ovl_bank = {
-	ovl_lget, ovl_wget, ovl_bget, ram_lput, ram_wput, ram_bput,
+	ovl_lget, ovl_wget, ovl_bget, chip_lput, chip_wput, chip_bput,
 	ovl_xlate, ram_check, NULL, _T("overlay"), _T("ROM overlay"), ovl_lget, ovl_wget,
 	ABFLAG_IO, S_READ, S_WRITE
 };
@@ -322,20 +370,22 @@ static void map(addrbank *b, uae_u32 start, uae_u32 size)
 	// places (chip and slow RAM, and back and forth under the overlay).
 	b->baseaddr = b->flags & ABFLAG_IO ? NULL : natmem_offset;
 	b->baseaddr_direct_r = b->flags & ABFLAG_IO ? NULL : natmem_offset;
-	b->baseaddr_direct_w = b->flags & ABFLAG_RAM ? natmem_offset : NULL;
+	b->baseaddr_direct_w = (b->flags & ABFLAG_RAM) && b != &shd_bank ? natmem_offset : NULL;
+	// the shadow is read-only in natmem: its data has to go through shd_*put
+	int funcs = !b->baseaddr || b == &cnt_ram_bank || b == &shd_bank;
 	b->start = b->startaccessmask = 0;
 	b->mask = 0xFFFFFF;
 	b->allocated_size = b->reserved_size = 0x1000000;
 	for (uae_u32 a = start; a < start + size; a += 0x10000) {
 		mem_banks[bankindex(a)] = b;
-		// -c: data through the counting functions; fetches still use b->baseaddr
-		baseaddr[bankindex(a)] = b->baseaddr && b != &cnt_ram_bank ? natmem_offset : (uae_u8 *)b + 1;
+		// -c and the shadow: data through the functions; fetches still use b->baseaddr
+		baseaddr[bankindex(a)] = funcs ? (uae_u8 *)b + 1 : natmem_offset;
 	}
 	// the 24-bit space mirrors through the 4 GB the bank table spans
 	for (uae_u32 m = 1; m < MEMORY_BANKS / 256; m++)
 		for (uae_u32 a = start; a < start + size; a += 0x10000) {
 			mem_banks[bankindex(a) + m * 256] = b;
-			baseaddr[bankindex(a) + m * 256] = b->baseaddr ? natmem_offset - m * 0x1000000u : (uae_u8 *)b + 1;
+			baseaddr[bankindex(a) + m * 256] = funcs ? (uae_u8 *)b + 1 : natmem_offset - m * 0x1000000u;
 		}
 }
 
@@ -392,6 +442,17 @@ static double since(const struct timespec *a)
 
 static uae_u32 n_lev[8];               // rising edges to each interrupt level, per report
 
+// The shadow afresh from chip RAM, through the window (~0.5 s): at the start,
+// and when the mirror has dropped a write. MIRROR is set first, so a DMA
+// write during the copy reaches the shadow too.
+static void shadow_copy(void)
+{
+	ctl[1] = CTRL_OWN | (bmode & ~CTRL_MIRROR);
+	ctl[1] = CTRL_OWN | bmode;           // MIRROR rising clears STATUS[10]
+	for (uae_u32 a = 0; a < CHIP_SIZE; a += 4)
+		*(volatile uae_u32 *)(shadow_rw + a) = *(volatile uae_u32 *)(chipwin + a);
+}
+
 static void slice(void)
 {
 	if (bridge) {
@@ -403,6 +464,10 @@ static void slice(void)
 		if (st & 0x200) {
 			fprintf(stderr, "armuae: the bridge gave up a bus cycle (watchdog), stopping\n");
 			stop = 1;
+		}
+		if (shadow && (st & 0x400)) {    // the mirror dropped a write
+			shadow_copy();
+			n_resync++;
 		}
 	}
 	doint();                              // a level change becomes SPCFLAG_INT
@@ -416,6 +481,7 @@ static void slice(void)
 			printf("          bus: %u word cycles/s, interrupts/s by level: %u %u %u %u %u %u %u\n", w - l_words,
 			       n_lev[1], n_lev[2], n_lev[3], n_lev[4], n_lev[5], n_lev[6], n_lev[7]);
 			printf("          CIA-A ICR reads: %u, SDR %02x\n", n_icra_rd, natmem_offset[0xBFEC01]);
+			if (shadow) printf("          shadow: %u resyncs, %u stores from compiled code\n", n_resync, n_segv_st);
 			n_icra_rd = 0;
 			memset(n_lev, 0, sizeof(n_lev));
 			l_words = w;
@@ -475,12 +541,54 @@ void custom_reset(bool, bool)
 static void on_signal(int) { stop = 1; }
 static void on_fatal(int sig) { release_bus(); signal(sig, SIG_DFL); raise(sig); }
 
-// SIGSEGV: what the host faulted on, for JIT debugging
+// SIGSEGV: a store into the read-only shadow is made through shd_*put (and a
+// compiled block that made it is thrown away, so it is compiled again with
+// the bank's S_WRITE: indirect); anything else is what the host faulted on,
+// for JIT debugging
 #include <ucontext.h>
+extern uae_u8 *compiled_code, *current_compile_p;
+extern blockinfo *active, *dormant;
+void invalidate_block(blockinfo *bi);
+void raise_in_cl_list(blockinfo *bi);
+static int drop_block(blockinfo *bi, void *pc)
+{
+	for (; bi; bi = bi->next)
+		if (bi->handler && (uae_u8 *)bi->direct_handler <= pc && bi->nexthandler > pc) {
+			invalidate_block(bi);
+			raise_in_cl_list(bi);
+			return 1;
+		}
+	return 0;
+}
 static void on_segv(int, siginfo_t *si, void *uc)
 {
 	ucontext_t *u = (ucontext_t *)uc;
 #ifdef __arm__
+	uae_u8 *fa = (uae_u8 *)si->si_addr;
+	if (shadow && fa >= natmem_offset && fa < natmem_offset + CHIP_SIZE) {
+		unsigned long *r = &u->uc_mcontext.arm_r0;     // r0-r15, in order
+		uae_u32 op = *(uae_u32 *)u->uc_mcontext.arm_pc;
+		uaecptr a = (uaecptr)(fa - natmem_offset);
+		int rd = (op >> 12) & 15, done = 0;
+		if (!((op >> 20) & 1) && rd != 15) {            // a store, not of the PC
+			if (((op >> 25) & 7) == 0 && ((op >> 5) & 3) == 1) {          // STRH
+				shd_wput(a, __builtin_bswap16((uae_u16)r[rd])); done = 1;
+			}
+			else if (((op >> 25) & 7) == 2 || ((op >> 25) & 7) == 3) {  // STR, STRB
+				if ((op >> 22) & 1) shd_bput(a, (uae_u8)r[rd]);
+				else shd_lput(a, __builtin_bswap32((uae_u32)r[rd]));
+				done = 1;
+			}
+		}
+		if (done) {
+			void *pc = (void *)u->uc_mcontext.arm_pc;
+			u->uc_mcontext.arm_pc += 4;
+			n_segv_st++;
+			if ((uae_u8 *)pc >= compiled_code && (uae_u8 *)pc < current_compile_p)
+				if (!drop_block(active, pc)) drop_block(dormant, pc);
+			return;
+		}
+	}
 	fprintf(stderr, "SEGV: addr %p, host pc %08lx lr %08lx r0 %08lx r1 %08lx r2 %08lx r3 %08lx; natmem %p, 68k pc %08x\n",
 	        si->si_addr, u->uc_mcontext.arm_pc, u->uc_mcontext.arm_lr, u->uc_mcontext.arm_r0,
 	        u->uc_mcontext.arm_r1, u->uc_mcontext.arm_r2, u->uc_mcontext.arm_r3, natmem_offset, regs.pc);
@@ -513,7 +621,7 @@ int main(int argc, char **argv)
 	const char *rom_path = NULL;
 	int model = 68020, jit_kb = 0, opt;
 	int force = 0;
-	while ((opt = getopt(argc, argv, "r:C:j:t:a:v:bm:fc")) != -1) {
+	while ((opt = getopt(argc, argv, "r:C:j:t:a:v:bm:fcn")) != -1) {
 		switch (opt) {
 		case 'r': rom_path = optarg; break;
 		case 'C': model = atoi(optarg); break;
@@ -525,8 +633,9 @@ int main(int argc, char **argv)
 		case 'm': bmode = (unsigned)strtoul(optarg, NULL, 0) & 6; break;
 		case 'f': force = 1; break;
 		case 'c': counting = 1; break;
+		case 'n': shadow = 0; break;
 		default:
-			fprintf(stderr, "usage: %s -r rom [-C model] [-j KB] [-t s] [-a addr] [-v addr] [-b [-m mode] [-f]]\n", argv[0]);
+			fprintf(stderr, "usage: %s -r rom [-C model] [-j KB] [-t s] [-a addr] [-v addr] [-b [-m mode] [-f] [-n] [-c]]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -569,6 +678,21 @@ int main(int argc, char **argv)
 		// no 'HELP' at $0 with an alert at $100
 		for (uae_u32 a = 0; a < 8; a += 2) *(volatile uae_u16 *)(natmem_offset + a) = 0;
 		for (uae_u32 a = 0x100; a < 0x108; a += 2) *(volatile uae_u16 *)(natmem_offset + a) = 0;
+		if (shadow) {
+			shadow_rw = (uae_u8 *)mmap(NULL, CHIP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, SHADOW_PHYS);
+			chipwin   = (uae_u8 *)mmap(NULL, CHIP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, HF_BASE);
+			if (shadow_rw == MAP_FAILED || chipwin == MAP_FAILED) { perror("mmap shadow"); return 1; }
+			bmode |= CTRL_MIRROR;
+			struct timespec c0;
+			clock_gettime(CLOCK_MONOTONIC, &c0);
+			shadow_copy();
+			if (!(ctl[1] & CTRL_MIRROR)) { fprintf(stderr, "this core has no chip RAM mirror (CTRL[4]): run with -n\n"); return 1; }
+			if (mmap(natmem_offset, CHIP_SIZE, PROT_READ, MAP_SHARED | MAP_FIXED, memfd, SHADOW_PHYS) == MAP_FAILED) {
+				perror("mmap shadow over the window");
+				return 1;
+			}
+			printf("armuae: chip RAM from the DDR3 shadow, copied in %.2f s\n", since(&c0));
+		}
 	}
 	else {
 #ifdef MAP_32BIT
@@ -592,11 +716,12 @@ int main(int argc, char **argv)
 
 	for (int i = 0; i < MEMORY_BANKS; i++) { mem_banks[i] = &io_bank; baseaddr[i] = (uae_u8 *)&io_bank + 1; }
 	if (bridge) {
+		if (shadow) chip_ram_bank = &shd_bank;
 		if (counting) chip_ram_bank = &cnt_ram_bank;
 		map(chip_ram_bank, 0x000000, 0x200000);  // chip RAM (and the ROM, while the overlay is on)
 		map(&fast_bank, 0x200000, 0x800000);  // the board, once autoconfig has placed it
 		map(counting ? &cnt_cia_bank : &ciaw_bank, 0xA00000, 0x200000);  // the CIAs (CIA-A's PA0 is the overlay)
-		map(chip_ram_bank, 0xC00000, 0x180000);  // slow RAM
+		map(counting ? &cnt_ram_bank : &wram_bank, 0xC00000, 0x180000);  // slow RAM, never mirrored
 		map(counting ? &cnt_io_bank : &wio_bank, 0xD80000, 0x100000);  // the custom chips, RTC, IDE
 		map(&wio_bank,  0xE00000, 0x080000);
 		map(&ac_bank,   0xE80000, 0x080000);  // autoconfig
