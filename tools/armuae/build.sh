@@ -65,10 +65,10 @@ if [ "$1" = bench ]; then
 			-Wl,-z,noexecstack -Wl,--build-id=none -T link.ld -o "$WORK/bench$cpu.elf" crt0.S bench.c -lgcc
 		m68k-linux-gnu-objcopy -O binary --pad-to 0x1000000 "$WORK/bench$cpu.elf" "$WORK/bench$cpu.rom"
 	done
-	for mode in 0 1 2; do
+	for mode in 0 1 2 3; do
 		m68k-linux-gnu-gcc -m68020 -O2 -ffreestanding -fno-builtin -nostdlib -fno-pic -static -DMODE=$mode \
 			-Wl,-z,noexecstack -Wl,--build-id=none -T link.ld -o "$WORK/chip$mode.elf" crt0.S chipbench.c -lgcc
 		m68k-linux-gnu-objcopy -O binary --pad-to 0x1000000 "$WORK/chip$mode.elf" "$WORK/chip$mode.rom"
 	done
-	echo "built $WORK/bench68000.rom, $WORK/bench68020.rom, $WORK/chip{0,1,2}.rom (read, write, copy)"
+	echo "built $WORK/bench68000.rom, $WORK/bench68020.rom, $WORK/chip{0,1,2,3}.rom (read, write, copy, compute+write)"
 fi

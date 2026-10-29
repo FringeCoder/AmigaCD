@@ -137,6 +137,19 @@ static int bridge;                    // -b
 static unsigned bmode = 6;            // FAST and FASTW (and MIRROR, with the shadow)
 static int shadow = 1;                // -n: chip RAM through the window, as before step 5
 static uae_u8 *shadow_rw, *chipwin;   // writable views of the shadow and of the window's chip RAM
+// Step 6: with tools/armuae/kmod's armwin.ko loaded, the window and the
+// shadow's write view are mapped through /dev/armwin as Device memory, so
+// the ARM posts its stores instead of waiting on each (/dev/mem makes them
+// strongly ordered). The control registers and the shadow's read view stay
+// strongly ordered; dsb() puts the posted stores ahead of a control access
+// (a different peripheral, so Device ordering alone does not). -N: /dev/mem.
+static int devwin = 1;
+static inline void dsb(void)
+{
+#ifdef __arm__
+	asm volatile("dsb sy" ::: "memory");
+#endif
+}
 static uae_u32 n_resync, n_segv_st;
 static volatile uae_u32 *ctl;
 static int owning;
@@ -324,12 +337,14 @@ static addrbank cnt_cia_bank = {
 
 static void release_bus(void)
 {
+	dsb();
 	if (owning && ctl) { ctl[1] = 0; owning = 0; }
 }
 
 // the chipset's reset line, as the 68000's RESET drives it (~17 us)
 static void bus_reset_pulse(void)
 {
+	dsb();
 	ctl[1] = CTRL_OWN | bmode | CTRL_RESET;
 	usleep(20);
 	ctl[1] = CTRL_OWN | bmode;
@@ -447,15 +462,18 @@ static uae_u32 n_lev[8];               // rising edges to each interrupt level, 
 // write during the copy reaches the shadow too.
 static void shadow_copy(void)
 {
+	dsb();
 	ctl[1] = CTRL_OWN | (bmode & ~CTRL_MIRROR);
 	ctl[1] = CTRL_OWN | bmode;           // MIRROR rising clears STATUS[10]
 	for (uae_u32 a = 0; a < CHIP_SIZE; a += 4)
 		*(volatile uae_u32 *)(shadow_rw + a) = *(volatile uae_u32 *)(chipwin + a);
+	dsb();
 }
 
 static void slice(void)
 {
 	if (bridge) {
+		dsb();
 		uae_u32 st = ctl[3];
 		static int ipl_prev;
 		ipl_now = st & 7;                 // Paula's level
@@ -482,6 +500,7 @@ static void slice(void)
 			       n_lev[1], n_lev[2], n_lev[3], n_lev[4], n_lev[5], n_lev[6], n_lev[7]);
 			printf("          CIA-A ICR reads: %u, SDR %02x\n", n_icra_rd, natmem_offset[0xBFEC01]);
 			if (shadow) printf("          shadow: %u resyncs, %u stores from compiled code\n", n_resync, n_segv_st);
+			if (devwin) printf("          window: Device memory (/dev/armwin)\n");
 			n_icra_rd = 0;
 			memset(n_lev, 0, sizeof(n_lev));
 			l_words = w;
@@ -621,7 +640,7 @@ int main(int argc, char **argv)
 	const char *rom_path = NULL;
 	int model = 68020, jit_kb = 0, opt;
 	int force = 0;
-	while ((opt = getopt(argc, argv, "r:C:j:t:a:v:bm:fcn")) != -1) {
+	while ((opt = getopt(argc, argv, "r:C:j:t:a:v:bm:fcnN")) != -1) {
 		switch (opt) {
 		case 'r': rom_path = optarg; break;
 		case 'C': model = atoi(optarg); break;
@@ -634,6 +653,7 @@ int main(int argc, char **argv)
 		case 'f': force = 1; break;
 		case 'c': counting = 1; break;
 		case 'n': shadow = 0; break;
+		case 'N': devwin = 0; break;
 		default:
 			fprintf(stderr, "usage: %s -r rom [-C model] [-j KB] [-t s] [-a addr] [-v addr] [-b [-m mode] [-f] [-n] [-c]]\n", argv[0]);
 			return 2;
@@ -654,8 +674,11 @@ int main(int argc, char **argv)
 		ctl = (volatile uae_u32 *)(lw + PX_CTL);
 		if (ctl[0] != PX_MAGIC) { fprintf(stderr, "no armcpu_bridge: control register 0 reads %08x\n", ctl[0]); return 1; }
 		if (!(ctl[3] & 0x100)) { fprintf(stderr, "the CPU is not set to 68000: the proxy only replaces the fx68k\n"); return 1; }
+		int winfd = devwin ? open("/dev/armwin", O_RDWR) : -1;
+		if (devwin && winfd < 0) { devwin = 0; winfd = memfd; fprintf(stderr, "armuae: no /dev/armwin (insmod armwin.ko): window strongly ordered\n"); }
+		if (!devwin) winfd = memfd;
 		// natmem is the window; fast RAM and the ROM copy go over it
-		natmem_offset = (uae_u8 *)mmap(NULL, NATMEM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, HF_BASE);
+		natmem_offset = (uae_u8 *)mmap(NULL, NATMEM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, winfd, HF_BASE);
 		if (natmem_offset == MAP_FAILED) { perror("mmap window"); return 1; }
 		if (mmap(natmem_offset + 0x200000, 0x800000, PROT_READ | PROT_WRITE,
 		         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED ||
@@ -679,8 +702,8 @@ int main(int argc, char **argv)
 		for (uae_u32 a = 0; a < 8; a += 2) *(volatile uae_u16 *)(natmem_offset + a) = 0;
 		for (uae_u32 a = 0x100; a < 0x108; a += 2) *(volatile uae_u16 *)(natmem_offset + a) = 0;
 		if (shadow) {
-			shadow_rw = (uae_u8 *)mmap(NULL, CHIP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, SHADOW_PHYS);
-			chipwin   = (uae_u8 *)mmap(NULL, CHIP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, HF_BASE);
+			shadow_rw = (uae_u8 *)mmap(NULL, CHIP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, winfd, SHADOW_PHYS);
+			chipwin   = (uae_u8 *)mmap(NULL, CHIP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, winfd, HF_BASE);
 			if (shadow_rw == MAP_FAILED || chipwin == MAP_FAILED) { perror("mmap shadow"); return 1; }
 			bmode |= CTRL_MIRROR;
 			struct timespec c0;

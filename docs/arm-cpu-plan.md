@@ -823,6 +823,46 @@ small kernel driver mapping the window as Device or Normal non-cacheable
 memory instead of strongly ordered), and 32-bit writes through the SDRAM CPU
 port so a long is one slot instead of two.
 
+## Step 6: the window as Device memory, through a kernel module, 2026-10-29
+
+`/dev/mem` maps everything above Linux's RAM strongly ordered, so every
+store to the window waited for the FPGA's answer. `tools/armuae/kmod`
+builds `armwin.ko` for the board's kernel (6.18.38-MiSTer, vermagic
+`SMP mod_unload ARMv7 p2v8`, no signing or modversions; a vanilla 6.18.38
+tree with the board's `/proc/config.gz` and EXTRAVERSION `-MiSTer`, built
+with `KBUILD_MODPOST_WARN=1` as there is no Module.symvers). `/dev/armwin`
+maps only the flat window and the shadow, as Device memory, so the ARM
+posts its stores. armuae uses it when it is there (`-N`: /dev/mem): natmem's
+window, the chip RAM write view and the shadow's write view. The shadow's
+read view and the control registers stay strongly ordered -- a Device load
+from DDR3 is not ordered behind a Device load through the bridge, and that
+read is how the ARM learns a DMA has ended -- and a `dsb` puts posted stores
+ahead of every control register access.
+
+`insmod /media/fat/_Test/armuae/armwin.ko` (until reboot or rmmod).
+
+Measured, passes/s (chip3: per long, KITER multiply-shift rounds, then one
+long written to chip RAM):
+
+| | old armuae (window, SO) | shadow, SO | shadow + Device |
+|---|---|---|---|
+| chip read | 1158 | 5462 | 5462 |
+| chip write stream | 1497 | 1617 | 1698 |
+| chip3, 16 rounds | 1490 | 1272 | 1572 |
+| chip3, 64 rounds | 530 | 502 | **594 (+12%)** |
+| chip3, 256 rounds | 150 | 147 | 157 (+5%) |
+
+A strongly-ordered store cost the ARM ~0.2 us; posted, it costs nothing
+while the bridge queue has room. A stream of writes is still drained at the
+SDRAM's CPU write slots, ~0.6 us a long. AmigaVision and Frontier run on it.
+
+**Frontier, all of it together:** of the ~23% of the ARM's time chip RAM
+took (reads ~9%, writes ~14% at the median), the shadow wins back most of
+the read share and posted writes the round-trip part of the write share,
+~12% in all -- still not the 20%, because bursts of writes (span fills)
+fill the queue and wait on the drain. What remains is the drain itself: a
+long through the SDRAM CPU port as one 32-bit slot instead of two words.
+
 ## Prior art: BigMig (raparici/BigMig-Emu68A9, read 2026-10-25 at 3d5d4d1)
 
 BigMig is this plan, built and shipping: the Minimig chipset in the fabric and

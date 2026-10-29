@@ -7,6 +7,9 @@ typedef unsigned long u32;
 #define COUNT (*(volatile u32 *)0x000400)
 #define CHIP  ((volatile u32 *)0x010000)
 #define LONGS 1024
+#ifndef KITER
+#define KITER 16
+#endif
 
 static u32 fastbuf[LONGS];
 
@@ -20,8 +23,16 @@ int main(void)
 #elif MODE == 1
 		for (int i = 0; i < LONGS; i++) CHIP[i] = sum + i;
 		sum++;
-#else
+#elif MODE == 2
 		for (int i = 0; i < LONGS; i++) CHIP[i] = fastbuf[i];
+#else
+		/* MODE 3: a renderer's shape -- some arithmetic, then one long to chip
+		 * RAM; the arithmetic is what a posted write lets run on */
+		for (int i = 0; i < LONGS; i++) {
+			u32 x = fastbuf[i];
+			for (int k = 0; k < KITER; k++) x = x * 0x9E3779B1u + (x >> 7);
+			CHIP[i] = x;
+		}
 #endif
 		COUNT = COUNT + 1 + (sum & 0);
 	}
