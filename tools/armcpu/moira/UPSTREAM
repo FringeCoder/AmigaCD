@@ -1,0 +1,11 @@
+Moira, the 68000-family core of vAmiga, by Dirk W. Hoffmann.
+https://github.com/dirkwhoffmann/Moira, commit ce28239, the Moira/ directory.
+MIT licence, see LICENSE.
+
+Unmodified except MoiraConfig.h, set for speed behind armcpu's bus:
+  MOIRA_VIRTUAL_API     false  the client API is linked statically (cpu_moira.cpp)
+  MOIRA_EMULATE_FC      false  nothing on the Amiga's bus decodes FC0-FC2
+  MOIRA_EMULATE_ICACHE  false  the 68020 cache only changes cycle counts
+  MOIRA_MIMIC_MUSASHI   false  Moira's own (68000-exact) cycle counts and stack frames
+Moira executes the 68000, 68010, 68EC020 and 68020 only; its 68030 and 68040
+models are for the disassembler.

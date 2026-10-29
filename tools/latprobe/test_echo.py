@@ -92,5 +92,93 @@ outg = subprocess.run([exe, "-L", "-n", "100"], capture_output=True, text=True, 
 print(outg.stderr)
 ok = ok and outg.returncode == 2 and "lwbridge" in outg.stderr
 
+# -V (step 1e, DDR3 write visibility) on a file holding the bridge registers
+# at 0 and the DDR3 window at 0x1000. The stand-in plays visprobe_ddr3.v:
+# an A_GO is answered once word A holds the value (word A is made to go
+# stale for the first few reads of every other trial, so stale reads are
+# counted), a B_GO writes word B late enough that the ARM polls, and B_SEEN
+# reports b_cycles. Every trial must complete, in all five measurements.
+LW, DD = 0, 0x1000
+VA, VB = DD + 0x8090, DD + 0x8098
+g = tempfile.NamedTemporaryFile(delete=False)
+g.write(b"\0" * (DD + 0x10000)); g.flush()
+w = mmap.mmap(g.fileno(), DD + 0x10000)
+def rd(o): return struct.unpack_from("<I", w, o)[0]
+def wr(o, v): struct.pack_into("<I", w, o, v)
+wr(LW + 4, 0x4C574252)
+a_trials = b_trials = 0
+def visprobe():
+    global a_trials, b_trials
+    t_start = time.time()
+    mine4, mine5, mine6 = 0, 0, 0
+    while not stop:
+        wr(LW + 8, int((time.time() - t_start) * 113.5e6) & 0xFFFFFFFF)
+        r4 = rd(LW + 16)
+        if r4 != mine4:                       # A_GO
+            misses = 0
+            while rd(VA) != r4 or (a_trials % 2 and misses < 3):
+                misses += 1
+                if stop: return
+            a_trials += 1
+            mine5 = 16 + 20 * misses; wr(LW + 20, mine5)
+            mine4 = 0x80000000 | misses; wr(LW + 16, mine4)
+        r5 = rd(LW + 20)
+        if r5 != mine5:                       # B_GO
+            mine6 = 0x40000000 | 5; wr(LW + 24, mine6)
+            time.sleep(0.0002)
+            wr(VB, r5)
+            mine5 = r5
+            b_trials += 1
+        r6 = rd(LW + 24)
+        if r6 != mine6:                       # B_SEEN
+            wr(LW + 28, 300 if b_trials % 2 == 0 else 100)
+            mine6 = 0x80000000 | 5; wr(LW + 24, mine6)
+stop = False
+t = threading.Thread(target=visprobe); t.start()
+outv = subprocess.run([exe, "-V", "-n", "200", "-d", g.name], capture_output=True, text=True, timeout=120)
+stop = True; t.join()
+print(outv.stdout, outv.stderr)
+ok = ok and outv.returncode == 0 and a_trials == 600 and b_trials == 800 and "timed out" not in outv.stdout
+ok = ok and all(k in outv.stdout for k in ("A, word written 50 us earlier", "A, written and read back first",
+                                           "B, polled until visible", "B_GO arriving to the write accepted",
+                                           "B, one read of word A instead", "B, polled, then word B again", "controls:",
+                                           "B_GO arriving to the write accepted"))
+# b_cycles 300 polled against 100 not: 200 cycles at whatever clock it measured
+import re
+mv = re.search(r"bridge clock ([0-9.]+) MHz", outv.stdout)
+mr = re.search(r"reaches the ARM ~([0-9]+) ns", outv.stdout)
+ok = ok and mv and mr and abs(int(mr.group(1)) - 200 * 1000 / float(mv.group(1))) <= 1
+wr(LW + 4, 0)
+outvn = subprocess.run([exe, "-V", "-n", "10", "-d", g.name], capture_output=True, text=True, timeout=60)
+ok = ok and outvn.returncode == 1 and "no lw_echo behind the bridge" in outvn.stderr
+outvg = subprocess.run([exe, "-V", "-n", "10"], capture_output=True, text=True, timeout=60)
+ok = ok and outvg.returncode == 2 and "lwbridge" in outvg.stderr
+
+# -P (step 2, the 68000 bus proxy) on a plain 2 MB file standing in for the
+# bridge: memory order is the file's byte order, so every size must read
+# back what it wrote; MAGIC and the 68000 bit are set by hand, and the
+# counters stand still (VHPOSR "NOT MOVING" is the right answer here).
+h = tempfile.NamedTemporaryFile(delete=False)
+h.write(b"\0" * 0x200000); h.flush()
+pm = mmap.mmap(h.fileno(), 0x200000)
+struct.pack_into("<I", pm, 0x80000, 0x41435055)
+struct.pack_into("<I", pm, 0x8000C, 0x100)
+pm.flush()
+outp = subprocess.run([exe, "-P", "-n", "2000", "-d", h.name], capture_output=True, text=True, timeout=120)
+print(outp.stdout, outp.stderr)
+# A file has no blitter, so the blitter clear is "stale" and -P reports a
+# failure (exit 1); the ARM's own writes must still read back through FAST.
+ok = ok and outp.returncode == 1 and "2000 random words: 0 wrong" in outp.stdout and "NOT MOVING" in outp.stdout
+ok = ok and all(k in outp.stdout for k in ("read byte", "write word", "bus given back (OWN 0)", "FAST (reads",
+                                           "after ARM writes: 0 of 512 stale", "blitter clear: 256 of 256 stale", "FAST + FASTW",
+                                           "words just written: 256 of 256 wrong", "over the copy: 0 of 256 wrong"))
+# its 68k write of 0x11223344 at $070000 must be in the file big-endian
+ok = ok and pm[0x100000 + 0x70000:0x100000 + 0x70004] == bytes([0x11, 0x22, 0x33, 0x44])
+struct.pack_into("<I", pm, 0x8000C, 0); pm.flush()
+outq = subprocess.run([exe, "-P", "-n", "10", "-d", h.name], capture_output=True, text=True, timeout=60)
+ok = ok and outq.returncode == 1 and "not set to 68000" in outq.stderr
+outr2 = subprocess.run([exe, "-P", "-n", "10"], capture_output=True, text=True, timeout=60)
+ok = ok and outr2.returncode == 2 and "lwbridge" in outr2.stderr
+
 print("answered", answered, "-> RUN:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

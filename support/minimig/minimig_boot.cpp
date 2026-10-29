@@ -6,6 +6,7 @@
 #include "string.h"
 #include "stdio.h"
 #include "minimig_boot.h"
+#include "minimig_armcpu.h"
 #include "../../hardware.h"
 #include "../../user_io.h"
 #include "../../spi.h"
@@ -409,6 +410,13 @@ static void BootCustomInit()
 void BootInit()
 {
 	puts("Running minimig setup");
+
+	// The CPU halt below stops the bus proxy mid-cycle, and armcpu's bridge
+	// read then never completes: the AXI transaction holds the interconnect
+	// and the whole HPS freezes, Linux and network included (2026-10-26, OSD
+	// Reset with the ARM CPU running). So armcpu is stopped before any halt
+	// and started again once the CPU runs.
+	armcpu_stop();
 
 	spi_uio_cmd8(UIO_MM2_RST, SPI_RST_USR | SPI_RST_CPU | SPI_CPU_HLT);
 	spi_uio_cmd8(UIO_MM2_RST, SPI_RST_CPU | SPI_CPU_HLT);

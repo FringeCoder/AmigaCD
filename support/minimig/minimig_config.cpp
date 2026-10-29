@@ -19,6 +19,7 @@
 #include "minimig_fdd.h"
 #include "minimig_profile.h"
 #include "minimig_config.h"
+#include "minimig_armcpu.h"
 #include "rom_crypt.h"
 #include "vadjust_info.h"
 #include "minimig_share.h"
@@ -814,16 +815,21 @@ static constexpr mglcfg_field mm_cfg_fields[] =
 	MMF("cd_audio_buffer",   cd_audio_buffer,     MGLCFG_U8),
 	MMF("floppy0_path",      floppy_path[0],      MGLCFG_STR),
 	MMF("floppy1_path",      floppy_path[1],      MGLCFG_STR),
+	MMF("armcpu",            armcpu,              MGLCFG_U8),
 };
 #undef MMHF
 #undef MMF
 static constexpr int mm_cfg_nfields = sizeof(mm_cfg_fields) / sizeof(mm_cfg_fields[0]);
 static_assert(sizeof(((mm_configTYPE *)0)->userport) == 4, "userport is written as a 32-bit value");
+// armcpu took the struct's last tail-padding byte; the size, which
+// minimig_cfg_load dispatches on, must not have moved
+static_assert(sizeof(mm_configTYPE) == 9332, "armcpu must fit in the tail padding");
 
 // "All settings" has to stay true when the struct grows. The table must walk
 // the struct in order, without overlaps, from the end of id/version to the
-// end, and the only bytes it may skip are the struct's padding: one byte of
-// tail padding today. A field added to the struct and not to the table shows
+// end, and the only bytes it may skip are the struct's padding: none today,
+// since armcpu took the one byte of tail padding there was. A field added to
+// the struct and not to the table shows
 // up here as missing coverage and stops the build, instead of quietly being
 // left out of every .mgl.
 static constexpr size_t mm_cfg_uncovered(int i = 0, size_t cursor = offsetof(mm_configTYPE, ext_cfg2))
@@ -834,7 +840,7 @@ static constexpr size_t mm_cfg_uncovered(int i = 0, size_t cursor = offsetof(mm_
 			? (size_t)1 << 20                  // out of order or overlapping
 			: (mm_cfg_fields[i].off - cursor) + mm_cfg_uncovered(i + 1, mm_cfg_fields[i].off + mm_cfg_fields[i].size);
 }
-static_assert(mm_cfg_uncovered() == 1,
+static_assert(mm_cfg_uncovered() == 0,
 	"mm_cfg_fields must name every field of mm_configTYPE, in struct order: "
 	"a field was added to the struct (or the table) without the other");
 
@@ -1114,6 +1120,13 @@ static void ApplyConfiguration(char reloadkickstart)
 {
 	if (force_reload_kickstart) reloadkickstart = 1;
 	force_reload_kickstart = 0;
+
+	// The CPU halt below stops the bus proxy mid-cycle, and armcpu's bridge
+	// read then never completes: the AXI transaction holds the interconnect
+	// and the whole HPS freezes, Linux and network included (2026-10-26, OSD
+	// Reset with the ARM CPU running). So armcpu is stopped before any halt
+	// and started again once the CPU runs.
+	armcpu_stop();
 
 	minimig_ConfigCPU(minimig_config.cpu);
 
@@ -1810,6 +1823,9 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 	}
 
 	ApplyConfiguration(1);
+	// the config may ask for the ARM CPU; it also clears out an armcpu left
+	// running from before (a Main restart), which a fresh one replaces
+	armcpu_restart();
 	return(result);
 }
 
@@ -1821,6 +1837,8 @@ void minimig_reset()
 	akiko_cd32_init();
 	cdtv_cd_init();
 	a2065_start();
+	// a reset of the machine is a reset of the CPU on the ARM too
+	armcpu_restart();
 }
 
 void minimig_set_kickstart(const char *name)
@@ -2363,7 +2381,10 @@ void minimig_ConfigMemory(unsigned char memory)
 
 void minimig_ConfigCPU(unsigned char cpu)
 {
-	spi_uio_cmd8(UIO_MM2_CPU, cpu);
+	// With the ARM CPU the core runs its 68000 path, which is where the bus
+	// proxy sits; the CPU byte itself is left alone for when it is switched
+	// off again.
+	spi_uio_cmd8(UIO_MM2_CPU, armcpu_wanted() ? 0x00 : cpu);
 }
 
 void minimig_ConfigChipset(mm_configTYPE *config)
