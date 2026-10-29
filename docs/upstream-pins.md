@@ -19,7 +19,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `bfb5cd0` "Minimig: CD read speed for the CD32 and CDTV drive" -- **seven of thirteen taken (two adapted); the CD read speed setting NOT taken, its status bits are our save state's; see "Sync 2026-10-28"** | 2026-10-28 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `b4aac02` "input: force feedback requested by the core (#1393)" -- **both taken, the Action Replay adapted to status[63]; see "Sync 2026-10-29"** | 2026-10-29 |
+| ^ previous pin, superseded 2026-10-29 | | `bfb5cd0` "Minimig: CD read speed for the CD32 and CDTV drive" -- **seven of thirteen taken (two adapted); the CD read speed setting NOT taken, its status bits are our save state's; see "Sync 2026-10-28"** | 2026-10-28 |
 | ^ previous merge base, superseded 2026-10-28 | | `8328d9f` "Minimig: CD32 with up to 99 tracks, WAV tracks in cue (#1386)" -- taken, and the Akiko TOC bound follows it; SGI Indy not taken; see "Sync 2026-10-26" | 2026-10-26 |
 | ^ previous merge base, superseded 2026-10-26 | | `e698ccd` "Minimig: let the Akiko TOC carry all 99 tracks (#1384)" -- two of four taken (the 68EC030 adapted), two already here; see "Sync 2026-10-24" | 2026-10-24 |
 | ^ previous merge base, superseded 2026-10-24 | | `0c98d24` "Minimig: draw FDD Turbo at its own line in System (#1379)" -- upstream rewrote its history; content-merged from `d3b8537`, see "Sync 2026-10-22" | 2026-10-22 |
@@ -32,7 +33,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `06db70b` "CD read speed; fix CPU (Pierre le Chef) and Denise (Alien 3)" -- **all taken, three adapted (`ce1f386` as the core half of our own CD rate), see "Sync 2026-10-28"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-28 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `bf5d061` "The Action Replay cartridge (AR5, DeMoN v2 layout) as an option to HRTmon (#291)" -- **taken, adapted to status[63]; its Verilator system sim not; see "Sync 2026-10-29"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-29 |
+| ^ previous pin, superseded 2026-10-29 | | `06db70b` "CD read speed; fix CPU (Pierre le Chef) and Denise (Alien 3)" -- **all taken, three adapted (`ce1f386` as the core half of our own CD rate), see "Sync 2026-10-28"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-28 |
 | ^ previous pin, superseded 2026-10-28 | | `ba5adba` "Improve the timings (SDRAM pins, CPU data path) - #289" -- **all but `cf24493` taken, see "Sync 2026-10-26"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-1026` | 2026-10-26 |
 | ^ previous pin, superseded 2026-10-26 | | `b988bd09` "Fix Denise (black stripes on Flink AGA), fix 68EC020 freeze" -- all but `4ab0d5f` taken, see "Sync 2026-10-24" -- FringeCoder/AmigaCD_MiSTer#62, merged into `cd32-native-mvp` as `b8079fce`; `430209e` and the real-floppy line still out | 2026-10-24 |
 | ^ previous pin, superseded 2026-10-24 (**reverted upstream by #284**) | | `5b93485b` "Fix RTG with the 68030 MMU enabled (#281)" -- upstream rewrote its history; content-merged from `0bf2ab1`, see "Sync 2026-10-22" | 2026-10-22 |
@@ -108,6 +110,33 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-10-29: force feedback, and the Action Replay on a free status bit
+
+Main_MiSTer `bfb5cd0..b4aac02`, Minimig-AGA `06db70b..bf5d061`, and
+Template_MiSTer `sys/` `5dda373..76dd8f5` (into both the core and
+FringeCoder/Menu_MiSTer).
+
+| Upstream | Change | Here |
+|---|---|---|
+| `b4aac02` (#1393) | input: force feedback a core asks for through hps_io (`UIO_GET_FFB`, 0x45) | Taken, clean. Main probes each core with 0x45 at start-up and stops asking one that does not answer 0xFB. Nothing in the AmigaCD core's `hps_ext.v` or `hps_io.sv` used 0x45. |
+| Template `76dd8f5` (#122) | hps_io: the force feedback request, `FFB` parameter | Taken into `sys/hps_io.sv` of the core and of Menu_MiSTer, SNAC lines kept. `FFB` defaults to 0, so 0x45 answers 0 on both. |
+| `b57370d` (#1397) | Minimig: "Cartridge: Off / HRTmon / Action Replay" (AR5.ROM, DeMoN v2), ext_cfg bit 23 | Taken, **adapted**. Upstream's core reads it at `status[55]`, this core's screen test pattern, and our `minimig_status_compose()` drops ext_cfg bits above 18 anyway. The bit stays where upstream keeps it (config, MGL, menu); compose sends it to **`status[63]`**, the last status bit free on both sides. Menu row at this fork's menusub 10. |
+| `bf5d061` (#291) | The Action Replay cartridge in `cart.v`, its fetch detect in `cpu_wrapper`, no Kickstart mirror at $A80000 with it fitted | Taken, **adapted**: wired to `status[63]` in `AmigaCD.sv`; our comments and the CDTV ports kept in the three conflicted files; `chipdma_arb`'s own `memory_router` ties `ar_on` off. **Not taken:** `rtl/sim/system`, a Verilator system sim built around upstream's `Minimig.sv`, not our top. So the Action Replay is **not exercised by any bench here** and is unverified until hardware. |
+
+**Status bits are now all spoken for** on the AmigaCD core: [50:32] ext_cfg,
+[51] save, [53:52] slot, [54] restore, [55] test pattern, [58:56] A2065
+(Main-side only), [60:59] drive sound volume, [62:61] CD sector rate, [63]
+cartridge type. The next upstream feature that wants a status bit needs a
+decision, not a free slot.
+
+**Save states and the cartridge.** Neither HRTmon's nor the Action Replay's
+registers or RAM ($A80000-$AFFFFF) are in the save state. Not new -- HRTmon has
+always been outside it -- but a state saved with the Action Replay frozen will
+not restore into a frozen Action Replay.
+
+The physical-disc fork (`e6e62b2`), `kblood/Main_MiSTer-cd32-cdtv` (`52625a4`)
+and Menu_MiSTer (`fa83dc1`) have not moved.
 
 ## Sync 2026-10-28: the CD fixes, the core with them, and a status-bit collision
 
