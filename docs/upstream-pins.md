@@ -159,10 +159,10 @@ cartridge type. The next upstream feature that wants a status bit needs a
 decision, not a free slot.
 
 **Timing.** Fitted after it merged (AmigaCD_MiSTer `docs/seed-lottery.md`,
-rows 38-39): 4 of 20 seeds close against the baseline's 10, and the SDRAM
-address family (B_114) falls 0.53 ns -- most likely the new `ar_vsel` mux on
-the chip RAM address. A probable regression, kept; not yet confirmed by a
-path report.
+rows 38-41): 4 of 20 seeds closed against the baseline's 10, with the SDRAM
+address family (B_114) down 0.53 ns. That first looked like the new `ar_vsel`
+mux on the chip RAM address, but the next day's baseline (row 40) carries the
+Action Replay and has B_114 at +0.681 -- so it was most likely placement.
 
 **Save states and the cartridge.** Neither HRTmon's nor the Action Replay's
 registers or RAM ($A80000-$AFFFFF) are in the save state. Not new -- HRTmon has
