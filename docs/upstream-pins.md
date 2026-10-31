@@ -19,7 +19,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `b4aac02` "input: force feedback requested by the core (#1393)" -- **both taken, the Action Replay adapted to status[63]; see "Sync 2026-10-29"** | 2026-10-29 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `0827165` "Minimig: CD read speed Max Speed, data read stops CD audio" -- **the IDE fixes taken; Max Speed and the CD32 audio stop not (ours stops the pump already); see "Sync 2026-10-30"** | 2026-10-30 |
+| ^ previous pin, superseded 2026-10-30 | | `b4aac02` "input: force feedback requested by the core (#1393)" -- **both taken, the Action Replay adapted to status[63]; see "Sync 2026-10-29"** | 2026-10-29 |
 | ^ previous pin, superseded 2026-10-29 | | `bfb5cd0` "Minimig: CD read speed for the CD32 and CDTV drive" -- **seven of thirteen taken (two adapted); the CD read speed setting NOT taken, its status bits are our save state's; see "Sync 2026-10-28"** | 2026-10-28 |
 | ^ previous merge base, superseded 2026-10-28 | | `8328d9f` "Minimig: CD32 with up to 99 tracks, WAV tracks in cue (#1386)" -- taken, and the Akiko TOC bound follows it; SGI Indy not taken; see "Sync 2026-10-26" | 2026-10-26 |
 | ^ previous merge base, superseded 2026-10-26 | | `e698ccd` "Minimig: let the Akiko TOC carry all 99 tracks (#1384)" -- two of four taken (the 68EC030 adapted), two already here; see "Sync 2026-10-24" | 2026-10-24 |
@@ -33,7 +34,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `bf5d061` "The Action Replay cartridge (AR5, DeMoN v2 layout) as an option to HRTmon (#291)" -- **taken, adapted to status[63]; its Verilator system sim not; see "Sync 2026-10-29"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-29 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `e47c345` "Akiko (Max Speed, Chuck Rock), Agnus, CPU, joystick, SDRAM" -- **five taken (three adapted), the TX/RX line count already here, Max Speed not; see "Sync 2026-10-30"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-30 |
+| ^ previous pin, superseded 2026-10-30 | | `bf5d061` "The Action Replay cartridge (AR5, DeMoN v2 layout) as an option to HRTmon (#291)" -- **taken, adapted to status[63]; its Verilator system sim not; see "Sync 2026-10-29"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-29 |
 | ^ previous pin, superseded 2026-10-29 | | `06db70b` "CD read speed; fix CPU (Pierre le Chef) and Denise (Alien 3)" -- **all taken, three adapted (`ce1f386` as the core half of our own CD rate), see "Sync 2026-10-28"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-28 |
 | ^ previous pin, superseded 2026-10-28 | | `ba5adba` "Improve the timings (SDRAM pins, CPU data path) - #289" -- **all but `cf24493` taken, see "Sync 2026-10-26"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-1026` | 2026-10-26 |
 | ^ previous pin, superseded 2026-10-26 | | `b988bd09` "Fix Denise (black stripes on Flink AGA), fix 68EC020 freeze" -- all but `4ab0d5f` taken, see "Sync 2026-10-24" -- FringeCoder/AmigaCD_MiSTer#62, merged into `cd32-native-mvp` as `b8079fce`; `430209e` and the real-floppy line still out | 2026-10-24 |
@@ -111,6 +113,32 @@ the SNAC third tenant, and our OSD rows already exist.
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
 
+## Sync 2026-10-30: the IDE loop, and the 68EC020's instruction cache
+
+Main_MiSTer `b4aac02..0827165`, Minimig-AGA `bf5d061..e47c345`.
+
+| Upstream | Change | Here |
+|---|---|---|
+| `3771990` | ide: ATA PIO transfers one block per data request (cross-channel deadlock with a CD on IDE 1-0) | Taken, clean. Our `ide.cpp` additions are in mount/setup (physical disc, CDTV slot), not in the transfer loop it rewrites. |
+| `a473f77` | ide: one `ide_io()` call spends at most 4 ms on a transfer | Taken, clean. |
+| `8472443` | CD32: a data READ or TOC read stops the CD audio, and clears `cd_playing` | **Not taken.** Ours already stops the CDDA pump on a data READ (`akiko_cd32.cpp`, "stopped by a data read") but deliberately leaves `cd_playing` alone: clearing it broke Chuck Rock 2's boot (the comment there). The scan-TOC branch already clears it. |
+| `9a96aa8` | "CD read speed" Max Speed | **Not taken**: part of upstream's speed setting, which ours replaces. Our Fast is the nearest: CD32 at 8x, CDTV with the old 1 ms gap and no seek time. |
+
+Minimig-AGA (FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b`):
+
+| Upstream | Change | Core |
+|---|---|---|
+| `a2826ce` | Akiko: Max Speed without the tick | **Not taken**: our rate comes from the Main on `status[62:61]`; code 0 (8x) is our fastest, kept as the Z2 fast RAM floor. |
+| `b8a5bbd` | Akiko: the TX/RX DMA delays count lines, as WinUAE (Chuck Rock's black screen) | **Already here**: our `akiko.v` counts them in scanlines (`line_tick`). |
+| `6e84afe` | Agnus: the final D write of a blit before the CPU with AGA (Charlie J Cool) | Taken, clean. |
+| `09226f7` | cpu_wrapper: the 68EC020 fetches code over the chip bus through a 64-line instruction cache (All Terrain Racing, Premiere on the CD32); TG68K gives CACR writes and CAAR | Taken, **adapted**: kept the ARM proxy's FAST route and the CDTV chipreq gate; the kernel lines added by hand. **Added: a save state restore (`ss_resume`) clears the cache** -- upstream clears it only at reset, and a restore rewrites chip RAM under it. `tb_cpu_wrapper_park` checks it (control included). The cache's fetch path itself has no bench here. |
+| `69fb350` | userio: no opposite joystick directions at once (Deep Core) | Taken, clean. |
+| `6599190` | sdram_ctrl: the CPU requests select last at the address pins | Taken, **adapted**: our `cacheAddr` where upstream has `cpuAddr`, as at the 10-26 sync. Same function. |
+| `897af79` | cpu_wrapper: the RAM readies arrive last in the CPU enable | Taken, **adapted** by hand: our enable also carries the save state park and the CDTV bridge. Same function. |
+
+The physical-disc fork (`e6e62b2`), `kblood/Main_MiSTer-cd32-cdtv` (`52625a4`),
+Menu_MiSTer (`fa83dc1`) and Template_MiSTer (`76dd8f5`) have not moved.
+
 ## Sync 2026-10-29: force feedback, and the Action Replay on a free status bit
 
 Main_MiSTer `bfb5cd0..b4aac02`, Minimig-AGA `06db70b..bf5d061`, and
@@ -129,6 +157,12 @@ FringeCoder/Menu_MiSTer).
 (Main-side only), [60:59] drive sound volume, [62:61] CD sector rate, [63]
 cartridge type. The next upstream feature that wants a status bit needs a
 decision, not a free slot.
+
+**Timing.** Fitted after it merged (AmigaCD_MiSTer `docs/seed-lottery.md`,
+rows 38-41): 4 of 20 seeds closed against the baseline's 10, with the SDRAM
+address family (B_114) down 0.53 ns. That first looked like the new `ar_vsel`
+mux on the chip RAM address, but the next day's baseline (row 40) carries the
+Action Replay and has B_114 at +0.681 -- so it was most likely placement.
 
 **Save states and the cartridge.** Neither HRTmon's nor the Action Replay's
 registers or RAM ($A80000-$AFFFFF) are in the save state. Not new -- HRTmon has
