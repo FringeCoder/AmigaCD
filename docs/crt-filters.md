@@ -5,7 +5,7 @@ Written 2026-10-31 for a Philips 32PW9551: a 16:9 CRT with a vertical-stripe
 of it holds for any display. **Nothing here has been checked on a screen yet**;
 it is worked out from the code, and each claim cites where.
 
-## Scanlines: already in the core
+## Fixed scanlines: already in the core
 
 `Video & Audio -> Scandoubler FX -> CRT 25% / 50% / 75%` (`menu.cpp`,
 `config_scanlines_msg`). It is not analog-only: the scaler's input is taken
@@ -21,6 +21,57 @@ it is worked out from the code, and each claim cites where.
   (`sl_r <= FB_EN ? 0 : scanlines`). Both are by design.
 - Cost: the line doubler holds one line, ~64 us. No frame of lag.
 
+## Blooming scanlines: the Scan_Bloom filters (preferred)
+
+On a CRT the beam widens on bright pixels, so a bright line spills into the
+dark gap beside it and a dark line stays thin. The core's scanlines cannot do
+that -- they dim every second line by a fixed amount. ascal's *adaptive* mode
+can: an adaptive filter holds two tables and ascal blends them by luma
+(`sys/ascal.vhd`, `poly_lerp`; luma 0 takes the first, 255 the second).
+
+So the scaler draws the lines instead of the core:
+
+- **Scandoubler FX: Off.** The scaler gets 288 lines and doubles them itself.
+- `vscale_mode=1` at 576p, so the scale is exactly 2x. At 2x ascal walks the
+  vertical phase 0.25, 0.75, 0.25, ... (`o_vacc_ini = vsize - ivsize`, step
+  `2*ivsize` over `2*vsize`). The files take phases below 0.5 as the beam row
+  (the source line whole) and phases from 0.5 as the gap, lit by both
+  neighbouring lines at a fraction of full brightness.
+- **Vert filter: From file -> `CRT_Beam/Scan_Bloom_Medium.txt`.** The *Vert*
+  filter, not the Scan filter: Main picks the Scan filter only while the
+  core's own scanlines are on (`video.cpp`, `flt_flags & 0x30`).
+- Horz filter: a Beam file. Only one of the two may be adaptive -- Main sends
+  the adaptive table for the horizontal filter if it has one, else for the
+  vertical (`send_video_filters`) -- and the Beam files are not.
+
+| File | Gap under dark pixels | Gap under bright pixels |
+|---|---|---|
+| `Scan_Bloom_Light.txt` | 30% | 90% |
+| `Scan_Bloom_Medium.txt` | 15% | 70% |
+| `Scan_Bloom_Strong.txt` | 0% | 50% |
+
+```ini
+vfilter_default=CRT_Beam/Beam_Medium.txt
+vfilter_vertical_default=CRT_Beam/Scan_Bloom_Medium.txt
+```
+
+Known limits:
+
+- The luma ascal blends on is the *nearest* source line's
+  (`o_vpix_inner(0)`), and at phase 0.75 that is the line below the gap. So a
+  gap blooms for the line beneath it, not the one above. The gap's colour
+  still comes from both lines.
+- Exact 2x only. At other scales the phases wander and the lines come out
+  uneven. Interlaced screens use the interlace filter instead, so they get no
+  scanlines, as with the core's.
+- It needs the core built **with** ascal's adaptive filter, which is the
+  default. `MISTER_DISABLE_ADAPTIVE` was considered for timing and dropped
+  for exactly this reason (AmigaCD_MiSTer `docs/seed-lottery.md` row 42).
+  Without it a Scan_Bloom file still loads but its second table overwrites
+  the first, giving fixed scanlines at the bright-table level.
+
+The fixed alternative is the core's own option, above.
+
 ## The CRT_Beam filters
 
 An aperture-grille tube does not blur adjacent pixels along a line, and fed a
@@ -33,13 +84,14 @@ scaler's horizontal polyphase filter, which works per line and adds no lag.
 | `CRT_Beam/Beam_Light.txt` | horizontal | Gaussian spot, sigma 0.35 source pixels |
 | `CRT_Beam/Beam_Medium.txt` | horizontal | sigma 0.45 |
 | `CRT_Beam/Beam_Soft.txt` | horizontal | sigma 0.55 |
-| `CRT_Beam/Vertical_Sharp.txt` | vertical | nearest neighbour |
+| `CRT_Beam/Vertical_Sharp.txt` | vertical | nearest neighbour, for the core's own scanlines |
 
 Copy `filters/CRT_Beam/` to `/media/fat/Filters/CRT_Beam/`
 (`scripts/stage-output.sh` stages it), then in `Video processing`:
 
 - Horz filter: From file -> `CRT_Beam/Beam_Medium.txt`
-- **Vert filter: From file -> `CRT_Beam/Vertical_Sharp.txt`.** The default,
+- **Vert filter: From file -> `CRT_Beam/Vertical_Sharp.txt`** with the core's
+  scanlines, or a `Scan_Bloom` file without them (above). The default,
   "Same as Horz", would run the beam vertically too. A beam blends its
   neighbours even at phase 0, so it would smear the scanlines.
 - Scan filter: leave on "Same as Vert".

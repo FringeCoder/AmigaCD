@@ -69,7 +69,10 @@ jobs:
       # of it looks like a matter of taste on screen. This catches a hand edit,
       # a stray file, and each parser rule; each was falsified by mutating a
       # file (a tap +7: "row sums to 135"; a row deleted: "63 rows, which does
-      # not divide 256"; an extra file: "files the generator does not write").
+      # not divide 256"; an extra file: "files the generator does not write";
+      # the "adaptive" header dropped from a Scan_ file, which the parser would
+      # take as a plain 128-phase filter: "a Scan_ file must be adaptive"; a
+      # gap row over full brightness: "row sums to 160, want 0..128").
       - name: CRT filters match their generator
         run: python3 tools/crt-beam-filters.py --check
 
