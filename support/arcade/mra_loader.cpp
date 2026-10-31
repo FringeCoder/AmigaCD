@@ -1474,6 +1474,7 @@ mgl_struct* mgl_parse(const char *xml)
 	memset(&mgl, 0, sizeof(mgl));
 	snprintf(mgl.xml_path, sizeof(mgl.xml_path), "%s", xml ? xml : "");
 	mgl_from_mra = (isXmlName(xml) == 1);
+	mgl.from_mra = mgl_from_mra;
 
 	printf("MGL %s\n", xml);
 
