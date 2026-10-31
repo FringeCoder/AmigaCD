@@ -61,6 +61,18 @@ jobs:
       - name: Host syntax check
         run: ./syntax_check.sh
 
+      # The scaler filters in filters/CRT_Beam/ are generated, and
+      # read_video_filter() in video.cpp does not reject a broken one: a row
+      # count that does not divide 256, or a tap out of range, loads nearest
+      # neighbour in its place while the OSD still shows the file's name. A
+      # row that sums to other than 128 changes brightness at that phase. All
+      # of it looks like a matter of taste on screen. This catches a hand edit,
+      # a stray file, and each parser rule; each was falsified by mutating a
+      # file (a tap +7: "row sums to 135"; a row deleted: "63 rows, which does
+      # not divide 256"; an extra file: "files the generator does not write").
+      - name: CRT filters match their generator
+        run: python3 tools/crt-beam-filters.py --check
+
       - name: Resolve toolchain package name
         id: tc
         run: |

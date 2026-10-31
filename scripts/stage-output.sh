@@ -12,6 +12,7 @@
 #   AmigaCD_<date>.rbf -> /media/fat/_Computer/  (or wherever you keep cores)
 #   menu.rbf         -> /media/fat/            (the boot menu core)
 #   MiSTer_AmigaCD   -> /media/fat/            (needs TWO MiSTer.ini sections)
+#   Filters/CRT_Beam -> /media/fat/Filters/    (optional scaler filters)
 #
 # The stock /media/fat/MiSTer is deliberately left alone. `main=` matches a core's
 # CONF_STR name, and the boot menu core calls itself MENU, so [MENU] main=
@@ -103,6 +104,15 @@ rc=0
 copy "$CORE_SRC" "$CORE_DST" || rc=1
 copy "$MENU_SRC" "$MENU_DST" || rc=1
 
+# Scaler filters, staged at the path they have on the card (Filters/ is where
+# video.cpp's COEFF_DIR resolves to). From this repo, so no build is needed.
+# Replaced whole, so a file renamed or dropped here does not linger in output/.
+FILT_SRC="filters/CRT_Beam"   # the script cd'd to the repo root above
+rm -rf "$OUT/Filters/CRT_Beam"
+mkdir -p "$OUT/Filters"
+cp -r "$FILT_SRC" "$OUT/Filters/CRT_Beam"
+printf "  %-18s %9d files\n" "Filters/CRT_Beam" "$(ls "$OUT/Filters/CRT_Beam" | wc -l)"
+
 # The card is not ours to clean -- it is over ssh and the core directory is the
 # user's -- but a leftover undated amigacd.rbf there sits beside the new one and
 # both load, so say it once rather than leaving it to be noticed.
@@ -160,6 +170,8 @@ Copy to the MiSTer SD card:
   AmigaCD_<date>.rbf -> /media/fat/_Computer/   (or wherever you keep cores)
   menu.rbf           -> /media/fat/menu.rbf
   MiSTer_AmigaCD     -> /media/fat/MiSTer_AmigaCD
+  Filters/CRT_Beam/  -> /media/fat/Filters/CRT_Beam/   (optional; see
+                        docs/crt-filters.md in the AmigaCD repo)
 
 Copy the core under the name it already has -- do not drop the date. The MiSTer
 menu reads a core's date from its FILENAME (it looks for "_20" and takes the six
