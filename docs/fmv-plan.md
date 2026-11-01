@@ -24,8 +24,8 @@ end, a frame buffer reader and an overlay mux.
 |---|---|---|
 | Board decode, autoconfig, ROM and RAM | core | One more Zorro II card in `cpu_wrapper.v`'s autoconfig chain |
 | CL450 / L64111 / IO registers | core front end, userspace model | The CPU's writes are posted to a DDR3 ring. Its reads come from shadow registers that Main keeps current, so a read never waits on the ARM. |
-| MPEG-1 video decode | userspace | libmpeg2, as WinUAE uses |
-| MPEG audio (layer II) decode | userspace | kjmp2, as WinUAE uses |
+| MPEG-1 video decode | userspace | libmpeg2 (GPL-2+) |
+| MPEG audio (layer II) decode | userspace | kjmp2 (zlib) |
 | Frame display and genlock | core | Reads a DDR3 frame buffer and muxes it in before `video_mixer` |
 | Audio out | userspace + core | PCM into the existing CDDA FIFO (see phase 4) |
 
@@ -62,7 +62,7 @@ of those reads would stall the 68020 that long. So:
 The RTL then stays small and dumb. All the CL450 command semantics are C,
 where they can be unit-tested.
 
-## Reference: what WinUAE models
+## Reference: what WinUAE models (an oracle, not a source)
 
 From `cd32_fmv.cpp` and `cd32_fmv_genlock.cpp` in
 [tonioni/WinUAE](https://github.com/tonioni/WinUAE), read 2026-11-01:
@@ -108,9 +108,10 @@ touched.
 No code in this phase. Its gate: every item below answered here, with a
 source.
 
-**Result, 2026-11-01: items 2 and 4 are closed. Items 1, 5 and 6 are answered
-by inference, and each still needs one confirmation, named below. Item 3 is
-partly open.** None of the open parts blocks phase 1, which needs only a Video
+**Result, 2026-11-01: items 1, 2 and 4 are closed (item 1 by Mark's decision,
+with one action: get the L64111 manual). Item 3 is decided, Cannon Fodder
+first, with its MPEG track still to identify. Items 5 and 6 are answered by
+inference, and each still needs the confirmation named below.** None of the open parts blocks phase 1, which needs only a Video
 CD image. So phase 1 can start while they are closed.
 
 Sources used:
@@ -129,8 +130,12 @@ Sources used:
 - Clark Alexander, *REVIEW: CD32 Full Motion Video module*,
   comp.sys.amiga.reviews, 1998-11-20
   ([math.uh.edu](https://www.math.uh.edu/~barrett/data/all/CD32FMV)).
+- Cannon Fodder and the module: [MobyGames trivia](https://www.mobygames.com/game/210/cannon-fodder/trivia/),
+  [IMDb alternate versions](https://www.imdb.com/title/tt0452596/alternateversions).
+- L64111 manual listing: [alldatasheet 137324](https://www.alldatasheet.net/datasheet-pdf/pdf/137324/LSI/L64111.html)
+  (not downloadable from this environment).
 
-### 1. Licence: same footing as `akiko_cd32.cpp`; the owner decides
+### 1. Licence: decided, the model is written from the manuals
 
 - **libmpeg2** is GPL-2.0-or-later, so it can go into a GPL-3 Main.
   **kjmp2** (Martin Fiedler, as vendored in WinUAE `archivers/mp2/kjmp2.cpp`)
@@ -146,13 +151,33 @@ Sources used:
   interpreter (akiko.cpp @ SHA 2c7f8581)". That came in from kblood's fork and
   cites WinUAE line numbers throughout.
 
-**Decision for the owner:** either treat the FMV model the way `akiko_cd32.cpp`
-is treated (a port, with WinUAE's SHA and line numbers cited), or write it
-from the CL450 manual and use WinUAE only to compare behaviour. The manual
-covers the CL450 command set and registers in full (chapters 11-13). The
-L64111's command set has no manual in hand, so writing that part without
-WinUAE costs more. Either way, any WinUAE-derived file carries a header naming
-its source and SHA.
+**Decision (Mark, 2026-11-01): write the model from the manuals.** No WinUAE
+code goes into `fmv.cpp` or the RTL. WinUAE is used only as a **behavioural
+oracle**: run the same disc in it, then compare its logs and output with ours.
+That rules out transcribing it, its constants included. Facts about the
+hardware that WinUAE happens to record (the board map, ROM checksums, the
+autoconfig source in item 3) are still usable, each cited to a primary source
+where one exists.
+
+- **CL450:** the *CL450 MPEG Video Decoder User's Manual* covers the host
+  registers, the command set (chapter 11, with each command's code and
+  arguments), interrupts, buffer fullness and SCR/PTS sync (chapter 13). Write
+  from that.
+- **L64111:** LSI Logic's *L64111 MPEG Audio Decoder Technical Manual* (76
+  pages) exists. It is listed on alldatasheet as item 137324, but both of
+  that site's mirrors returned HTTP 403 from this environment. **Action:**
+  someone downloads it in a browser and puts it under `docs/reference/` if
+  its licence allows, or keeps a local copy and records its title and
+  checksum there. Until then the L64111 side cannot be written under this
+  rule. Its stream format is plain ISO 11172-1 system packets and 11172-3
+  layer II frames, so only the register and status semantics need the
+  manual.
+- **Behaviour the manuals leave open:** wiring on the cartridge, such as the
+  IO word at `$240000`, its bits, and which chip interrupts on which bit, is
+  board design, not chip behaviour. It is taken from what the ROM does in
+  WinUAE and on our core (phase 2 logs), and from the CD32 ECR. Each such fact
+  is written down in this file with how it was established, so the boundary
+  stays visible.
 
 ### 2. The ROM: two known dumps
 
@@ -167,20 +192,45 @@ Like `CD32.rom`, it is user-supplied and never committed. Main should check
 the size and log which of the two it is, or "unknown dump", without refusing
 it.
 
-### 3. Test material: Video CD yes; cartridge-only games not found
+### 3. Test material: Cannon Fodder first, then Video CD
 
 - The 1998 review confirms that the cartridge plays **Video CD** movies and
   music videos, **Karaoke CDs**, and what it calls "Digital Video CDs"
   (presumably CD-i Digital Video). The test set needs at least one of each
   that exists: a VCD 2.0, a VCD 1.1 and a karaoke VCD. Add a CD-i DV disc only
   once someone confirms on a real cartridge or in WinUAE that it plays.
-- **No source names a CD32 game that requires the cartridge.** Wikipedia's
-  CD32 list marks titles such as *Microcosm* and *Chuck Rock II* "FMV", but
-  that is in-game video. CD32 games stream that themselves (CDXL), and none of
-  the sources says the cartridge is needed. Until a title is named and
-  checked, the plan targets Video CD playback, and "games" means none.
-- **Still open:** who on the project owns which discs. The gates below need
-  both a CHD and a physical copy of each test disc.
+- **Primary test title: *Cannon Fodder* (CD32, Virgin 1994)** (Mark,
+  2026-11-01). It plays a live-action MPEG intro, about 3 minutes, if the
+  module is detected, and skips it otherwise. MobyGames' trivia calls it the
+  only CD32 game that supports the module, and IMDb's alternate-versions entry
+  for the intro says the CD32 release carries it as "a special MPEG track".
+  This is a good first target for three reasons:
+  - The project already boots it from CHD and from Real CD. It is the title
+    the Akiko bring-up was done against (`akiko_cd32.cpp:4`).
+  - It has two data tracks, which already needed the per-track CHD offset fix
+    (`ide_cdrom.cpp:1452`). **Hypothesis:** the second data track is the MPEG
+    track. Check with `chdman info` on the project's CHD, or with the
+    disc's TOC from Real CD, and record the track's mode and sector size.
+    If it is Mode 2 at 2336 bytes, item 4's header fix is needed for
+    Cannon Fodder itself.
+  - Being a game, it drives the cartridge through its own code path, not
+    only through the FMV ROM's Video CD player. So it is a second,
+    independent test of the model.
+
+  How it detects the module is still to find out, most likely an
+  `expansion.library` lookup of the board's autoconfig ID. In WinUAE the
+  board's autoconfig bytes are the **first 128 bytes of `fmv.rom`**
+  (`expansion.cpp`, `expamem_init_cd32fmv`, which loads them from the ROM).
+  If that is how the real cartridge is wired, the core serves autoconfig
+  straight from the ROM image, and the ID is whatever the user's dump holds.
+  To confirm, read the ROM's first 128 bytes as autoconfig nibbles: they
+  should decode to a valid 1 MB Zorro II board.
+- Wikipedia's CD32 list also marks titles such as *Microcosm* and *Chuck
+  Rock II* "FMV". That is in-game video they stream themselves (CDXL). No
+  source says they use the cartridge.
+- **Discs on hand:** Cannon Fodder, as CHD and physical. The Video CD set
+  above is still to be found, and phase 1 needs one Video CD image, or the
+  MPEG track ripped from Cannon Fodder, which serves the same purpose.
 
 ### 4. Mode 2 Form 2 sectors: no format problem in raw images and physical discs; 2336-byte images lose their header
 
@@ -330,17 +380,23 @@ no room for one.
   CLAUDE.md requires.
 
 **Userspace** (this repo):
-- `support/minimig/fmv.cpp`: drains the ring and runs the CL450 / L64111 model.
+- `support/minimig/fmv.cpp`: drains the ring and runs the CL450 / L64111 model,
+  written from the two chips' manuals (phase 0, item 1) and carrying no
+  WinUAE code.
   It updates the shadows and logs every host command. No decoding yet: the
   model reports pictures as decoded, on schedule, without making any.
 - Unit tests in `tests/` for the command parser and buffer fullness, fed with
   logged sequences.
 
 **Gate:**
-1. With a Video CD inserted, the FMV ROM boots into its player and runs a
-   track to completion: the commands are the same as WinUAE's log of the same
-   disc, and the CPU doesn't hang.
-2. With the bit off, the seed panel is unchanged. With it on, the panel is no
+1. **Cannon Fodder** with the module on detects it and streams the whole
+   intro into the model: the command log matches WinUAE's run of the same
+   disc, compared by sequence, not by code. The game then reaches its title
+   screen. With the module off it boots exactly as it does today, with no
+   intro.
+2. With a Video CD inserted, the FMV ROM boots into its player and runs a
+   track to completion, with the same comparison, and the CPU doesn't hang.
+3. With the bit off, the seed panel is unchanged. With it on, the panel is no
    worse than the noise line (~0.3 ns per family, `seed-lottery.md`), and no
    family that closed now fails.
 
@@ -377,8 +433,8 @@ If a title plays CD audio and FMV audio together, this doesn't work, and a
 second stream into the mixer is needed. Phase 0's disc list will say whether
 any title does.
 
-**Sync:** audio PTS against the CL450 SCR, in Main, the way WinUAE's
-`l64111_get_frame` / `cl450_scr` do. Video is the side that gets dropped or
+**Sync:** audio PTS against the CL450 SCR, in Main, as the CL450 manual's
+chapter 13 describes. Video is the side that gets dropped or
 repeated: never stretch audio.
 
 **Gate:** lips stay in sync over a full Video CD (>= 60 min), audio and video
@@ -408,8 +464,12 @@ from Real CD.
 2. **Timing closure.** Every RTL phase re-rolls placement. The mux on the
    video path and the DDR3 reader are the likely costs. Judge them by the
    panel, never by the best seed.
-3. **The CL450 interface.** It is reverse-engineered from one emulator. A
-   title that uses a command WinUAE doesn't model will fail in our model too,
-   and our log will show which one.
-4. **Core 0 contention.** Linux timer and interrupt work already land there
+3. **The model is new code.** It is written from the manuals, so it has none
+   of WinUAE's years of fixes, and the cartridge's board wiring is not in any
+   manual. WinUAE as an oracle and the phase 2 logs are the safety net. Two
+   titles that drive the cartridge differently (the Cannon Fodder intro and
+   the ROM's Video CD player) make a gap visible early.
+4. **The L64111 manual is not in hand yet.** Until it is, the audio half of
+   the model cannot be written (phase 0, item 1).
+5. **Core 0 contention.** Linux timer and interrupt work already land there
    (`arm-cpu-plan.md`, step 1). Phase 1's busy run is what tests this.
