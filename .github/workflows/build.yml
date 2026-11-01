@@ -111,6 +111,26 @@ jobs:
       - name: Build armcpu
         run: make -C tools/armcpu
 
+      # MEASUREMENT ONLY: phase 1 of docs/fmv-plan.md. Times MPEG-1 decoding on
+      # the MiSTer's ARM, which decides whether the CD32 FMV module can be
+      # decoded in Main at all.
+      - name: Build fmvbench
+        run: make -C tools/fmvbench
+
+      # The binary that goes to the MiSTer, run under user-mode qemu against
+      # ffmpeg's decode of Video CD streams, with both of libmpeg2's motion
+      # compensation paths (C and the ARM assembler, -a c|arm). The host test
+      # job checks the same source built for x86; only this checks what the ARM
+      # compiler and the assembler made of it. A bench number from a binary
+      # that decodes wrongly would be a number about nothing.
+      - name: fmvbench ARM binary decodes correctly (qemu)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg qemu-user-static
+          FMVBENCH_BIN=tools/fmvbench/fmvbench FMVBENCH_RUNNER=qemu-arm-static \
+          FMVBENCH_ACCELS="c arm" python3 tools/fmvbench/test_fmvbench.py
+
       # bin/MiSTer is stripped by the Makefile; bin/MiSTer.elf keeps symbols.
       # `file` is the quickest confirmation this really is an ARM binary and not
       # something the host toolchain produced. The GLIBC_* dump is the number to
@@ -134,6 +154,7 @@ jobs:
             bin/MiSTer.elf
             tools/latprobe/latprobe
             tools/armcpu/armcpu
+            tools/fmvbench/fmvbench
           if-no-files-found: error
           # Without this these keep the repository default and never expire. 493
           # of them accumulated from 2026-07-30 onward, 0.83 GB, which is over
@@ -331,6 +352,21 @@ jobs:
       # overlay following CIA-A, RESET restoring it, the bus given back.
       - name: armcpu emulator (host)
         run: python3 tools/armcpu/test_armcpu.py
+
+      # fmvbench against ffmpeg, on streams ffmpeg makes to the Video CD
+      # specification: the demuxed elementary streams byte-identical (program
+      # stream, hand-muxed with every packet-header form, MPEG-2 PS, a VCD .dat,
+      # raw Mode 2 Form 1 and Form 2 tracks); I, P and B pictures matching in
+      # display order; RGB565 within one LSB of BT.601; every picture and audio
+      # frame counted. Falsified 2026-11-01 with ten mutations of fmvbench.c,
+      # each failing the check that names it (docs/fmv-plan.md, phase 1).
+      - name: fmvbench decode (host)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg
+          make -C tools/fmvbench host
+          python3 tools/fmvbench/test_fmvbench.py
 
       # The same compiled tests under ASan and UBSan. Some of what they guard is
       # undefined behaviour that glibc happens to get right: mgl_rbf.cpp's

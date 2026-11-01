@@ -1,0 +1,29 @@
+libmpeg2 0.5.1 -- vendored decoder core
+=======================================
+
+Source:  https://deb.debian.org/debian/pool/main/m/mpeg2dec/mpeg2dec_0.5.1.orig.tar.gz
+         (the upstream release tarball, libmpeg2-0.5.1/, as Debian ships it)
+SHA-256: dee22e893cb5fc2b2b6ebd60b88478ab8556cb3b93f9a0d7ce8f3b61851871d4
+Licence: GPL-2.0-or-later (COPYING), compatible with this repository's GPL-3.
+
+Used by tools/fmvbench (phase 1 of docs/fmv-plan.md) to measure MPEG-1
+decoding on the MiSTer's ARM. Not part of the Main binary: the top-level
+Makefile lists its lib/ directories by name and this is not one of them.
+
+Taken, unchanged:
+  COPYING AUTHORS README
+  include/mpeg2.h include/attributes.h
+  libmpeg2/{alloc,cpu_accel,cpu_state,decode,header,idct,motion_comp,slice}.c
+  libmpeg2/motion_comp_arm.c libmpeg2/motion_comp_arm_s.S
+  libmpeg2/mpeg2_internal.h libmpeg2/vlc.h
+
+Left out: the autoconf build, libvo, the convert/ library (fmvbench does its
+own YUV -> RGB565, since that is the format the core will scan out), the
+mpeg2dec/extract programs, and the x86/PPC/Alpha/SPARC acceleration files.
+
+Added: config.h, written by hand in place of the autoconf one (see the file).
+
+To check the copy against the tarball:
+  tar xzf mpeg2dec_0.5.1.orig.tar.gz
+  for f in $(cd lib/libmpeg2 && find include libmpeg2 -type f); do
+    cmp libmpeg2-0.5.1/$f lib/libmpeg2/$f; done

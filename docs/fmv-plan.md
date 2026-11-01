@@ -362,6 +362,71 @@ If it fails, try libavcodec's mpeg1video before giving up. If that fails too,
 the plan stops: the only path left would be an FPGA decoder, and the fit has
 no room for one.
 
+### Status, 2026-11-01: tool built and verified; the hardware run is next
+
+**Built:** `tools/fmvbench` (fmvbench.c, with libmpeg2 0.5.1 vendored in
+`lib/libmpeg2` and kjmp2 1.1 in `lib/kjmp2`; each `README.vendor` gives the
+source, checksum, licence and the exact files taken). Like `latprobe` it is
+static and comes out of the CI artifact next to `MiSTer`.
+
+What it measures, per run:
+- each **decoded picture**: libmpeg2 time plus the YUV 4:2:0 to RGB565
+  conversion, by picture type (I/P/B), as p50/p90/p99/max, with the worst
+  picture's index and type;
+- each **audio frame** (kjmp2, Layer II);
+- **load**: all decode work as a share of the content's own play time, i.e. %
+  of one core at the stream's frame rate;
+- with `-p`, **paced** playback in real time: pictures that missed their
+  display deadline, and the real CPU share of playing it.
+
+It ends with `FMVBENCH GATE: PASS|FAIL`, judged as above: p99 under 30 ms and
+load at most 60 %.
+
+**Verified** against ffmpeg (`tools/fmvbench/test_fmvbench.py`, in CI):
+- the demuxed elementary streams are byte-identical to ffmpeg's for an
+  MPEG-1 program stream, a hand-built one using every packet-header form, an
+  MPEG-2 program stream, a VCD `.dat`, and raw Mode 2 Form 2 and Form 1
+  tracks;
+- I, P and B pictures match ffmpeg's decode in display order (PSNR about
+  68 dB, i.e. IDCT rounding only);
+- RGB565 is within one LSB of BT.601 limited range;
+- every picture and audio frame is counted, and 25 and 29.97 fps are read
+  correctly.
+
+The ARM binary passes the same checks under qemu with both motion
+compensation paths (`-a c`, `-a arm`). The test was falsified with ten
+mutations of fmvbench.c, and each one failed the check that names it. One of
+them (STD buffer fields) first survived, because ffmpeg's VCD muxer never
+writes those fields; the hand-built stream was added for that reason.
+
+**Host numbers are not the gate.** On the x86 build machine, a noisy 8 s PAL
+VCD stream decodes at p99 0.8 ms per picture with 1.7 % load. That says the
+tool works, not what an 800 MHz Cortex-A9 does.
+
+**To run on the MiSTer** (the gate run):
+
+1. Take `fmvbench` from the CI artifact, and a test stream: any Video CD
+   `.dat` (`MPEGAV/AVSEQ01.DAT`), or a VCD-standard file made on a PC from real
+   footage (synthetic content is too easy), for example
+   `ffmpeg -i film.mkv -t 120 -target pal-vcd -bf 2 test.mpg`. Cannon
+   Fodder's MPEG track is the real target; rip it as a raw `.bin` in the
+   local PC session, and fmvbench reads it directly.
+2. **Idle run**, core loaded, nothing playing:
+   `./fmvbench -c 0 -n 3 test.mpg`, then the same with `-a c`, to see what
+   libmpeg2's ARM assembler is worth.
+3. **Busy run**, with Cannon Fodder or another CD32 game streaming from CHD:
+   the same two commands, then once paced: `./fmvbench -c 0 -p test.mpg`.
+4. Paste the `FMVBENCH` lines into this section.
+
+**Not measured by this tool:**
+- **Writing the frames into the core's DDR3.** fmvbench converts into
+  ordinary memory. The core's frame buffer will be an uncached `/dev/mem`
+  mapping. `arm-cpu-plan.md` step 1b measured a posted uncached write at
+  8.6 ns, so a 352x288 RGB565 frame (50 688 32-bit writes) costs about
+  0.44 ms, about 1 % of a core at 25 fps. Phase 3 measures it for real.
+- **Demuxing.** It is done before timing and is trivial next to decoding
+  (copies, and a start-code scan).
+
 ## Phase 2: the board, with a logging model
 
 **Core** (`FringeCoder/AmigaCD_MiSTer`):

@@ -85,3 +85,6 @@ compile_commands.json
 
 # latprobe (tools/latprobe), built by make -C tools/latprobe
 tools/latprobe/latprobe
+# fmvbench (tools/fmvbench): make -C tools/fmvbench, and its host build
+tools/fmvbench/fmvbench
+tools/fmvbench/fmvbench-host
