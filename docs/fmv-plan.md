@@ -109,7 +109,7 @@ No code in this phase. Its gate: every item below answered here, with a
 source.
 
 **Result, 2026-11-01: items 1, 2 and 4 are closed (item 1 by Mark's decision,
-with one action: get the L64111 manual). Item 3 is decided, Cannon Fodder
+and both chip manuals now in hand). Item 3 is decided, Cannon Fodder
 first, with its MPEG track still to identify. Items 5 and 6 are answered by
 inference, and each still needs the confirmation named below.** None of the open parts blocks phase 1, which needs only a Video
 CD image. So phase 1 can start while they are closed.
@@ -163,15 +163,16 @@ where one exists.
   registers, the command set (chapter 11, with each command's code and
   arguments), interrupts, buffer fullness and SCR/PTS sync (chapter 13). Write
   from that.
-- **L64111:** LSI Logic's *L64111 MPEG Audio Decoder Technical Manual* (76
-  pages) exists. It is listed on alldatasheet as item 137324, but both of
-  that site's mirrors returned HTTP 403 from this environment. **Action:**
-  someone downloads it in a browser and puts it under `docs/reference/` if
-  its licence allows, or keeps a local copy and records its title and
-  checksum there. Until then the L64111 side cannot be written under this
-  rule. Its stream format is plain ISO 11172-1 system packets and 11172-3
-  layer II frames, so only the register and status semantics need the
-  manual.
+- **L64111:** LSI Logic's *L64111 MPEG Audio Decoder Technical Manual*,
+  First Edition, 1993 (SHA-256 `0e94030c...`), supplied by Mark on
+  2026-11-01. The manual is not committed: it is © LSI, all rights reserved.
+  Our notes, with page references, are in
+  [`reference/l64111-notes.md`](reference/l64111-notes.md). The register map,
+  control bits, interrupt layout, FIFO flags and channel buffer are all
+  covered, so the audio half can be written under this rule. The manual
+  contradicts itself on one point: where the Channel Buffer read and write
+  counters live (19/20 in its table, 25/26 on their own register pages). The
+  phase 2 log settles it, and a Video CD player is unlikely to touch them.
 - **Behaviour the manuals leave open:** wiring on the cartridge, such as the
   IO word at `$240000`, its bits, and which chip interrupts on which bit, is
   board design, not chip behaviour. It is taken from what the ROM does in
@@ -469,7 +470,10 @@ from Real CD.
    manual. WinUAE as an oracle and the phase 2 logs are the safety net. Two
    titles that drive the cartridge differently (the Cannon Fodder intro and
    the ROM's Video CD player) make a gap visible early.
-4. **The L64111 manual is not in hand yet.** Until it is, the audio half of
-   the model cannot be written (phase 0, item 1).
+4. **The L64111 manual is preliminary** (its own words), and inconsistent
+   in one place (the Channel Buffer counter addresses). Its interrupt status
+   and mask bits sit in different positions, which is easy to get wrong.
+   The notes file flags both, and phase 2's logs check them against what the
+   ROM actually does.
 5. **Core 0 contention.** Linux timer and interrupt work already land there
    (`arm-cpu-plan.md`, step 1). Phase 1's busy run is what tests this.
