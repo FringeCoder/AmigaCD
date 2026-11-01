@@ -1,7 +1,8 @@
 # The CD32 FMV module: plan
 
 **Date:** 2026-11-01
-**Status:** plan only. No code in either repository yet.
+**Status:** phase 0 done on paper (2026-11-01, see below). No code in either
+repository yet.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -93,7 +94,8 @@ $280000-$2FFFFF  RAM, 512 KB
   value is at least a threshold (`GENLOCK_VAL_32 0x20`) and the MPEG pixel
   otherwise. Its own comment says "this is probably not how it actually works".
   The MPEG picture is centred, and the CL450's border colour fills the rest.
-  The schematics show genlock-mode bits that the ROM never sets.
+  The schematics show genlock-mode bits that the ROM never sets. Phase 0
+  item 5 has a better-grounded rule.
 
 This repository has one stale note: `docs/reference/cd32-probe-copperline.tsv`
 row 24 calls `$A80000` the "unmapped FMV window". It is not the FMV window. In
@@ -106,30 +108,190 @@ touched.
 No code in this phase. Its gate: every item below answered here, with a
 source.
 
-1. **Licence.** Main is GPL-3. The licences that matter are libmpeg2's (GPL-2
-   or later), kjmp2's, and WinUAE's for `cd32_fmv.cpp`. The plan is to port
-   WinUAE's register model, not just to read it, so its licence has to allow
-   GPL-3. If it does not, write the model from the CL450 and L64111 datasheets
-   and use WinUAE only as a behavioural oracle.
-2. **The ROM.** Identify the known `fmv.rom` dumps by CRC/SHA-1 (WinUAE's
-   `rommgr.cpp` lists them). Like `CD32.rom`, it is user-supplied and never
-   committed.
-3. **Test material.** List the discs: at least one Video CD, and the CD32
-   titles that use the cartridge. Each needs a CHD and, for Real CD, a
-   physical copy. The gates below are judged on these.
-4. **Mode 2 Form 2 sectors.** Video CD MPEG tracks are Mode 2 Form 2 (2324
-   bytes of user data). Akiko ships raw 2352-byte frames
-   (`support/minimig/akiko_cd32.cpp:180`), so form 2 probably arrives intact
-   from CHD. Confirm it for CHD and for the physical-disc path. Some drives
-   need a different READ CD sector type for form 2.
-5. **Genlock.** Find out how the real cartridge decides between Amiga and MPEG
-   pixels: Lisa's ZD pin (colour-0 / background detect), a colour key, or
-   WinUAE's threshold. The expansion connector's pinout and the FMV schematics
-   are the source. The core's Denise has no ZD output today (`rtl/denise.v:212`
-   is a commented-out `zdclken`).
-6. **CL450 output geometry.** Find the CL450's output pixel clock and active
-   window relative to the Amiga's PAL/NTSC timing. This decides how a 352-wide
-   picture lands on a lores or hires line.
+**Result, 2026-11-01: items 2 and 4 are closed. Items 1, 5 and 6 are answered
+by inference, and each still needs one confirmation, named below. Item 3 is
+partly open.** None of the open parts blocks phase 1, which needs only a Video
+CD image. So phase 1 can start while they are closed.
+
+Sources used:
+
+- WinUAE `cd32_fmv.cpp`, `cd32_fmv_genlock.cpp`, `rommgr.cpp` and `COPYING`:
+  [tonioni/WinUAE](https://github.com/tonioni/WinUAE) `master`, read
+  2026-11-01.
+- *Commodore Amiga CD32 Engineering Change Release*, 1993-07-20, "External
+  Connector Pinouts", p. 4-10
+  ([amiga.net.au](https://amiga.net.au/files/Tech_Amiga/Commodore_AmigaCD32_Engineering_Change_Release_1993-07-20_ocr.pdf)).
+- *Lisa specification* 391227
+  ([oldcrap.org](https://oldcrap.org/wp-content/uploads/2023/04/amiga-all-spec-lisa-391227.pdf)).
+- *CL450 MPEG Video Decoder User's Manual*, C-Cube 90-1450-101, 1994
+  ([bitsavers](https://bitsavers.mirrorservice.org/components/c-cube/90-1450-101_CL450_MPEG_Video_Decoder_Users_Manual_1994.pdf)),
+  sections 1.2.1, 3 (pin descriptions) and 6 (video display interface).
+- Clark Alexander, *REVIEW: CD32 Full Motion Video module*,
+  comp.sys.amiga.reviews, 1998-11-20
+  ([math.uh.edu](https://www.math.uh.edu/~barrett/data/all/CD32FMV)).
+
+### 1. Licence: same footing as `akiko_cd32.cpp`; the owner decides
+
+- **libmpeg2** is GPL-2.0-or-later, so it can go into a GPL-3 Main.
+  **kjmp2** (Martin Fiedler, as vendored in WinUAE `archivers/mp2/kjmp2.cpp`)
+  is under the zlib licence, which is compatible.
+  **libavcodec** is LGPL-2.1-or-later, which is also fine if phase 1 needs it.
+- **WinUAE** ships the GPL-2 text in `COPYING`. Its file headers, including
+  `cd32_fmv.cpp` ("Copyright 2008-2014 Toni Wilen"), carry a copyright line and
+  no version statement. GPL-2 section 9 lets a program that does not name a
+  version be taken under any version, but a `COPYING` holding v2 is arguably
+  naming one. So whether WinUAE code may go into GPL-3 Main is unsettled.
+- **This is not a new question for this repository.**
+  `support/minimig/akiko_cd32.cpp:3` "Mirrors the WinUAE Akiko CD command
+  interpreter (akiko.cpp @ SHA 2c7f8581)". That came in from kblood's fork and
+  cites WinUAE line numbers throughout.
+
+**Decision for the owner:** either treat the FMV model the way `akiko_cd32.cpp`
+is treated (a port, with WinUAE's SHA and line numbers cited), or write it
+from the CL450 manual and use WinUAE only to compare behaviour. The manual
+covers the CL450 command set and registers in full (chapters 11-13). The
+L64111's command set has no manual in hand, so writing that part without
+WinUAE costs more. Either way, any WinUAE-derived file carries a header naming
+its source and SHA.
+
+### 2. The ROM: two known dumps
+
+From WinUAE `rommgr.cpp:334-337`. Both are 262 144 bytes.
+
+| Version | Part | CRC32 | SHA-1 |
+|---|---|---|---|
+| 40.22 | 391777-01 | `f11158eb` | `94e469a76030dcb299ebc7520aaeef9db54284cf` |
+| 40.30 | -- | `c35c37bf` | `03ca81c7a7b259cf64bc9582863eca0f6529f435` |
+
+Like `CD32.rom`, it is user-supplied and never committed. Main should check
+the size and log which of the two it is, or "unknown dump", without refusing
+it.
+
+### 3. Test material: Video CD yes; cartridge-only games not found
+
+- The 1998 review confirms that the cartridge plays **Video CD** movies and
+  music videos, **Karaoke CDs**, and what it calls "Digital Video CDs"
+  (presumably CD-i Digital Video). The test set needs at least one of each
+  that exists: a VCD 2.0, a VCD 1.1 and a karaoke VCD. Add a CD-i DV disc only
+  once someone confirms on a real cartridge or in WinUAE that it plays.
+- **No source names a CD32 game that requires the cartridge.** Wikipedia's
+  CD32 list marks titles such as *Microcosm* and *Chuck Rock II* "FMV", but
+  that is in-game video. CD32 games stream that themselves (CDXL), and none of
+  the sources says the cartridge is needed. Until a title is named and
+  checked, the plan targets Video CD playback, and "games" means none.
+- **Still open:** who on the project owns which discs. The gates below need
+  both a CHD and a physical copy of each test disc.
+
+### 4. Mode 2 Form 2 sectors: no format problem in raw images and physical discs; 2336-byte images lose their header
+
+The Akiko path ships whole 2352-byte frames (`akiko_cd32.cpp:180`), so the
+form only matters where a frame is built:
+
+- **Physical disc.** READ CD is sent with byte 1 = 0, meaning any sector type,
+  and byte 9 = `0xF8`, meaning sync, all headers, user data and EDC/ECC
+  (`physical_disc.cpp:211-232`, flags set at `:277`). The drive returns the full
+  raw frame for Form 1 and Form 2 alike. The no-sync check in
+  `cdrom_read_raw_sector` (`ide_cdrom.cpp:1396-1440`) applies to data tracks
+  only (attr `0x40`), and a Form 2 frame has sync too, so it passes. *To
+  confirm on hardware:* some drives refuse Form 2 with an error-flag field
+  they dislike. The fallback, `CDROMREADRAW`, would then still return the
+  frame.
+- **CHD and BIN, 2352-byte (`MODE2/2352`, chdman's `MODE2_RAW`).** The frame
+  is copied as it is (`ide_cdrom.cpp:1459-1466`, `:1511-1516`). That is the
+  normal form of a Video CD rip.
+- **CHD and BIN, 2336-byte (`MODE2/2336`).** `cdrom_read_raw_sector` zeroes
+  bytes 0-15 and copies the 2336 bytes after them (`ide_cdrom.cpp:1468-1476`,
+  `:1518-1523`). That leaves **no sync, no MSF and mode 0**. The cooked
+  `MODE1/2048` branch right below synthesises a Mode 1 header; the 2336 branch
+  should synthesise a Mode 2 one the same way (sync, BCD MSF, mode `0x02`). It
+  is not an FMV-only problem, but FMV is where 2336-byte images turn up. Do it
+  in phase 2, with a unit test.
+
+### 5. Genlock: an analog RGB switch keyed by `_PIXELSW`, most likely Lisa's ZD
+
+The CD32's expansion connector (ECR p. 4-10) carries everything a genlock
+needs, and nothing that suggests WinUAE's threshold rule:
+
+| Pin | Signal | ECR description |
+|---|---|---|
+| 151 | `PIXELSW_EXT` | External Genlock Pixel Switch (Video) |
+| 152 | `_PIXELSW` | Genlock Pixel Switch (Video) |
+| 153 | `_BLANK` | Video Blanking Signal |
+| 154 | `PIXELCLK` | Pixel Clock |
+| 159, 160 | `_HSYNC`, `_VSYNC` | |
+| 163-168 | `AR_EXT`, `AR`, `AG_EXT`, `AG`, `AB_EXT`, `AB` | External Analog Red, Analog Red, ... |
+| 174 | `_EXT_VIDEO` | Enable External Video |
+
+So the cartridge receives the Amiga's analog RGB and a per-pixel switch, and
+hands back RGB on the `_EXT` pins, with `_EXT_VIDEO` selecting it. That is a
+per-pixel 2:1 mux between the Amiga's picture and the CL450's, which is what
+phase 3 planned to build.
+
+What drives `_PIXELSW`: Lisa has exactly one genlock output, **ZD** (pin 28).
+By default ZD marks colour-0 (background) pixels, it carries the GAUD level
+during blanking, and BPLCON3's `BRDNTRAN` makes the border opaque. `ZDBPEN`
+/ `ZDBPSELx` make it follow one bitplane instead, `ZDCTEN` makes it follow
+bit 15 of the colour table entry, and `ZDCLKEN` turns it into a clock and
+overrides the rest (Lisa spec, BPLCON0/2/3). The Amiga RGB port's `/PIXELSW`
+pin is the same signal under the same name. **Inference, not yet confirmed:**
+`_PIXELSW` on the CD32 is Lisa ZD, possibly gated with blanking, and the
+cartridge shows the CL450 picture where it is asserted. That reads as
+"transparent colour 0", which is also what WinUAE's comment suspects its own
+rule is a stand-in for.
+
+**Consequences for the core:**
+
+- Denise in the core has no ZD output (`rtl/denise.v:212`, a commented-out
+  `zdclken`). Phase 3 needs one, computed from what Denise already knows:
+  background pixel, `BRDNTRAN`, `ZDBPEN` / `ZDBPSELx`, `ZDCTEN`. `ZDCTEN` also
+  needs the colour table's 25th bit, which the core may not store; check
+  `denise_colortable.v` in phase 3.
+- **Phase 2 logs BPLCON0/2/3 writes** made while the FMV ROM is running. That
+  shows which ZD mode the player actually uses. If it uses none of the special
+  modes, plain colour-0 transparency is the whole rule.
+- **To confirm:** the CD32 main board schematic (ZD to `_PIXELSW`), or a scope
+  on pin 152 of a real CD32 showing a colour-0 test screen.
+
+### 6. CL450 output geometry: slaved to the Amiga's syncs, window set by the ROM
+
+From the CL450 manual:
+
+- The CL450 **generates no syncs**. It takes HSYNC and VSYNC as inputs
+  (section 6.3) and outputs one pixel per VCLK on a 24-bit RGB or YCbCr bus.
+  VCLK may be at most half of GCLK, and below 15 MHz it can be asynchronous to
+  it (section 3, "VCLK - Video Clock").
+- It decodes SIF (352x288 at 25 Hz, 352x240 at 30 Hz) and can **double it
+  horizontally to 704 pixels**, repeating frames to 50/60 Hz (section 1.2.1).
+- **The ROM places the picture.** `SetWindow()` (command `0x0406`, section
+  11-42) sets the active window in VCLKs from the HSYNC edge and in lines from
+  VSYNC, and outside it the CL450 outputs the `SetBorder()` colour
+  (sections 6.3, 11). The phase 2 log captures both commands' arguments.
+
+**Inference:** the connector offers `PIXELCLK`, `_HSYNC` and `_VSYNC`, so the
+cartridge probably clocks the CL450 from the Amiga's pixel clock. 704 pixels
+at the 14.19 MHz PAL hires clock is 49.6 us, about the visible part of a
+52 us PAL line, which fits a hires-rate VCLK showing 352 pixels doubled across
+the screen. If so, the core places the frame in hires pixels from its own
+hsync, using the window the ROM sets, and doubles each MPEG pixel. WinUAE
+instead centres the picture and ignores `SetWindow`.
+
+**To confirm:** which clock reaches the CL450's VCLK on the FMV board, from its
+schematic or a probe. Until then phase 3 uses the inference above, and the
+phase 2 `SetWindow` log will show whether the numbers fit a 704-wide line.
+
+### Also learned
+
+- **Audio pins.** The connector carries the CD-DAC's serial stream (`DA_DATA`,
+  `DA_LRCLK`, `DA_BCLK`, `17MHZ`), `_EXT_AUDIO` "External Audio Enable",
+  `_MUTE`, and the audio pairs `LEFT`/`LEFT_EXT` and `RIGHT`/`RIGHT_EXT`
+  (ECR p. 4-10). So the cartridge most likely substitutes its own analog audio
+  for the console's while active, possibly with CD audio mixed in. Phase 4's
+  "MPEG audio into the CDDA FIFO" matches the case where FMV audio replaces CD
+  audio. Whether the cartridge also mixes in the CD audio it taps is unknown;
+  it only matters if a disc plays both, and a Video CD does not.
+- **The interrupt.** The connector has `/INT2` (pin 119) and `/INT6`
+  (pin 120). WinUAE raises INT2 for FMV, which agrees with section 2 of this
+  plan. Nothing here contradicts it.
 
 ## Phase 1: decode benchmark, userspace only
 
