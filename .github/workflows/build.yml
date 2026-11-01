@@ -127,8 +127,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -q
-          sudo apt-get install -y -q ffmpeg qemu-user-static
-          FMVBENCH_BIN=tools/fmvbench/fmvbench FMVBENCH_RUNNER=qemu-arm-static \
+          # qemu-user, not qemu-user-static: from Ubuntu 26.04 on the latter is
+          # a virtual package apt will not pick. fmvbench is linked static, so
+          # the plain qemu-arm runs it without an ARM sysroot.
+          sudo apt-get install -y -q ffmpeg qemu-user
+          qemu="$(command -v qemu-arm || command -v qemu-arm-static)"
+          FMVBENCH_BIN=tools/fmvbench/fmvbench FMVBENCH_RUNNER="$qemu" \
           FMVBENCH_ACCELS="c arm" python3 tools/fmvbench/test_fmvbench.py
 
       # bin/MiSTer is stripped by the Makefile; bin/MiSTer.elf keeps symbols.
