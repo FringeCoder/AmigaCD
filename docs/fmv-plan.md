@@ -364,12 +364,69 @@ no room for one.
 
 ### Result, 2026-11-02: PASS on the MiSTer
 
-Mark ran fmvbench on the DE10-Nano and reported a **pass**. The gate is met
-and phase 2 goes ahead. The `FMVBENCH` lines from that run have not been
-pasted here yet. When they are, add them below this paragraph, including
-p99, load and the worst picture, and the idle and busy runs separately if
-both were made. They are the baseline phase 3 will be compared against,
-once frames go to uncached DDR3.
+**Test stream: Cannon Fodder's own MPEG track.** The project's CHD
+(`Cannon Fodder (1993).chd`) holds two tracks: track 1 `MODE1_RAW`, 27234
+frames, and track 2 `MODE2_RAW` (2352 bytes), 12675 frames with a 225-frame
+pregap. Track 2 is the MPEG track, which confirms the hypothesis in phase 0
+item 3. It is raw 2352, so this title does not depend on item 4's 2336-byte
+header fix. Extracted with `chdman extractcd` and cut at frame 27234;
+fmvbench reads it as `raw-2352`. It holds a 352x288, 25 fps MPEG-1 stream:
+4142 pictures (360 I, 1059 P, 2723 B), 166 s, with MPEG-1 Layer II audio at
+44.1 kHz (6358 frames). It decodes cleanly on the build machine, every picture
+displayed.
+
+**Build:** the project toolchain (`arm-none-linux-gnueabihf` gcc 10.2, the
+one `setup_default_toolchain.sh` fetches), `make` as written, static.
+
+**Setup:** core `_Test/amigacd.rbf` loaded with `load_core`. Each run pinned to
+core 0, `-n 3` (12426 pictures). For the idle run the config's bay was emptied
+(`hardfile[0].filename[0] = 0`), so the core sat at the CD32 insert-disc
+screen. For the busy run the config named Cannon Fodder's CHD at power-on.
+Without a module the game skips its intro, and it was running its credits
+sequence from CD throughout. The config was restored afterwards.
+
+```
+idle  FMVBENCH VIDEO accel=arm pictures=12426 displayed=12426 fps=25.000 p50_ms=7.863 p90_ms=9.297 p99_ms=11.558 max_ms=21.460 worst_index=10376 worst_type=I
+idle  FMVBENCH LOAD content_s=497.04 video_work_s=100.047 audio_work_s=39.585 load_pct=28.1 wall_s=139.87 cpu_s=139.38 paced=0 late=0
+idle  FMVBENCH GATE: PASS (p99 11.56 ms < 30 ms; load 28.1 % <= 60 % of one core)
+idle  FMVBENCH VIDEO accel=c pictures=12426 displayed=12426 fps=25.000 p50_ms=7.945 p90_ms=9.328 p99_ms=11.639 max_ms=21.152 worst_index=5618 worst_type=B
+idle  FMVBENCH LOAD content_s=497.04 video_work_s=101.004 audio_work_s=39.521 load_pct=28.3 wall_s=140.76 cpu_s=140.29 paced=0 late=0
+idle  FMVBENCH GATE: PASS (p99 11.64 ms < 30 ms; load 28.3 % <= 60 % of one core)
+busy  FMVBENCH VIDEO accel=arm pictures=12426 displayed=12426 fps=25.000 p50_ms=7.859 p90_ms=9.284 p99_ms=11.449 max_ms=19.738 worst_index=4958 worst_type=B
+busy  FMVBENCH LOAD content_s=497.04 video_work_s=99.886 audio_work_s=38.942 load_pct=27.9 wall_s=139.06 cpu_s=138.52 paced=0 late=0
+busy  FMVBENCH GATE: PASS (p99 11.45 ms < 30 ms; load 27.9 % <= 60 % of one core)
+busy  FMVBENCH VIDEO accel=c pictures=12426 displayed=12426 fps=25.000 p50_ms=7.931 p90_ms=9.330 p99_ms=11.359 max_ms=17.903 worst_index=10856 worst_type=I
+busy  FMVBENCH LOAD content_s=497.04 video_work_s=100.791 audio_work_s=39.128 load_pct=28.2 wall_s=140.15 cpu_s=139.68 paced=0 late=0
+busy  FMVBENCH GATE: PASS (p99 11.36 ms < 30 ms; load 28.2 % <= 60 % of one core)
+busy  FMVBENCH VIDEO accel=arm pictures=4142 displayed=4142 fps=25.000 p50_ms=7.891 p90_ms=9.508 p99_ms=12.109 max_ms=14.486 worst_index=2136 worst_type=B
+busy  FMVBENCH LOAD content_s=165.68 video_work_s=33.597 audio_work_s=13.899 load_pct=28.7 wall_s=179.62 cpu_s=47.32 paced=1 late=0
+busy  FMVBENCH GATE: PASS (p99 12.11 ms < 30 ms; load 28.7 % <= 60 % of one core; none late)
+```
+
+What this says:
+- **Margin is wide.** p99 is about 11.5 ms against a 30 ms limit and a 40 ms
+  picture period. Load is about 28 % of one core against 60 %. The paced run
+  missed no display deadline.
+- **The streaming game costs the decoder nothing measurable.** Idle and busy
+  agree within run-to-run noise. Main stays on core 1, and Akiko's sector
+  traffic does not reach core 0 in a way this measures.
+- **libmpeg2's ARM assembler is worth nothing here.** `-a arm` and `-a c` are
+  equal within noise. GCC 10 at `-O3 -mfpu=neon` matches the hand-written
+  motion compensation, so phase 3 can take the plain C build.
+- **The worst picture is not reliably an I-picture.** The maxima, 18 to 21 ms,
+  land on I and B pictures at varying indices, which looks like scheduling
+  noise rather than content. Only the max moves: p99 is steady.
+- **Audio is a quarter of the work.** kjmp2 takes about 2 ms per Layer II
+  frame, 39 s of the 140 s total. Video is about 8 ms per picture, of which
+  the RGB565 conversion is 3.6 ms (p50). If phase 3 ever needs headroom, the
+  conversion (NEON) and the audio decoder are where it is.
+- **Akiko logged `STALL 1500 ms` lines throughout the busy run**, but at the
+  same rate in the 50 s before fmvbench started. They are Cannon Fodder's own
+  read pattern (the guest stops part-way through a multi-sector read), not
+  something the benchmark caused.
+
+**Phase 1 gate: PASS.** libavcodec is not needed. These lines are the
+baseline phase 3 compares against, once frames go to uncached DDR3.
 
 ### Status, 2026-11-01: tool built and verified
 
