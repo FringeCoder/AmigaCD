@@ -45,5 +45,7 @@ void fpga_wait_to_reset();
 // Debug, for the FMV diag (fpga_io.cpp)
 void fpga_sdr_status(uint32_t *v);
 void fpga_sdr_port_pulse(void);
+void fpga_sdr_rules(uint32_t *r, int n);
+void fpga_core_reset_with_port_pulse(void);
 
 #endif

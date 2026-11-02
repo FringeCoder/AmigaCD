@@ -161,30 +161,56 @@ void fmv_shutdown(void)
 	diag_shown = 0;
 }
 
-// AMIGACD_FMV=2: diagnosis only. AMIGACD_FMV=3: the same, and at 3 s one
-// pulse of the f2sdram port reset (fpga_sdr_port_pulse), to see whether a
-// wedged port comes back; the lines after it say.
-//
-// AMIGACD_FMV=2: diagnosis only. The board stays off -- status[64] clear,
-// no window mapped, no ROM -- and the core's FMV/DDR3 diag window is printed
-// once a second for the first ten seconds after the core starts, then every
-// ten seconds. It asks whether the core's DDR3 port works at all with the
-// FMV side idle (gate 1 arbiter run, 2026-11-02 night: the port had wedged
-// after a handful of A2065 commands, before FMV ever ran).
+// Diagnosis-only modes. The board stays off -- status[64] clear, no window
+// mapped, no ROM -- and the core's FMV/DDR3 diag window is printed once a
+// second for the first ten seconds after the core starts, then every ten
+// seconds. They ask about the core's DDR3 port with the FMV side idle (gate
+// 1, 2026-11-02 night: the HPS f2sdram port wedged after a handful of A2065
+// commands, before FMV ever ran).
+//   2  just watch.
+//   3  at 3 s, pulse the f2sdram port reset (fpga_sdr_port_pulse) with the
+//      core running. Run 2026-11-02 ~22:35: it clears DDRAM_BUSY, but the
+//      core's arbiters still wait for the lost beat, so no traffic follows.
+//   4  at 3 s, hold the core reset, pulse the port reset, release the core
+//      reset. Both sides start again with the PLL long locked. If A2065
+//      traffic then keeps flowing, the port was in a bad state from the
+//      bridge enable at load (do_bridge(1) runs as soon as the bitstream is
+//      in, perhaps before clk_114 is stable); if it wedges again after a
+//      few grants, something recurring kills it.
 static void diag_only_poll()
 {
 	static uint64_t first_us;
+	static int pulsed;
 	uint64_t t = now_us();
 	if (!first_us) {
 		first_us = t;
 		user_io_status_set(FMV_STATUS_OPT, 0);
-		printf("FMV: AMIGACD_FMV=2, diagnosis only: the board stays off\n");
+		printf("FMV: AMIGACD_FMV=%d, diagnosis only: the board stays off%s\n", cfg.amigacd_fmv,
+		       cfg.amigacd_fmv == 3 ? "; port reset pulse at 3 s" :
+		       cfg.amigacd_fmv == 4 ? "; core reset + port reset pulse at 3 s" : "");
+		// The protection rules, once (only valid ones, data bit 2)
+		uint32_t r[60];
+		fpga_sdr_rules(r, 20);
+		int shown = 0;
+		for (int i = 0; i < 20; i++) {
+			if (!(r[3 * i + 2] & 4))
+				continue;
+			printf("FMV diag-only: SDR protection rule %d: addr %08x id %08x data %08x\n", i,
+			       r[3 * i], r[3 * i + 1], r[3 * i + 2]);
+			shown++;
+		}
+		if (!shown)
+			printf("FMV diag-only: no valid SDR protection rule (all 20 have data bit 2 clear)\n");
 	}
-	static int pulsed;
-	if (cfg.amigacd_fmv == 3 && !pulsed && t - first_us >= 3000000) {
+	if (cfg.amigacd_fmv >= 3 && !pulsed && t - first_us >= 3000000) {
 		pulsed = 1;
-		printf("FMV diag-only: pulsing the f2sdram port reset (fpgaportrst 0, then 0x3FFF)\n");
-		fpga_sdr_port_pulse();
+		if (cfg.amigacd_fmv == 3) {
+			printf("FMV diag-only: pulsing the f2sdram port reset (fpgaportrst 0, then 0x3FFF)\n");
+			fpga_sdr_port_pulse();
+		} else {
+			printf("FMV diag-only: core reset on, f2sdram port reset pulse, core reset off\n");
+			fpga_core_reset_with_port_pulse();
+		}
 		diag_print();
 	}
 	uint64_t period = (t - first_us < 10000000) ? 1000000 : 10000000;

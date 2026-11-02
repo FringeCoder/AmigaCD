@@ -7,8 +7,8 @@
 // either missing, no board appears on the Amiga. Its log is on stdout, which
 // is /dev/null unless MiSTer.ini has DEBUG=1 or 2 (cfg.cpp). AMIGACD_FMV=2
 // leaves the board off and only prints the core's diag window, to check the
-// DDR3 port with the FMV side idle; AMIGACD_FMV=3 also pulses the f2sdram
-// port reset once, at 3 s.
+// DDR3 port with the FMV side idle; 3 and 4 add a port reset experiment at
+// 3 s (fmv.cpp, diag_only_poll).
 #pragma once
 
 // status[64]: the core's FMV front end on (AmigaCD.sv, rtl/fmv). Above

@@ -405,6 +405,20 @@ void fpga_sdr_status(uint32_t *v)
 	v[4] = readl(&sysmgr_regs->fpgaintfgrp_module);
 }
 
+// Debug: the SDRAM controller's protection rules, n of them (20 on Cyclone
+// V). Each rule is staged by writing protrulerdwr (0x509C) with the read bit
+// (6) and its index, then read from protruleaddr/id/data (0x5090/94/98).
+// Staging changes no rule. r[3*i+0..2] = addr, id, data.
+void fpga_sdr_rules(uint32_t *r, int n)
+{
+	for (int i = 0; i < n; i++) {
+		writel((1u << 6) | (uint32_t)i, (void*)(SOCFPGA_SDR_ADDRESS + 0x509C));
+		r[3 * i + 0] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5090));
+		r[3 * i + 1] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5094));
+		r[3 * i + 2] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5098));
+	}
+}
+
 // Debug: pulse the FPGA-to-SDRAM port reset, as do_bridge(0)/(1) does at a
 // core load, but with the core running. Only AMIGACD_FMV=3 calls it, to see
 // whether a wedged f2sdram port comes back.
@@ -562,6 +576,24 @@ int fpga_io_init()
 
 	fpga_gpo_write(0);
 	return 0;
+}
+
+// Debug (AMIGACD_FMV=4): hold the core reset, pulse the f2sdram port reset,
+// release the core reset. sys_top latches reset_req on gp_out[31:30] == 01
+// and clears it only on 10 following 00, so the release writes 00 first, as
+// fpga_io_init() and fpga_core_id() do at startup; fpga_core_reset(0) alone,
+// straight after 01, would leave the core held. Each state is held well over
+// two 50 MHz samples.
+void fpga_core_reset_with_port_pulse(void)
+{
+	uint32_t gpo = fpga_gpo_read() & ~0xC0000000;
+	fpga_gpo_write(gpo | 0x40000000);   // 01: reset on
+	usleep(1000);
+	fpga_sdr_port_pulse();
+	usleep(1000);
+	fpga_gpo_write(gpo);                // 00
+	usleep(10);
+	fpga_gpo_write(gpo | 0x80000000);   // 10: reset off
 }
 
 int fpga_core_id()
