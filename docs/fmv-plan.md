@@ -438,6 +438,10 @@ tool works, not what an 800 MHz Cortex-A9 does.
 
 ## Phase 2: the board, with a logging model
 
+The interface between the two halves is fixed in
+[`fmv-contract.md`](fmv-contract.md): the DDR3 window, the ring entry format,
+the shadow block, local acknowledges and the Z2 RAM exclusion.
+
 **Core** (`FringeCoder/AmigaCD_MiSTer`):
 - `rtl/fmv.v`: the FMV card in the autoconfig chain, first. It decodes
   `$200000-$2FFFFF` once configured.
