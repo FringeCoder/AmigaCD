@@ -1,8 +1,8 @@
 # The CD32 FMV module: plan
 
 **Date:** 2026-11-01
-**Status:** phase 0 done on paper (2026-11-01, see below). No code in either
-repository yet.
+**Status:** phase 0 done on paper (2026-11-01); phase 1 passed on hardware
+(2026-11-02); phase 2 in progress.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -362,7 +362,16 @@ If it fails, try libavcodec's mpeg1video before giving up. If that fails too,
 the plan stops: the only path left would be an FPGA decoder, and the fit has
 no room for one.
 
-### Status, 2026-11-01: tool built and verified; the hardware run is next
+### Result, 2026-11-02: PASS on the MiSTer
+
+Mark ran fmvbench on the DE10-Nano and reported a **pass**. The gate is met
+and phase 2 goes ahead. The `FMVBENCH` lines from that run have not been
+pasted here yet. When they are, add them below this paragraph, including
+p99, load and the worst picture, and the idle and busy runs separately if
+both were made. They are the baseline phase 3 will be compared against,
+once frames go to uncached DDR3.
+
+### Status, 2026-11-01: tool built and verified
 
 **Built:** `tools/fmvbench` (fmvbench.c, with libmpeg2 0.5.1 vendored in
 `lib/libmpeg2` and kjmp2 1.1 in `lib/kjmp2`; each `README.vendor` gives the
