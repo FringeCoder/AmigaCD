@@ -365,5 +365,31 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 	         (f >> 7) & 1, (f >> 6) & 1, (f >> 5) & 1,
 	         bus_st[(f >> 2) & 7], (f >> 1) & 1, f & 1,
 	         d[2], d[3], d[5], d[6], d[7]);
+
+	// The DDR3 arbiters behind it (AmigaCD.sv fmv_diag_x), after 0xA5F5
+	const uint16_t *x = d + 8;
+	if (n - i >= 18 && x[0] == 0xA5F5) {
+		x++;
+		auto arb = [](char *o, size_t l, const char *name, uint16_t a) {
+			return snprintf(o, l, "; %s busy %u owner m%u %s, req m0 %u m1 %u, wait s %u m0 %u m1 %u, "
+			                "beats %u", name, (a >> 15) & 1, (a >> 14) & 1,
+			                (a >> 13) & 1 ? "read" : "write", (a >> 12) & 1, (a >> 11) & 1,
+			                (a >> 10) & 1, (a >> 9) & 1, (a >> 8) & 1, a & 0xFF);
+		};
+		size_t used = strlen(out);
+		used += arb(out + used, len - used, "fmv_arb", x[0]);
+		used += snprintf(out + used, len - used, ", grants m0 %u m1 %u", x[1] >> 8, x[1] & 0xFF);
+		used += arb(out + used, len - used, "mirror_arb", x[2]);
+		used += snprintf(out + used, len - used, ", grants m0 %u m1 %u", x[7] >> 8, x[7] & 0xFF);
+		used += arb(out + used, len - used, "dsnd_arb", x[3]);
+		used += snprintf(out + used, len - used, ", m1 grants %u", x[6] & 0xFF);
+		used += arb(out + used, len - used, "ddram_ctrl arb", x[4]);
+		used += snprintf(out + used, len - used, ", grants m0 %u m1 %u", x[5] >> 8, x[5] & 0xFF);
+		uint16_t q = x[6] >> 8;
+		snprintf(out + used, len - used, "; q2_v %u (%s), ss_port_own %u, ram_rd %u ram_we %u, "
+		         "DDRAM_BUSY %u, hs_waitrequest %u", (q >> 7) & 1,
+		         (q >> 6) & 1 ? "read" : (q >> 5) & 1 ? "write" : "-", (q >> 4) & 1,
+		         (q >> 3) & 1, (q >> 2) & 1, (q >> 1) & 1, q & 1);
+	}
 	return 1;
 }

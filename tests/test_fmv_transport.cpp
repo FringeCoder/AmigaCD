@@ -391,6 +391,29 @@ static void test_diag_format()
 	check(strstr(line, "avl read 1 write 0") != 0, "diag: avalon bits");
 	check(strstr(line, "ALIVE 0, status[64] 1") != 0, "diag: bus side");
 	check(strstr(line, "UQ_WPTR polls 5, read beats 0") != 0, "diag: counters in word order");
+	// With the arbiter block: fmv_arb busy, owned by m0 for a read with 1
+	// beat outstanding, m1 requesting and held off; q2 holding a read.
+	uint16_t wx[22] = { 0x0000, 0xA5F4, 0xF401, w[3], 5, 0, 0xFFFF, 0, 0, 0,
+	                    0xA5F5,
+	                    (uint16_t)(1 << 15 | 0 << 14 | 1 << 13 | 1 << 12 | 1 << 11 | 1 << 8 | 1),
+	                    0x0300,
+	                    (uint16_t)(1 << 15 | 1 << 14 | 1 << 11 | 1 << 10 | 2),   // mirror_arb
+	                    0, 0, 0x0102, (uint16_t)(0xA0 << 8 | 4), 0x0500 };
+	char big[1200];
+	check(fmv_diag_format(wx, 22, big, sizeof big) == 1, "diag x: decoded");
+	check(strstr(big, "fmv_arb busy 1 owner m0 read, req m0 1 m1 1, wait s 0 m0 0 m1 1, beats 1") != 0,
+	      "diag x: fmv_arb fields");
+	check(strstr(big, "fmv_arb busy 1 owner m0 read, req m0 1 m1 1, wait s 0 m0 0 m1 1, beats 1, grants m0 3 m1 0") != 0,
+	      "diag x: fmv_arb grants");
+	check(strstr(big, "ddram_ctrl arb busy 0") != 0 && strstr(big, "grants m0 1 m1 2") != 0,
+	      "diag x: ddram_ctrl's arbiter and its grants");
+	check(strstr(big, "mirror_arb busy 1 owner m1 write, req m0 0 m1 1, wait s 1 m0 0 m1 0, beats 2, grants m0 5 m1 0") != 0,
+	      "diag x: mirror_arb grants from the last word");
+	check(strstr(big, "dsnd_arb busy 0 owner m0 write, req m0 0 m1 0, wait s 0 m0 0 m1 0, beats 0, m1 grants 4") != 0,
+	      "diag x: dsnd_arb and its m1 grants");
+	check(strstr(big, "q2_v 1 (write), ss_port_own 0") != 0, "diag x: q2 bits");
+	check(fmv_diag_format(wx, 11, big, sizeof big) == 1 && !strstr(big, "fmv_arb"),
+	      "diag x: a short read decodes without the arbiter block");
 	uint16_t none[12] = { 0 };
 	check(fmv_diag_format(none, 12, line, sizeof line) == 0 && strstr(line, "no window"),
 	      "diag: a core without the window says so");

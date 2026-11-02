@@ -130,15 +130,15 @@ static void start()
 // through DDR3, so it still answers when the DDR3 path is what failed.
 static void diag_print()
 {
-	uint16_t w[12];
+	uint16_t w[22];
 	EnableIO();
 	spi8(UIO_DMA_READ);
 	spi32_w(0xFA00);
-	for (int i = 0; i < 12; i++)
+	for (int i = 0; i < 22; i++)
 		w[i] = (uint16_t)spi_w(0);
 	DisableIO();
-	char line[400];
-	fmv_diag_format(w, 12, line, sizeof line);
+	char line[1200];
+	fmv_diag_format(w, 22, line, sizeof line);
 	printf("%s\n", line);
 }
 

@@ -72,7 +72,9 @@ bool fmv_xport_stalled(const fmv_xport *x);
 // The core's FMV diag window (hps_ext UIO_DMA_READ 0xFA00, laid out in
 // rtl/fmv/fmv.v of AmigaCD_MiSTer): `w` is what the read returned, `n`
 // words. Finds the 0xA5F4 signature, so a read misaligned by a word or two
-// still decodes, and writes one line to `out`. Returns 0 if there is no
+// still decodes, and writes one line to `out`. If the arbiter block
+// follows (0xA5F5 and eight words, AmigaCD.sv fmv_diag_x), it is decoded
+// onto the same line. Returns 0 if there is no
 // window (a core without it, or a version this decoder does not know), with
 // a line that says so.
 int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len);
