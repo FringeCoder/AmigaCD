@@ -403,9 +403,12 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 			};
 			used += snprintf(out + used, len - used, "; HPS port: %u commands accepted, %u read beats, last ",
 			                 y[0], y[1]);
-			used += cmd(y[3], y[2], (uint8_t)y[7], out + used, len - used);
+			// Core order (ddram_ctrl dbg_hps): the {rd, wr, 0, address[28:16]}
+			// word first, address[15:0] second -- y[2]/y[3] the last command,
+			// y[4]/y[5] the one on the pins.
+			used += cmd(y[2], y[3], (uint8_t)y[7], out + used, len - used);
 			used += snprintf(out + used, len - used, ", on the pins ");
-			used += cmd(y[5], y[4], (uint8_t)(y[7] >> 8), out + used, len - used);
+			used += cmd(y[4], y[5], (uint8_t)(y[7] >> 8), out + used, len - used);
 			snprintf(out + used, len - used, ", BUSY high for %u%s clocks", y[6], y[6] == 0xFFFF ? "+" : "");
 		}
 	}

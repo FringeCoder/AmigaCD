@@ -419,13 +419,20 @@ static void test_diag_format()
 	// BUSY high for 65535+ clocks.
 	uint16_t wy[31];
 	memcpy(wy, wx, sizeof wx);
-	uint16_t yb[9] = { 0xA5F6, 4, 4, 0x1003, (uint16_t)(0x8000 | 0x03FE), 0x1002,
-	                   (uint16_t)(0x8000 | 0x03FE), 0xFFFF, 0x0102 };
+	// Words in the order the core serves them (ddram_ctrl.v dbg_hps, word 0
+	// first): cmds, beats, last {rd,wr,0,a[28:16]}, last a[15:0], pins
+	// {rd,wr,0,a[28:16]}, pins a[15:0], BUSY run, {pins bc, last bc}. The
+	// first version of this vector had the two address words of each
+	// command swapped -- the decoder's own mistake, so it passed; hardware
+	// (2026-11-02 ~23:00) is what showed it. The values below are that
+	// run's: the last a read of 03fe1003, a write of 03fe1001 on the pins.
+	uint16_t yb[9] = { 0xA5F6, 4, 0, (uint16_t)(0x8000 | 0x03FE), 0x1003,
+	                   (uint16_t)(0x4000 | 0x03FE), 0x1001, 0xFFFF, 0x0102 };
 	memcpy(wy + 19, yb, sizeof yb);
 	check(fmv_diag_format(wy, 31, big, sizeof big) == 1, "diag y: decoded");
-	check(strstr(big, "HPS port: 4 commands accepted, 4 read beats, last read 03fe1003 (byte 1ff08018) x2") != 0,
+	check(strstr(big, "HPS port: 4 commands accepted, 0 read beats, last read 03fe1003 (byte 1ff08018) x2") != 0,
 	      "diag y: counts, last command, its burstcount");
-	check(strstr(big, "on the pins read 03fe1002 (byte 1ff08010) x1, BUSY high for 65535+ clocks") != 0,
+	check(strstr(big, "on the pins write 03fe1001 (byte 1ff08008) x1, BUSY high for 65535+ clocks") != 0,
 	      "diag y: the held command and the BUSY run");
 	check(fmv_diag_format(wx, 11, big, sizeof big) == 1 && !strstr(big, "fmv_arb"),
 	      "diag x: a short read decodes without the arbiter block");
