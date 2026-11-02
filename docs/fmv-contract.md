@@ -145,14 +145,16 @@ read count, and reports it back through `HOST_RDIDX`.
 
 Entry `n` lives at `0x110000 + 8 * (n & 4095)`. Every 68k access to board
 offsets `0x40000-0x7FFFF` (registers and the data port, in both directions)
-and every write into the ROM range makes one entry:
+and every write into the ROM range makes one entry. So does every Amiga reset
+while the board is on (bit 3): the CL450 and L64111 share the system reset,
+so Main resets its model and pushes the masks and reset values again.
 
 | Bits | Field |
 |---|---|
 | 0 | `RW`: 1 = read, 0 = write |
 | 1 | `UDS` asserted |
 | 2 | `LDS` asserted |
-| 3 | reserved, 0 |
+| 3 | `RESET`: the Amiga was reset; every other field is 0 |
 | 23:4 | board byte offset 19:0 (always even) |
 | 31:24 | `HADDR`: for a `HOST_rdata` access, the HMEM index used (bits 27:24); else 0 |
 | 47:32 | data: the write data, or the value the read returned |
@@ -217,4 +219,4 @@ writes the entry, then `UQ_WPTR` (= entries ever written). The FPGA polls
 | Version | Date | Change |
 |---|---|---|
 | 1 | 2026-11-02 | First draft, phase 2: posted ring plus a shadow block |
-| 2 | 2026-11-02 | Shadow block replaced by a register file in the FPGA and an update queue from Main, before anything was built on v1. CL450 `HOST_raddr`/`HOST_rdata` reads depend on writes still in the ring, and HMEM has two writers (manual 8.3.3), which a snapshot cannot serve. |
+| 2 | 2026-11-02 | The `RESET` event (bit 3). Shadow block replaced by a register file in the FPGA and an update queue from Main, before anything was built on v1. CL450 `HOST_raddr`/`HOST_rdata` reads depend on writes still in the ring, and HMEM has two writers (manual 8.3.3), which a snapshot cannot serve. |
