@@ -134,3 +134,15 @@ int akiko_iso_dir_next(const uint8_t *buf, size_t len, size_t *off,
 
 	return 0;
 }
+
+void akiko_raw_header(uint8_t *raw, uint32_t lba, uint8_t mode)
+{
+	raw[0] = 0x00;
+	memset(raw + 1, 0xff, 10);
+	raw[11] = 0x00;
+	uint32_t f = lba + 150;
+	raw[12] = akiko_bin_to_bcd((uint8_t)(f / (75 * 60)));
+	raw[13] = akiko_bin_to_bcd((uint8_t)((f / 75) % 60));
+	raw[14] = akiko_bin_to_bcd((uint8_t)(f % 75));
+	raw[15] = mode;
+}

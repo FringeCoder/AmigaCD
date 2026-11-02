@@ -72,4 +72,17 @@ int akiko_pvd_root_extent(const uint8_t *pvd, uint32_t *out_lba, uint32_t *out_l
 int akiko_iso_dir_next(const uint8_t *buf, size_t len, size_t *off,
                        char *name, size_t namecap, int *is_dir);
 
+// Write the 16-byte header of a raw 2352-byte frame into raw[0..15]: the
+// 12-byte sync pattern, the frame's address as BCD minutes/seconds/frames
+// (lba + the 150-frame pre-gap), and the mode byte. Nothing past byte 15 is
+// touched, so it can be applied after the user data was read into place.
+//
+// For images that store less than the raw frame -- cooked MODE1/2048, and
+// MODE2/2336 -- the reader has to build these 16 bytes itself, or Akiko ships
+// a frame with no sync and mode 0. MODE2/2336 did exactly that until phase 2 of
+// docs/fmv-plan.md, and it is the format a ripped Video CD track often comes
+// in. Minutes past 99 are not representable in BCD and are written as they
+// fall (the same no-validation stance as akiko_bin_to_bcd).
+void akiko_raw_header(uint8_t *raw, uint32_t lba, uint8_t mode);
+
 #endif // AKIKO_DISCFMT_H
