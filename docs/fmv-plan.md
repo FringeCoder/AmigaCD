@@ -479,6 +479,20 @@ the shadow block, local acknowledges and the Z2 RAM exclusion.
    worse than the noise line (~0.3 ns per family, `seed-lottery.md`), and no
    family that closed now fails.
 
+### Status, 2026-11-02
+
+| Piece | State |
+|---|---|
+| Contract (`fmv-contract.md`) | v2. The register file lives in the FPGA, with an update queue from Main; v1's shadow snapshot could not serve CL450 `HOST_raddr`/`HOST_rdata` reads |
+| MODE2/2336 header fix | done: `akiko_raw_header()`, tested and falsified |
+| Chip model (`fmv_model.cpp`) | done: both chips' host protocols, from the manuals; 10 mutations, all caught |
+| Main transport (`fmv.cpp`) | next: map the window, load `fmv.rom` (log which dump; decode its autoconfig nibbles), drain the event ring, run the update queue, the OSD row |
+| Core front end (`rtl/fmv/`) | next: the register file, both rings, the ROM/RAM window, INT2, the Z2 exclusion, and a bench that matches `tests/test_fmv_model.cpp`'s FPGA reference |
+
+Unverified until the hardware log: the IO word bits (`fmv_board`), the
+unit of HMEM `0xB` (words, as modelled), L64111 register lanes (low byte),
+and the L64111 channel buffer counter addresses (19/20 or 25/26).
+
 ## Phase 3: picture
 
 **Userspace:** feed the stream to libmpeg2 and write the pictures as RGB565
