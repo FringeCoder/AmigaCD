@@ -209,11 +209,11 @@ it.
   - The project already boots it from CHD and from Real CD. It is the title
     the Akiko bring-up was done against (`akiko_cd32.cpp:4`).
   - It has two data tracks, which already needed the per-track CHD offset fix
-    (`ide_cdrom.cpp:1452`). **Hypothesis:** the second data track is the MPEG
-    track. Check with `chdman info` on the project's CHD, or with the
-    disc's TOC from Real CD, and record the track's mode and sector size.
-    If it is Mode 2 at 2336 bytes, item 4's header fix is needed for
-    Cannon Fodder itself.
+    (`ide_cdrom.cpp:1452`). **Confirmed 2026-11-02:** track 2 is the MPEG
+    track, stored `MODE2_RAW` (2352 bytes), 12675 frames with a 225-frame
+    pregap: 352x288 at 25 fps, 166 s, Layer II audio at 44.1 kHz (phase 1
+    result). Being raw 2352, it does not depend on item 4's 2336-byte
+    header fix.
   - Being a game, it drives the cartridge through its own code path, not
     only through the FMV ROM's Video CD player. So it is a second,
     independent test of the model.
