@@ -1,7 +1,7 @@
 # FMV module: the contract between the core and Main
 
 **Status:** draft for phase 2 of [`fmv-plan.md`](fmv-plan.md), 2026-11-02.
-Version 1.
+Version 2.
 
 Both halves of the FMV module are built against this file: the core's front
 end (`rtl/fmv/` in `FringeCoder/AmigaCD_MiSTer`) and Main's model and transport
@@ -13,21 +13,35 @@ both sides.
 
 ## Principles
 
-1. **The 68k never waits for Main.** Register writes are posted into a ring
-   in DDR3, and register reads are answered from shadows the FPGA holds.
-   Main is single-threaded, and the A2065 found the deadlock that waiting
-   causes (`a2065_ddr3_mailbox.v`, the CMD ring comment). The only bus
-   stretches are FPGA-side work: a DDR3 access for ROM or RAM, or a ring
-   that is completely full.
-2. **The FPGA knows the board's address map and two chip facts, nothing
-   else.** Which IO-word bit means what, the reset values, and every
-   register's meaning live in Main. They come from the chip manuals and from
-   phase 2's logs, and they will change. Main is a re-copy to fix; the core
-   is a refit.
-3. **Interrupt acknowledges are applied by the FPGA at once.** The host is
-   told later, through the ring. This is the A2065's CSR0 rule, for the same
-   reason: a handler that acknowledges and then re-reads must see the
-   acknowledge, or it loops until Main catches up.
+1. **The 68k never waits for Main.** Register writes are posted, and register
+   reads are answered by the FPGA. Main is single-threaded, and the A2065
+   found the deadlock that waiting causes (`a2065_ddr3_mailbox.v`, the CMD
+   ring comment). The only bus stretches are FPGA-side work: a DDR3 access
+   for ROM or RAM, a register-file read, or a ring that is completely full.
+2. **The chips' registers live in the FPGA, as a register file both sides
+   write.** That is what they are in the silicon. The CL450's HMEM, for one,
+   is written by the host and by the chip's own CPU (CL450 manual 8.3.3).
+   The host also reads back what it has just selected through `HOST_raddr`.
+   A snapshot published by Main would be stale for exactly those reads, or
+   would undo a newer 68k write. So:
+   - the 68k writes the register file directly, in the bits it owns, and
+     every register access also goes to Main through the **event ring**;
+   - Main writes it through the **update queue**: masked writes, applied in
+     order, last writer wins, as in the chip.
+3. **The FPGA knows the board's address map and three chip facts, nothing
+   else.** Which bits the 68k owns in each register is a table Main loads. So
+   are the reset values, which IO-word bit is which, and every register's
+   meaning. Those come from the chip manuals and from phase 2's logs, and
+   they will change. Main is a re-copy to fix; the core is a refit. The three
+   facts, each cited:
+   - a 68k write to CL450 `HOST_rdata` goes to `HMEM[HAddr]` and then
+     increments `HAddr` (`HOST_raddr` bits 3:0); a read returns
+     `HMEM[HAddr]` (CL450 manual 8.3.3, p. 8-13);
+   - the CL450 interrupt pin is asserted while `HOST_control` bit 7 is 0
+     (p. 8-12). So the host's acknowledge, writing bit 7 to 1, takes effect
+     at once with no special case;
+   - a 68k read of L64111 register 4 or 5 deasserts the L64111 interrupt
+     (L64111 manual p. 4-9).
 
 ## The window
 
@@ -40,10 +54,11 @@ A2065 (`0x1FF00000`) and the scaler and framebuffer at `0x20000000-0x22xxxxxx`.
 
 | Offset | Size | Who writes | What |
 |---|---|---|---|
-| `0x000000` | 1 MB | Main (ROM), 68k (RAM) | **Board image**: byte offset = offset within the 1 MB board |
-| `0x100000` | 8 | FPGA | `WPTR`: ring write count |
-| `0x100100` | 512 | Main | **Shadow block**, 64 words (below) |
-| `0x110000` | 32 KB | FPGA | **Ring**, 4096 entries x 8 bytes |
+| `0x000000` | 1 MB | Main (ROM, decoder variables), 68k (RAM) | **Board image**: byte offset = offset within the 1 MB board |
+| `0x100000` | 8 | FPGA | `EV_WPTR`: event ring write count |
+| `0x100040` | 8 | Main | `UQ_WPTR`: update queue write count |
+| `0x101000` | 16 KB | Main | **Update queue**, 1024 entries x 16 bytes |
+| `0x110000` | 32 KB | FPGA | **Event ring**, 4096 entries x 8 bytes |
 
 ### The board image, `0x000000-0x0FFFFF`
 
@@ -54,33 +69,83 @@ section), with its offsets from the board base, which autoconfig sets to
 | Board offset | What | Served from |
 |---|---|---|
 | `0x00000-0x3FFFF` | ROM, 256 KB | DDR3 image, read-only to the 68k |
-| `0x40000-0x4FFFF` | IO / status word | shadow (read), ring (write) |
-| `0x50000-0x5FFFF` | L64111 registers | shadow (read), ring (write) |
-| `0x60000-0x6FFFF` | CL450 data port | ring (write); reads return `0xFFFF` and are posted |
-| `0x70000-0x7FFFF` | CL450 registers | shadow (read), ring (write) |
-| `0x80000-0xFFFFF` | RAM, 512 KB | DDR3 image, read/write |
+| `0x40000-0x4FFFF` | IO / status word | register file |
+| `0x50000-0x5FFFF` | L64111 registers | register file |
+| `0x60000-0x6FFFF` | CL450 data port (CMEM, write only) | event ring; reads return `0xFFFF` |
+| `0x70000-0x7FFFF` | CL450 registers | register file |
+| `0x80000-0xFFFFF` | RAM, 512 KB: the CL450's local DRAM (bank 0, CL450 manual table 4-1) | DDR3 image, read/write |
 
 - **Byte order:** board byte offset `o` lives at window byte `o`, in the
   file's order, exactly as `fmv.rom` is laid out. For the FPGA, Avalon word
   `o >> 3` holds byte `o` in bits `8*(o&7)+7 : 8*(o&7)`. A 68k word at even
   `o` is `{byte o, byte o+1}`. UDS selects byte `o` and LDS byte `o+1`.
 - ROM and RAM accesses are real DDR3 reads and writes, with DTACK stretched
-  for them (the A2065 boardram path). They do not go into the ring. A write
-  into the ROM range is dropped, and is posted to the ring so it shows in the
-  log.
+  for them (the A2065 boardram path). They do not go into the event ring. A
+  write into the ROM range is dropped, and is posted to the ring so it shows
+  in the log.
+- The RAM is the decoder's own memory, and its microcode keeps variables
+  there that the host reads (CL450 manual ch. 14, appendix A). Main writes
+  those into the image directly.
 - Main writes the ROM image **before** it sets `ALIVE` (below).
 
-### `WPTR`, `0x100000` (FPGA to Main)
+### The register file (FPGA)
 
-Bits 31:0 hold the number of ring entries ever written, wrapping at 2^32. The
-FPGA writes the entry first and `WPTR` after it. Main keeps its own read
-count.
+256 registers of 16 bits, each with a 16-bit **68k write mask** beside it.
+Indices:
 
-### The ring, `0x110000` (FPGA to Main)
+| Index | Register | 68k address (board offset) |
+|---|---|---|
+| `0x00-0x7F` | CL450 register at byte offset `2i` | `0x70000 + 2i`, mirrored every 256 bytes |
+| `0x80-0x9F` | L64111 register `i - 0x80` | `0x50000 + 2(i - 0x80)`, mirrored every 64 bytes |
+| `0xA0` | IO word | `0x40000`, mirrored through `0x4FFFF` |
+| `0xB0-0xBF` | CL450 HMEM 0-15 | through `HOST_rdata` only |
+| `0xC0` | `CTRL`: bit 0 `ALIVE` | none |
+| `0xC1` | `L64_INT`: bit 0, the L64111 interrupt latch (guarded; see the queue) | none |
+| `0xC2`, `0xC3` | `HOST_RDIDX` bits 15:0, 31:16: event-ring entries Main has consumed | none |
+| `0xC4` | `IO_MAP_CL`: IO-word bits that show the CL450 interrupt | none |
+| `0xC5` | `IO_MAP_L64`: IO-word bits that show the L64111 interrupt | none |
+| `0xC6` | `IO_POL`: those bits' value while asserted | none |
+| `0xD0-0xDF` | `AUTOCFG`: 64 nibbles (below) | none |
+| `0xE0-0xFF` | reserved | none |
+
+`AUTOCFG` uses `0xD0-0xDF`: 16 registers of 4 nibbles. Nibble `n` (what the
+68k reads as the high nibble at autoconfig offset `2n`, `n` = 0..63) is bits
+`4(n&3)+3 : 4(n&3)` of register `0xD0 + n/4`.
+
+- **68k write** to index `i` (word access, or a byte access widened to its
+  lanes): `R[i] = (R[i] & ~M[i]) | (data & M[i])`. `M` is the write mask.
+  Except for `HOST_rdata` (`i = 0x46`), which writes `R[0xB0 + HAddr]` the
+  same way, using `M[0xB0 + HAddr]`, and then increments `HAddr`, the low
+  four bits of `R[0x44]`. Every write also goes into the event ring.
+- **68k read** of index `i` returns `R[i]`, except: `HOST_rdata` returns
+  `R[0xB0 + HAddr]`; and in the IO word, the bits in `IO_MAP_CL` and
+  `IO_MAP_L64` read as `IO_POL` while their interrupt is asserted and as
+  `~IO_POL` while it is not. Every read goes into the event ring with the
+  value it returned. A read of L64111 register 4 or 5 also clears `L64_INT`
+  and records its ring index as `l64_ack_idx`.
+- **The interrupt** to Paula's INT2 is
+  `ALIVE & (~R[0x48][7] | L64_INT[0])`. `R[0x48]` is CL450 `HOST_control`
+  (byte offset `0x90`).
+- At FPGA reset every `R` and `M` is 0, so the 68k can write nothing until
+  Main has loaded the masks.
+- **`ALIVE`** says Main has loaded the ROM, the masks and `AUTOCFG`. The
+  FPGA samples it at Amiga reset: **without it the board does not join the
+  autoconfig chain** and its address range is unmapped. So a missing
+  `fmv.rom` means no card, not a card with garbage in its autoconfig.
+- **`AUTOCFG`** is taken by Main from the ROM's first 128 bytes: nibble `n` =
+  `rom[2n] >> 4`. WinUAE does the same (`expamem_init_cd32fmv`), and phase 2
+  confirms it on a real dump: the nibbles must decode to a 1 MB Zorro II
+  board.
+
+### `EV_WPTR` and the event ring (FPGA to Main)
+
+`EV_WPTR` bits 31:0 hold the number of events ever written, wrapping at 2^32.
+The FPGA writes the entry first and `EV_WPTR` after it. Main keeps its own
+read count, and reports it back through `HOST_RDIDX`.
 
 Entry `n` lives at `0x110000 + 8 * (n & 4095)`. Every 68k access to board
-offsets `0x40000-0x7FFFF` (registers, in both directions) and every write into
-the ROM range makes one entry:
+offsets `0x40000-0x7FFFF` (registers and the data port, in both directions)
+and every write into the ROM range makes one entry:
 
 | Bits | Field |
 |---|---|
@@ -89,68 +154,48 @@ the ROM range makes one entry:
 | 2 | `LDS` asserted |
 | 3 | reserved, 0 |
 | 23:4 | board byte offset 19:0 (always even) |
-| 31:24 | reserved, 0 |
+| 31:24 | `HADDR`: for a `HOST_rdata` access, the HMEM index used (bits 27:24); else 0 |
 | 47:32 | data: the write data, or the value the read returned |
 | 63:48 | `SEQ`: `n & 0xFFFF` |
 
 **`SEQ` is not redundant.** A DDR3 write from one HPS port can become visible
 to another port later than a write issued after it (`arm-cpu-plan.md`, steps
-1b and 1e). So Main can see `WPTR` advance before the entry itself has landed.
-Main accepts entry `n` only when its `SEQ` equals `n & 0xFFFF`, and otherwise
-re-reads it on the next pass. It never skips an entry.
+1b and 1e). So Main can see `EV_WPTR` advance before the entry itself has
+landed. Main accepts entry `n` only when its `SEQ` equals `n & 0xFFFF`, and
+otherwise re-reads it on the next pass. It never skips an entry.
 
-**Back-pressure:** the FPGA stretches DTACK on a register access while
+**Back-pressure:** the FPGA stretches DTACK on a ring-bound access while
 `n - HOST_RDIDX >= 4095`, i.e. while the ring is full. Normal play never gets
 there: a Video CD streams about 90 000 data-port words a second, so 4096
 entries is 45 ms of Main not draining.
 
-### The shadow block, `0x100100` (Main to FPGA)
+### `UQ_WPTR` and the update queue (Main to FPGA)
 
-64 words, Avalon `29'h04E20020 + i`. Main writes words 1-63, then word 0. The
-FPGA reads word 0 and, if it changed, reads the whole block again as one
-64-beat burst. Word 0 is read before the burst, so the block it fetches is at
-least as new as the generation it saw.
+Entry `k` lives at `0x101000 + 16 * (k & 1023)`, two 64-bit words. Main
+writes the entry, then `UQ_WPTR` (= entries ever written). The FPGA polls
+`UQ_WPTR`, then reads each new entry as a 2-beat burst.
 
-| Word | Field |
-|---|---|
-| 0 | `GEN`: bits 31:0, incremented by Main after every update of 1-63 |
-| 1 | `HOST_STATE`: bit 0 `ALIVE`, bit 1 `CL450_INT`, bit 2 `L64111_INT`; bits 63:32 `HOST_RDIDX` (ring entries consumed) |
-| 2 | `IO_IRQ_MAP`: bits 15:0 the IO-word bits that mirror the CL450 interrupt, 31:16 the bits that mirror the L64111 interrupt, 47:32 those bits' value **while asserted** |
-| 3 | reserved |
-| 4-7 | `AUTOCFG`: 64 nibbles; nibble `i` (bits `4i+3:4i` of the 256-bit field, word 4 lowest) is what the 68k reads as the high nibble at autoconfig offset `2i` |
-| 8 | `IO`: bits 15:0, the IO word as read at board `0x40000` |
-| 9-11 | reserved |
-| 12-19 | `L64111`: 32 x 16 bits; register `r` (board `0x50000 + 2r`, mirrored every 64 bytes) is bits `16*(r&3)+15 : 16*(r&3)` of word `12 + r/4` |
-| 20-51 | `CL450`: 128 x 16 bits; the register at board `0x70000 + o` (`o` even, `0x00-0xFE`, mirrored every 256 bytes) is bits `16*(k&3)+15 : 16*(k&3)` of word `20 + k/4`, `k = o/2` |
-| 52-63 | reserved |
-
-- **`ALIVE`** says Main has loaded the ROM and filled `AUTOCFG`. The FPGA
-  samples it at Amiga reset: **without it the board does not join the
-  autoconfig chain** and its address range is unmapped. So a missing
-  `fmv.rom` means no card, not a card with garbage in its autoconfig.
-- **`AUTOCFG`** is taken by Main from the ROM's first 128 bytes: nibble `i` =
-  `rom[2i] >> 4`. WinUAE does the same (`expamem_init_cd32fmv`), and phase 2
-  confirms it on a real dump: the nibbles must decode to a 1 MB Zorro II
-  board.
-- **The interrupt** goes to Paula's INT2:
-  `ALIVE & ((CL450_INT & ~cl_ack) | (L64111_INT & ~l64_ack))`.
-- `IO_IRQ_MAP` exists so the IO word can follow a local acknowledge
-  without the FPGA knowing which bit is which: while a source is
-  acknowledged locally, its mapped IO bits read as the *de*asserted value.
-
-### Local acknowledges (FPGA)
-
-Two chip facts, from the manuals:
-
-| Source | Acknowledged by | Manual |
+| Word | Bits | Field |
 |---|---|---|
-| L64111 | a **read** of register 4 or 5 (board `0x50008`, `0x5000A`, and their mirrors) | L64111 manual p. 4-9: reading either status register deasserts `INTR` |
-| CL450 | a **write** to `HOST_control` (board `0x70090` and mirrors) with bit 7 set | CL450 manual 4.8.1 and p. 8-12: the host clears `Int` (bit 7) in `HOST_control` |
+| 0 | 7:0 | register index |
+| 0 | 8 | `MASKFILE`: 1 = write `M[index]` instead of `R[index]` |
+| 0 | 9 | `GUARD`: apply only if `RDIDX` (below) is past `l64_ack_idx` |
+| 0 | 47:16 | reserved, 0 |
+| 0 | 63:48 | `SEQ`: `k & 0xFFFF` |
+| 1 | 15:0 | value |
+| 1 | 31:16 | bit mask: `R[i] = (R[i] & ~mask) \| (value & mask)` |
+| 1 | 63:32 | `RDIDX`: Main's event-ring read count when it made this update |
 
-On such an access the FPGA sets that source's `ack` and records the ring index
-of the access. It clears `ack` once `HOST_RDIDX` has passed that index. By
-then Main has seen the access and lowered the source itself, or raised it
-again for a new interrupt, which is then real.
+- The FPGA applies entry `k` only once its `SEQ` reads back as `k & 0xFFFF`,
+  for the same cross-port reason. It waits and re-reads; it never skips.
+- **`GUARD`** is for raising the L64111 latch (`0xC1`). Main may decide to
+  raise it before it has seen the 68k's acknowledging read. A guarded update
+  made with `RDIDX <= l64_ack_idx` is dropped, because the 68k has
+  acknowledged since then. Main raises it again if the source is still
+  active once it has caught up.
+- `HOST_RDIDX` (`0xC2`/`0xC3`) is written through the queue like anything
+  else. Main writes it at least every time it has drained 1024 events, so
+  back-pressure never sees a stale count for long.
 
 ## Option and exclusions
 
@@ -171,4 +216,5 @@ again for a new interrupt, which is then real.
 
 | Version | Date | Change |
 |---|---|---|
-| 1 | 2026-11-02 | First draft, phase 2 |
+| 1 | 2026-11-02 | First draft, phase 2: posted ring plus a shadow block |
+| 2 | 2026-11-02 | Shadow block replaced by a register file in the FPGA and an update queue from Main, before anything was built on v1. CL450 `HOST_raddr`/`HOST_rdata` reads depend on writes still in the ring, and HMEM has two writers (manual 8.3.3), which a snapshot cannot serve. |
