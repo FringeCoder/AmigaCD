@@ -393,6 +393,28 @@ static void do_bridge(uint32_t enable)
 	}
 }
 
+// Debug (FMV diag, support/minimig/fmv.cpp): the state of the FPGA-to-SDRAM
+// ports as the HPS sees them. Read only. Order: SDR dramsts, fpgaportrst,
+// protportdefault, rstmgr brgmodrst, sysmgr fpgaintfgrp_module.
+void fpga_sdr_status(uint32_t *v)
+{
+	v[0] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5038));
+	v[1] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5080));
+	v[2] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x508C));
+	v[3] = readl(&reset_regs->brg_mod_reset);
+	v[4] = readl(&sysmgr_regs->fpgaintfgrp_module);
+}
+
+// Debug: pulse the FPGA-to-SDRAM port reset, as do_bridge(0)/(1) does at a
+// core load, but with the core running. Only AMIGACD_FMV=3 calls it, to see
+// whether a wedged f2sdram port comes back.
+void fpga_sdr_port_pulse(void)
+{
+	writel(0, (void*)(SOCFPGA_SDR_ADDRESS + 0x5080));
+	usleep(10);
+	writel(0x00003FFF, (void*)(SOCFPGA_SDR_ADDRESS + 0x5080));
+}
+
 static int make_env(const char *name, const char *cfg)
 {
 	void* buf = shmem_map(0x1FFFF000, 0x1000);

@@ -17,6 +17,7 @@
 #include "../../file_io.h"
 #include "../../shmem.h"
 #include "../../spi.h"
+#include "../../fpga_io.h"
 #include "../../user_io.h"
 #include "fmv_transport.h"
 #include "minimig_config.h"
@@ -139,7 +140,10 @@ static void diag_print()
 	DisableIO();
 	char line[1600];
 	fmv_diag_format(w, 31, line, sizeof line);
-	printf("%s\n", line);
+	uint32_t r[5];
+	fpga_sdr_status(r);
+	printf("%s; HPS: dramsts %08x fpgaportrst %08x protportdefault %08x brgmodrst %08x "
+	       "fpgaintf %08x\n", line, r[0], r[1], r[2], r[3], r[4]);
 }
 
 void fmv_shutdown(void)
@@ -157,6 +161,10 @@ void fmv_shutdown(void)
 	diag_shown = 0;
 }
 
+// AMIGACD_FMV=2: diagnosis only. AMIGACD_FMV=3: the same, and at 3 s one
+// pulse of the f2sdram port reset (fpga_sdr_port_pulse), to see whether a
+// wedged port comes back; the lines after it say.
+//
 // AMIGACD_FMV=2: diagnosis only. The board stays off -- status[64] clear,
 // no window mapped, no ROM -- and the core's FMV/DDR3 diag window is printed
 // once a second for the first ten seconds after the core starts, then every
@@ -171,6 +179,13 @@ static void diag_only_poll()
 		first_us = t;
 		user_io_status_set(FMV_STATUS_OPT, 0);
 		printf("FMV: AMIGACD_FMV=2, diagnosis only: the board stays off\n");
+	}
+	static int pulsed;
+	if (cfg.amigacd_fmv == 3 && !pulsed && t - first_us >= 3000000) {
+		pulsed = 1;
+		printf("FMV diag-only: pulsing the f2sdram port reset (fpgaportrst 0, then 0x3FFF)\n");
+		fpga_sdr_port_pulse();
+		diag_print();
 	}
 	uint64_t period = (t - first_us < 10000000) ? 1000000 : 10000000;
 	if (diag_shown == 0 || t - diag_last_us >= period) {
@@ -188,7 +203,7 @@ void fmv_poll(void)
 			fmv_shutdown();
 		return;
 	}
-	if (cfg.amigacd_fmv == 2) {
+	if (cfg.amigacd_fmv >= 2) {
 		diag_only_poll();
 		return;
 	}
