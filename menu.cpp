@@ -3159,7 +3159,7 @@ void HandleUI(void)
 							if (p[2] != ',')
 							{
 								if (page && page == n) inpage = 1;
-								if (!page && n && !flat) inpage = 0;
+								if (!page && n && !flat && mgl->done) inpage = 0;
 								p += 2;
 
 								if (flat && !page && p[0] == '-') inpage = 0;
@@ -3566,7 +3566,7 @@ void HandleUI(void)
 						if (p[2] != ',')
 						{
 							if (page && page == n) inpage = 1;
-							if (!page && n && !flat) inpage = 0;
+							if (!page && n && !flat && mgl->done) inpage = 0;
 							p += 2;
 						}
 					}
