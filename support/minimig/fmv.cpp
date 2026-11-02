@@ -11,12 +11,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "../../cfg.h"
 #include "../../file_io.h"
 #include "../../shmem.h"
 #include "../../user_io.h"
 #include "fmv_transport.h"
+#include "minimig_config.h"
 #include "minimig_crc32.h"
 
 static fmv_xport *xport;
@@ -37,16 +39,27 @@ static void fmv_log(void *, const char *line)
 }
 
 // The ROM, by the names it goes by: WinUAE's "CD32FMV", and the plain one.
-// Beside the CD32 ROMs first, as CD32.rom is found (minimig_config.cpp
-// preset_rom_path), then in the root folder.
+// Looked for beside the Kickstart this config actually loaded (CD32.rom may
+// live in games/AmigaCD32 while HomeDir() is games/Amiga, as on the owner's
+// card, 2026-11-02), then in HomeDir(), then in the root folder.
 static uint8_t *load_rom(int *len)
 {
 	static const char *names[] = { "CD32FMV.rom", "fmv.rom" };
-	char path[1024];
-	for (int pass = 0; pass < 2; pass++) {
+	char dirs[3][1024];
+	int nd = 0;
+	const char *ks = minimig_config.kickstart;
+	const char *slash = strrchr(ks, '/');
+	if (slash && slash > ks) {
+		snprintf(dirs[nd], sizeof dirs[nd], "%.*s", (int)(slash - ks), ks);
+		nd++;
+	}
+	snprintf(dirs[nd++], sizeof dirs[0], "%s", HomeDir());
+	dirs[nd++][0] = 0;
+	char path[1100];
+	for (int d = 0; d < nd; d++) {
 		for (const char *n : names) {
-			if (pass == 0)
-				snprintf(path, sizeof path, "%s/%s", HomeDir(), n);
+			if (dirs[d][0])
+				snprintf(path, sizeof path, "%s/%s", dirs[d], n);
 			else
 				snprintf(path, sizeof path, "%s", n);
 			int size = FileLoad(path, 0, 0);
@@ -64,6 +77,8 @@ static uint8_t *load_rom(int *len)
 			return buf;
 		}
 	}
+	printf("FMV: looked for CD32FMV.rom / fmv.rom in %s%s%s and the root folder\n",
+	       nd > 2 ? dirs[0] : "", nd > 2 ? ", " : "", HomeDir());
 	return 0;
 }
 
@@ -76,6 +91,13 @@ static void start()
 		printf("FMV: AMIGACD_FMV=1 but no CD32FMV.rom or fmv.rom found; the board stays off\n");
 		return;
 	}
+	// status[64] stays clear until the session is set up: while it is, the
+	// core holds its ring and queue counters at 0 and leaves DDR3 alone
+	// (fmv-contract.md v4), so both sides start from zero. A saved config
+	// may have brought the bit up with the core; take it down and give the
+	// core time to see it.
+	user_io_status_set(FMV_STATUS_OPT, 0);
+	usleep(2000);
 	window = (volatile uint8_t *)shmem_map(FMV_WIN_PHYS, FMV_WIN_SIZE);
 	if (!window) {
 		printf("FMV: cannot map the DDR3 window at 0x%08x\n", FMV_WIN_PHYS);

@@ -1,7 +1,7 @@
 # FMV module: the contract between the core and Main
 
 **Status:** draft for phase 2 of [`fmv-plan.md`](fmv-plan.md), 2026-11-02.
-Version 3.
+Version 4.
 
 Both halves of the FMV module are built against this file: the core's front
 end (`rtl/fmv/` in `FringeCoder/AmigaCD_MiSTer`) and Main's model and transport
@@ -210,6 +210,30 @@ After applying entry `k`, the FPGA writes `UQ_RDPTR = k + 1` (at least every
   else. Main writes it at least every time it has drained 1024 events, so
   back-pressure never sees a stale count for long.
 
+### A session starts from zero
+
+DDR3 is not cleared between core loads, so the window can hold garbage or the
+pointers of a session that ended. Neither side may read the other's counters
+from it. Instead:
+
+- **While `status[64]` is clear**, the FPGA does not touch the window (no
+  event writes, no queue polls), drops anything still in its crossings, and
+  holds its counters at 0: events written, queue entries applied, its
+  back-pressure count, `HOST_RDIDX`, the L64111 acknowledge index, the
+  L64111 latch and `ALIVE`. The rest of the register file keeps its values.
+- **Main starts a session** with `status[64]` clear: it clears the bit (a
+  saved config can bring it up with the core) and waits long enough for the
+  core to see it, then writes `EV_WPTR = UQ_RDPTR = UQ_WPTR = 0`, writes the
+  ROM, queues the masks, reset values, `AUTOCFG` and `ALIVE` from entry 0,
+  and only then sets `status[64]`.
+- A Main that restarts under a running core does the same: it starts a new
+  session rather than resuming one. It would have lost the model's state
+  anyway.
+
+v3 resumed from the pointers instead. On hardware (2026-11-02, Cannon
+Fodder), a fresh core started at entry 0 while Main queued from whatever
+`UQ_RDPTR` held. `ALIVE` never landed, and the board never joined the chain.
+
 ## Option and exclusions
 
 - One OSD status bit, **FMV module Off/On**, allocated in the core's
@@ -229,6 +253,7 @@ After applying entry `k`, the FPGA writes `UQ_RDPTR = k + 1` (at least every
 
 | Version | Date | Change |
 |---|---|---|
+| 4 | 2026-11-02 | A session starts from zero: off, the FPGA holds its counters at 0 and leaves the window alone; Main zeroes the pointers before setting `status[64]`. Replaces v3's resume-from-pointers, which failed on hardware. |
 | 1 | 2026-11-02 | First draft, phase 2: posted ring plus a shadow block |
 | 3 | 2026-11-02 | `UQ_RDPTR`, so Main cannot overrun the update queue; update-queue word order; back-pressure on `HOST_RDIDX`'s low half only; the guard compare made wrap-safe. Nothing was yet built on v2. |
 | 2 | 2026-11-02 | The `RESET` event (bit 3). Shadow block replaced by a register file in the FPGA and an update queue from Main, before anything was built on v1. CL450 `HOST_raddr`/`HOST_rdata` reads depend on writes still in the ring, and HMEM has two writers (manual 8.3.3), which a snapshot cannot serve. |

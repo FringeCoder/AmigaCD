@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // The FMV module's DDR3 transport. See fmv_transport.h and
-// docs/fmv-contract.md (v3) for the layout every access below follows.
+// docs/fmv-contract.md (v4) for the layout every access below follows.
 
 #include "fmv_transport.h"
 
@@ -29,6 +29,9 @@ struct fmv_xport {
 	uint32_t uq_wr;          // update queue entries written
 	uint32_t rdidx_pub;      // HOST_RDIDX last published
 	bool     alive;
+	bool     core_seen;      // UQ_RDPTR has moved: the core reads the queue
+	bool     stall_logged;
+	uint32_t stall_us;       // how long entries have waited untaken
 	std::deque<pending_update> pend;
 	fmv_xport_stats st;
 };
@@ -98,6 +101,10 @@ static void flush_updates(fmv_xport *x)
 {
 	uint32_t rd = (uint32_t)rd64(x, FMV_WIN_UQ_RDPTR);
 	uint32_t used = x->uq_wr - rd;
+	if (rd != 0 && !x->core_seen && used <= FMV_UQ_ENTRIES) {
+		x->core_seen = true;
+		xlog(x, "FMV: the core is reading the update queue");
+	}
 	if (used > FMV_UQ_ENTRIES) {
 		// The FPGA cannot have applied more than was written; a value
 		// like this is a stale or torn read. Wait for the next pass.
@@ -197,12 +204,16 @@ fmv_xport *fmv_xport_new(volatile uint8_t *win, fmv_log_fn log, void *log_ctx)
 	x->log = log;
 	x->log_ctx = log_ctx;
 	memset(&x->st, 0, sizeof x->st);
-	// Continue from where the FPGA is: events already in the ring are from
-	// before this Main started, and the queue resumes at the FPGA's read
-	// count.
-	x->ev_rd = (uint32_t)rd64(x, FMV_WIN_EV_WPTR);
-	x->uq_wr = (uint32_t)rd64(x, FMV_WIN_UQ_RDPTR);
-	wr64(x, FMV_WIN_UQ_WPTR, x->uq_wr);
+	// A session starts from zero on both sides (fmv-contract.md v4): the
+	// core holds its counters at 0 while status[64] is clear, and the caller
+	// keeps it clear until fmv_xport_start() has run. Whatever the window
+	// holds -- DDR3 is not cleared between core loads -- is not the core's.
+	x->ev_rd = 0;
+	x->uq_wr = 0;
+	wr64(x, FMV_WIN_EV_WPTR, 0);
+	wr64(x, FMV_WIN_UQ_RDPTR, 0);
+	wr64(x, FMV_WIN_UQ_WPTR, 0);
+	barrier();
 	x->rdidx_pub = x->ev_rd - 1;     // publish once at the first poll
 	fmv_hooks h = { x, hook_update, hook_dram, hook_log };
 	x->model = fmv_model_new(h);     // pushes the masks and reset values
@@ -306,6 +317,17 @@ void fmv_xport_poll(fmv_xport *x, uint32_t elapsed_us)
 	fmv_model_advance(x->model, elapsed_us);
 	publish_rdidx(x);
 	flush_updates(x);
+
+	// A core that never takes the queue is named, once: on hardware this is
+	// the difference between "the board is not in the chain" and a reason.
+	if (x->core_seen || x->uq_wr == 0) {
+		x->stall_us = 0;
+	} else if (!x->stall_logged && (x->stall_us += elapsed_us) >= 2000000) {
+		x->stall_logged = true;
+		xlog(x, "FMV: the core has not taken the update queue in 2 s (UQ_WPTR %u, "
+		     "UQ_RDPTR %u, EV_WPTR %u): status[64] not reaching it, or its DDR3 path",
+		     x->uq_wr, (uint32_t)rd64(x, FMV_WIN_UQ_RDPTR), (uint32_t)rd64(x, FMV_WIN_EV_WPTR));
+	}
 }
 
 void fmv_xport_get_stats(const fmv_xport *x, fmv_xport_stats *s)

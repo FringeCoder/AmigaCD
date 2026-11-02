@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The FMV module's DDR3 transport, Main's side of docs/fmv-contract.md (v3):
+// The FMV module's DDR3 transport, Main's side of docs/fmv-contract.md (v4):
 // the board image (ROM, decoder variables in RAM), the event ring from the
 // FPGA, and the update queue back to it, with the chip model in between.
 //
@@ -34,9 +34,10 @@ struct fmv_xport;
 
 typedef void (*fmv_log_fn)(void *ctx, const char *line);
 
-// `win` is the 2 MB window, mapped uncached. The pointers already in it are
-// taken as the starting point: events written before now are skipped, and
-// the queue continues from wherever the FPGA has read to.
+// `win` is the 2 MB window, mapped uncached. A new session: the pointers in
+// the window are zeroed, not trusted (contract v4). The caller holds
+// status[64] clear from before this call until fmv_xport_start() returns,
+// so the core's counters are at 0 too.
 fmv_xport *fmv_xport_new(volatile uint8_t *win, fmv_log_fn log, void *log_ctx);
 void fmv_xport_free(fmv_xport *x);
 

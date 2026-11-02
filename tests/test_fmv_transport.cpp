@@ -2,7 +2,7 @@
 //
 // The FMV module's DDR3 transport (support/minimig/fmv_transport.cpp)
 // against a reference FPGA (fmv_fpga_ref.h) that talks to it only through a
-// 2 MB buffer laid out as docs/fmv-contract.md (v3) says: the board image,
+// 2 MB buffer laid out as docs/fmv-contract.md (v4) says: the board image,
 // the event ring with SEQ, EV_WPTR, the update queue, UQ_WPTR and UQ_RDPTR.
 //
 // What is checked is the plumbing, not the chips (test_fmv_model.cpp does
@@ -328,24 +328,52 @@ static void test_dram_variables()
 	fmv_xport_free(x);
 }
 
-static void test_resume_from_pointers()
+static void test_stale_window()
 {
-	// A Main restarted under a running core takes the pointers as it finds
-	// them: old events are skipped, and the queue continues at the FPGA's
-	// read count.
+	// The hardware failure of 2026-11-02: DDR3 is not cleared between core
+	// loads, so a fresh core (its counters at 0) faces a window holding
+	// garbage, or the pointers of a session that ended. Main must not take
+	// them as the FPGA's: a session starts from zero on both sides.
 	wfpga f;
-	f.ev_count = 300;
+	for (size_t i = 0; i < f.mem.size(); i++)
+		f.mem[i] = (uint8_t)(0xA5 ^ (i * 13));
 	wr64(f.win, FMV_WIN_EV_WPTR, 300);
-	f.uq_rd = 777;
 	wr64(f.win, FMV_WIN_UQ_RDPTR, 777);
+	wr64(f.win, FMV_WIN_UQ_WPTR, 779);
+	g_log.clear();
 	fmv_xport *x = fmv_xport_new(f.win, logcb, 0);
-	eq("UQ_WPTR resumes at UQ_RDPTR", rd64(f.win, FMV_WIN_UQ_WPTR), 777);
-	pump(x, f);
+	eq("EV_WPTR zeroed", rd64(f.win, FMV_WIN_EV_WPTR), 0);
+	eq("UQ_RDPTR zeroed", rd64(f.win, FMV_WIN_UQ_RDPTR), 0);
+	check(rd64(f.win, FMV_WIN_UQ_WPTR) <= FMV_UQ_ENTRIES, "UQ_WPTR counts from 0");
+	std::vector<uint8_t> rom = fake_rom();
+	check(fmv_xport_start(x, rom.data(), rom.size(), 0), "the ROM is taken");
+	for (int k = 0; k < 8; k++)
+		pump(x, f);
+	check(f.alive(), "a fresh core facing a stale window comes ALIVE");
 	fmv_xport_stats st;
 	fmv_xport_get_stats(x, &st);
-	eq("old events skipped", st.events, 0);
-	eq("the queue was read from 777 on", f.uq_rd, 777 + st.updates);
-	check(f.applied > 0, "and applied");
+	eq("no event invented from the stale ring", st.events, 0);
+	f.write(FMV_OFF_CL450 + 2 * 0x48, 0x0080);
+	pump(x, f);
+	fmv_xport_get_stats(x, &st);
+	eq("the first real event is seen", st.events, 1);
+	check(logged("core is reading the update queue"), "Main says when the core takes the queue");
+	fmv_xport_free(x);
+}
+
+static void test_core_not_reading()
+{
+	// A core whose front end never reads the queue (not loaded, status[64]
+	// not reaching it, a dead DDR3 path) is named in the log, not silent.
+	wfpga f;
+	g_log.clear();
+	fmv_xport *x = fmv_xport_new(f.win, logcb, 0);
+	std::vector<uint8_t> rom = fake_rom();
+	fmv_xport_start(x, rom.data(), rom.size(), 0);
+	for (int k = 0; k < 30; k++)
+		fmv_xport_poll(x, 100000);      // 3 s, and the FPGA never services
+	check(logged("has not taken"), "a stalled queue is reported");
+	check(!logged("core is reading the update queue"), "and not reported as read");
 	fmv_xport_free(x);
 }
 
@@ -372,7 +400,8 @@ int main()
 	test_queue_never_overrun();
 	test_back_pressure_sees_main();
 	test_dram_variables();
-	test_resume_from_pointers();
+	test_stale_window();
+	test_core_not_reading();
 	test_guard_wraps();
 	if (failures) {
 		printf("test_fmv_transport: %d FAILED\n", failures);

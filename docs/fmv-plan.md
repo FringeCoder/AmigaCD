@@ -2,7 +2,8 @@
 
 **Date:** 2026-11-01
 **Status:** phase 0 done on paper (2026-11-01); phase 1 passed on hardware
-(2026-11-02); phase 2 built and panelled, hardware gate pending.
+(2026-11-02); phase 2 built and panelled. The first hardware run found a
+start-up fault, fixed in contract v4; the gate is to be rerun.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -536,17 +537,34 @@ the shadow block, local acknowledges and the Z2 RAM exclusion.
    worse than the noise line (~0.3 ns per family, `seed-lottery.md`), and no
    family that closed now fails.
 
+**Running gates 1-2 on the DE10-Nano** (learned on the first run):
+- Under `[AmigaCD]` in `MiSTer.ini`: `AMIGACD_FMV=1`, and `DEBUG=2`. With
+  `DEBUG=0`, Main's stdout is `/dev/null` (`cfg.cpp`) and the whole FMV log
+  is lost; with 2 it goes to `/tmp/debug.txt`.
+- A test binary goes in `main=` as the binary itself. Main restarts whenever
+  `main=` does not name `/proc/self/exe` (`user_io.cpp`), so a wrapper script
+  loops forever.
+- The ROM: `CD32FMV.rom` or `fmv.rom` beside the Kickstart the config loads,
+  else in `HomeDir()` (`games/Amiga`), else in the root folder. A failed
+  search logs where it looked.
+- What a good start looks like: `FMV board alive`, then within a moment
+  `FMV: the core is reading the update queue`. If instead `the core has not
+  taken the update queue in 2 s` appears, the board cannot join the chain,
+  and the line gives the three pointers. After the Amiga reset, the first
+  68k access shows up as an event.
+
 ### Status, 2026-11-02
 
 | Piece | State |
 |---|---|
-| Contract (`fmv-contract.md`) | v3. The register file lives in the FPGA, with an update queue from Main (v1's shadow snapshot could not serve CL450 `HOST_raddr`/`HOST_rdata` reads); v3 adds `UQ_RDPTR` and the RDIDX back-pressure |
+| Contract (`fmv-contract.md`) | v4: a session starts from zero (below). The register file lives in the FPGA, with an update queue from Main (v1's shadow snapshot could not serve CL450 `HOST_raddr`/`HOST_rdata` reads); v3 adds `UQ_RDPTR` and the RDIDX back-pressure |
 | MODE2/2336 header fix | done: `akiko_raw_header()`, tested and falsified |
 | Chip model (`fmv_model.cpp`) | done: both chips' host protocols, from the manuals; 10 mutations, all caught |
 | Main transport (`fmv_transport.cpp`, `fmv.cpp`) | done: maps the window, loads `CD32FMV.rom` or `fmv.rom` (logs the dump, decodes its autoconfig), drains the event ring with the SEQ check, runs the update queue; `AMIGACD_FMV=1` in the ini. Tested against the shared FPGA reference (`tests/fmv_fpga_ref.h`). The OSD row moves to phase 5 |
 | Core front end (`rtl/fmv/`, AmigaCD_MiSTer 53e6d3f) | done: register file, both FIFOs, the ROM/RAM window, INT2, the Z2 exclusion, Gary's decode; `tb_fmv.sv` 80 checks, 13 mutations all caught; rtl-sim green |
 | Gate 3, the panel | seeds 1-20 (seed-lottery row 42): 2/20 close against row 41's 1/20, median setup -0.164 against -0.2605; no touched family near zero. **Worst hold -0.398 against +0.006**, not yet attributed: the FMV crossings have no SDC exceptions, and one is added only from a path report |
-| Gates 1-2, hardware | the owner's: Cannon Fodder and a Video CD, with the command log compared against WinUAE |
+| Gate 1, first hardware run (2026-11-02) | **failed, cause found.** Core seed 11 of fit run 41463624329, Main e2ab3b16. Main loaded ROM 40.30, decoded its autoconfig (`d5`, 1 MB Zorro II, 0202/6A) and queued `ALIVE`; after the reset, expansion.library's BoardList held only the Toccata and the A2065, and Main logged no event at all. Cause: v3 had Main resume from the window's `UQ_RDPTR`/`EV_WPTR`, but DDR3 is not cleared between core loads, so Main queued from a stale index while the fresh core waited at entry 0. `ALIVE` never landed, and `ac_present` stayed low. Fixed by contract v4 on both sides: `test_stale_window` reproduces it on the host and `tb_fmv.sv` M on the RTL (89 checks, 17 FMV mutations caught). Also from this run: the ROM is looked for beside the loaded Kickstart, and the run notes above |
+| Gates 1-2, hardware | to rerun on a fit of the v4 core: Cannon Fodder and a Video CD, with the command log compared against WinUAE |
 
 Unverified until the hardware log: the IO word bits (`fmv_board`), the
 unit of HMEM `0xB` (words, as modelled), L64111 register lanes (low byte),

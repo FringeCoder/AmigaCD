@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// A reference implementation of the FPGA side of docs/fmv-contract.md (v3):
+// A reference implementation of the FPGA side of docs/fmv-contract.md (v4):
 // the register file with its 68k write masks, HMEM indirection through
 // HOST_raddr/HOST_rdata, the IO word's interrupt mirrors, the INT line, the
 // L64111 read acknowledge, and the update queue's masked, guarded writes.
