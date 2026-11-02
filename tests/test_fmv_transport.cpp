@@ -412,6 +412,21 @@ static void test_diag_format()
 	check(strstr(big, "dsnd_arb busy 0 owner m0 write, req m0 0 m1 0, wait s 0 m0 0 m1 0, beats 0, m1 grants 4") != 0,
 	      "diag x: dsnd_arb and its m1 grants");
 	check(strstr(big, "q2_v 1 (write), ss_port_own 0") != 0, "diag x: q2 bits");
+	check(strstr(big, "HPS port") == 0, "diag x: no HPS block without its marker");
+
+	// With the HPS block: 4 commands taken, 4 beats back, the last a read of
+	// word 03fe1003 (the A2065's INT_STATE), a read of 03fe1002 on the pins,
+	// BUSY high for 65535+ clocks.
+	uint16_t wy[31];
+	memcpy(wy, wx, sizeof wx);
+	uint16_t yb[9] = { 0xA5F6, 4, 4, 0x1003, (uint16_t)(0x8000 | 0x03FE), 0x1002,
+	                   (uint16_t)(0x8000 | 0x03FE), 0xFFFF, 0x0102 };
+	memcpy(wy + 19, yb, sizeof yb);
+	check(fmv_diag_format(wy, 31, big, sizeof big) == 1, "diag y: decoded");
+	check(strstr(big, "HPS port: 4 commands accepted, 4 read beats, last read 03fe1003 (byte 1ff08018) x2") != 0,
+	      "diag y: counts, last command, its burstcount");
+	check(strstr(big, "on the pins read 03fe1002 (byte 1ff08010) x1, BUSY high for 65535+ clocks") != 0,
+	      "diag y: the held command and the BUSY run");
 	check(fmv_diag_format(wx, 11, big, sizeof big) == 1 && !strstr(big, "fmv_arb"),
 	      "diag x: a short read decodes without the arbiter block");
 	uint16_t none[12] = { 0 };

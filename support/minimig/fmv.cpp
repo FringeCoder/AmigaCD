@@ -25,9 +25,9 @@
 static fmv_xport *xport;
 static volatile uint8_t *window;
 static uint64_t last_us;
-static int tried;
-static int diag_shown;      // stall snapshots printed this session
-static uint64_t diag_last_us;           // one attempt per core load: a missing ROM is not retried every poll
+static int tried;           // one attempt per core load: a missing ROM is not retried every poll
+static int diag_shown;      // diag snapshots printed this session
+static uint64_t diag_last_us;
 
 static uint64_t now_us()
 {
@@ -130,15 +130,15 @@ static void start()
 // through DDR3, so it still answers when the DDR3 path is what failed.
 static void diag_print()
 {
-	uint16_t w[22];
+	uint16_t w[31];
 	EnableIO();
 	spi8(UIO_DMA_READ);
 	spi32_w(0xFA00);
-	for (int i = 0; i < 22; i++)
+	for (int i = 0; i < 31; i++)
 		w[i] = (uint16_t)spi_w(0);
 	DisableIO();
-	char line[1200];
-	fmv_diag_format(w, 22, line, sizeof line);
+	char line[1600];
+	fmv_diag_format(w, 31, line, sizeof line);
 	printf("%s\n", line);
 }
 
@@ -157,11 +157,39 @@ void fmv_shutdown(void)
 	diag_shown = 0;
 }
 
+// AMIGACD_FMV=2: diagnosis only. The board stays off -- status[64] clear,
+// no window mapped, no ROM -- and the core's FMV/DDR3 diag window is printed
+// once a second for the first ten seconds after the core starts, then every
+// ten seconds. It asks whether the core's DDR3 port works at all with the
+// FMV side idle (gate 1 arbiter run, 2026-11-02 night: the port had wedged
+// after a handful of A2065 commands, before FMV ever ran).
+static void diag_only_poll()
+{
+	static uint64_t first_us;
+	uint64_t t = now_us();
+	if (!first_us) {
+		first_us = t;
+		user_io_status_set(FMV_STATUS_OPT, 0);
+		printf("FMV: AMIGACD_FMV=2, diagnosis only: the board stays off\n");
+	}
+	uint64_t period = (t - first_us < 10000000) ? 1000000 : 10000000;
+	if (diag_shown == 0 || t - diag_last_us >= period) {
+		diag_last_us = t;
+		diag_shown++;
+		printf("FMV diag-only, %llu ms after start: ", (unsigned long long)((t - first_us) / 1000));
+		diag_print();
+	}
+}
+
 void fmv_poll(void)
 {
 	if (!is_minimig() || !cfg.amigacd_fmv) {
 		if (xport)
 			fmv_shutdown();
+		return;
+	}
+	if (cfg.amigacd_fmv == 2) {
+		diag_only_poll();
 		return;
 	}
 	if (!xport) {

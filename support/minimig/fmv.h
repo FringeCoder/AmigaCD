@@ -5,7 +5,9 @@
 // the cartridge ROM as CD32FMV.rom or fmv.rom: beside the Kickstart the
 // config loaded, in HomeDir() (games/Amiga), or in the root folder. With
 // either missing, no board appears on the Amiga. Its log is on stdout, which
-// is /dev/null unless MiSTer.ini has DEBUG=1 or 2 (cfg.cpp).
+// is /dev/null unless MiSTer.ini has DEBUG=1 or 2 (cfg.cpp). AMIGACD_FMV=2
+// leaves the board off and only prints the core's diag window, to check the
+// DDR3 port with the FMV side idle.
 #pragma once
 
 // status[64]: the core's FMV front end on (AmigaCD.sv, rtl/fmv). Above

@@ -386,10 +386,28 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 		used += arb(out + used, len - used, "ddram_ctrl arb", x[4]);
 		used += snprintf(out + used, len - used, ", grants m0 %u m1 %u", x[5] >> 8, x[5] & 0xFF);
 		uint16_t q = x[6] >> 8;
-		snprintf(out + used, len - used, "; q2_v %u (%s), ss_port_own %u, ram_rd %u ram_we %u, "
+		used += snprintf(out + used, len - used, "; q2_v %u (%s), ss_port_own %u, ram_rd %u ram_we %u, "
 		         "DDRAM_BUSY %u, hs_waitrequest %u", (q >> 7) & 1,
 		         (q >> 6) & 1 ? "read" : (q >> 5) & 1 ? "write" : "-", (q >> 4) & 1,
 		         (q >> 3) & 1, (q >> 2) & 1, (q >> 1) & 1, q & 1);
+
+		// The HPS port at the pins (ddram_ctrl dbg_hps), after 0xA5F6.
+		// Addresses are DDRAM word addresses; the byte address is 8x.
+		const uint16_t *y = x + 8;
+		if (n - i >= 27 && y[0] == 0xA5F6) {
+			y++;
+			auto cmd = [](uint16_t hi, uint16_t lo, uint8_t bc, char *o, size_t l) {
+				uint32_t a = (uint32_t)(hi & 0x1FFF) << 16 | lo;
+				const char *k = (hi & 0x8000) ? "read" : (hi & 0x4000) ? "write" : "none";
+				return snprintf(o, l, "%s %08x (byte %08x) x%u", k, a, a << 3, bc);
+			};
+			used += snprintf(out + used, len - used, "; HPS port: %u commands accepted, %u read beats, last ",
+			                 y[0], y[1]);
+			used += cmd(y[3], y[2], (uint8_t)y[7], out + used, len - used);
+			used += snprintf(out + used, len - used, ", on the pins ");
+			used += cmd(y[5], y[4], (uint8_t)(y[7] >> 8), out + used, len - used);
+			snprintf(out + used, len - used, ", BUSY high for %u%s clocks", y[6], y[6] == 0xFFFF ? "+" : "");
+		}
 	}
 	return 1;
 }
