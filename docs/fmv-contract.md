@@ -1,7 +1,7 @@
 # FMV module: the contract between the core and Main
 
 **Status:** draft for phase 2 of [`fmv-plan.md`](fmv-plan.md), 2026-11-02.
-Version 2.
+Version 3.
 
 Both halves of the FMV module are built against this file: the core's front
 end (`rtl/fmv/` in `FringeCoder/AmigaCD_MiSTer`) and Main's model and transport
@@ -56,6 +56,7 @@ A2065 (`0x1FF00000`) and the scaler and framebuffer at `0x20000000-0x22xxxxxx`.
 |---|---|---|---|
 | `0x000000` | 1 MB | Main (ROM, decoder variables), 68k (RAM) | **Board image**: byte offset = offset within the 1 MB board |
 | `0x100000` | 8 | FPGA | `EV_WPTR`: event ring write count |
+| `0x100008` | 8 | FPGA | `UQ_RDPTR`: update queue entries applied |
 | `0x100040` | 8 | Main | `UQ_WPTR`: update queue write count |
 | `0x101000` | 16 KB | Main | **Update queue**, 1024 entries x 16 bytes |
 | `0x110000` | 32 KB | FPGA | **Event ring**, 4096 entries x 8 bytes |
@@ -167,15 +168,25 @@ landed. Main accepts entry `n` only when its `SEQ` equals `n & 0xFFFF`, and
 otherwise re-reads it on the next pass. It never skips an entry.
 
 **Back-pressure:** the FPGA stretches DTACK on a ring-bound access while
-`n - HOST_RDIDX >= 4095`, i.e. while the ring is full. Normal play never gets
+`(n - HOST_RDIDX) mod 2^16 >= 4095`, i.e. while the ring is full. Only
+`HOST_RDIDX`'s low half (`0xC2`) takes part. The ring is far smaller than
+2^16, so the modular difference is exact, and a read torn between the two
+halves cannot matter. Normal play never gets
 there: a Video CD streams about 90 000 data-port words a second, so 4096
 entries is 45 ms of Main not draining.
 
 ### `UQ_WPTR` and the update queue (Main to FPGA)
 
 Entry `k` lives at `0x101000 + 16 * (k & 1023)`, two 64-bit words. Main
-writes the entry, then `UQ_WPTR` (= entries ever written). The FPGA polls
-`UQ_WPTR`, then reads each new entry as a 2-beat burst.
+writes word 1, then word 0, which carries `SEQ`, with a barrier between, and
+then `UQ_WPTR` (= entries ever written). The FPGA polls `UQ_WPTR`, then reads
+each new entry as a 2-beat burst. Writes from one HPS port reach DDR3 in the
+order they were issued, so a matching `SEQ` in word 0 means word 1 has landed
+too.
+
+After applying entry `k`, the FPGA writes `UQ_RDPTR = k + 1` (at least every
+64 entries, and whenever the queue goes empty). Main never lets
+`UQ_WPTR - UQ_RDPTR` exceed 1024. Updates that do not fit wait in Main.
 
 | Word | Bits | Field |
 |---|---|---|
@@ -192,8 +203,8 @@ writes the entry, then `UQ_WPTR` (= entries ever written). The FPGA polls
   for the same cross-port reason. It waits and re-reads; it never skips.
 - **`GUARD`** is for raising the L64111 latch (`0xC1`). Main may decide to
   raise it before it has seen the 68k's acknowledging read. A guarded update
-  made with `RDIDX <= l64_ack_idx` is dropped, because the 68k has
-  acknowledged since then. Main raises it again if the source is still
+  made with `RDIDX - l64_ack_idx <= 0` (as a signed 32-bit difference) is
+  dropped, because the 68k has acknowledged since then. Main raises it again if the source is still
   active once it has caught up.
 - `HOST_RDIDX` (`0xC2`/`0xC3`) is written through the queue like anything
   else. Main writes it at least every time it has drained 1024 events, so
@@ -219,4 +230,5 @@ writes the entry, then `UQ_WPTR` (= entries ever written). The FPGA polls
 | Version | Date | Change |
 |---|---|---|
 | 1 | 2026-11-02 | First draft, phase 2: posted ring plus a shadow block |
+| 3 | 2026-11-02 | `UQ_RDPTR`, so Main cannot overrun the update queue; update-queue word order; back-pressure on `HOST_RDIDX`'s low half only; the guard compare made wrap-safe. Nothing was yet built on v2. |
 | 2 | 2026-11-02 | The `RESET` event (bit 3). Shadow block replaced by a register file in the FPGA and an update queue from Main, before anything was built on v1. CL450 `HOST_raddr`/`HOST_rdata` reads depend on writes still in the ring, and HMEM has two writers (manual 8.3.3), which a snapshot cannot serve. |

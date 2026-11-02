@@ -4,6 +4,7 @@
 #include "support/minimig/minimig_fdd.h"
 #include "support/minimig/minimig_share.h"
 #include "support/minimig/minimig_a2065.h"
+#include "support/minimig/fmv.h"
 #include "support/next/next_enet.h"
 
 

@@ -116,6 +116,7 @@ typedef struct {
 	uint16_t hdmi_off;
 	uint32_t keyboard_as_joystick[256];
 	uint8_t snac_psx;
+	uint8_t amigacd_fmv;   // CD32 FMV module, phase 2 bring-up (support/minimig/fmv.h)
 	uint8_t sanity_check;
 } cfg_t;
 

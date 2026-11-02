@@ -149,6 +149,7 @@ static const ini_var_t ini_vars[] =
 	{ "HDMI_OFF", (void*)(&(cfg.hdmi_off)), UINT16, 0, 1440 },
 	{ "KEYBOARD_AS_JOYSTICK", (void*)(cfg.keyboard_as_joystick), HEX32ARR, 0, 0xFFFFFFFF },
 	{ "SNAC_PSX", (void*)(&(cfg.snac_psx)), UINT8, 0, 1 },
+	{ "AMIGACD_FMV", (void*)(&(cfg.amigacd_fmv)), UINT8, 0, 1 },
 	{ "SANITY_CHECK", (void *)(&(cfg.sanity_check)), UINT8, 0, 1 },
 };
 

@@ -25,6 +25,7 @@ SRC = ../support/minimig/minimig_savestate.cpp \
       ../support/minimig/vadjust_info.cpp \
       ../support/minimig/mgl_path.cpp \
       ../support/minimig/fmv_model.cpp \
+      ../support/minimig/fmv_transport.cpp \
       ../osd_rowguard.cpp
 
 TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_crypt \
@@ -34,7 +35,7 @@ TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_cryp
         test_mgl_rbf test_mgl_cfg test_cd_savename test_vadjust_info \
         test_osd_rowguard \
         test_dms test_mgl_path test_minimig_status test_restore_watch \
-        test_fmv_model
+        test_fmv_model test_fmv_transport
 
 # test_dms #includes support/minimig/dms.cpp rather than linking it -- its
 # encoders need the decoder's file-local window model and tables -- so dms.cpp
