@@ -335,3 +335,35 @@ void fmv_xport_get_stats(const fmv_xport *x, fmv_xport_stats *s)
 	*s = x->st;
 	s->pending = (uint32_t)x->pend.size();
 }
+
+bool fmv_xport_stalled(const fmv_xport *x) { return x->stall_logged; }
+
+int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
+{
+	static const char *ddr_st[] = { "IDLE", "MRD", "MRD_D", "MWR", "EV", "EVP", "QW", "QW_D",
+	                                "QE", "QE_D0", "QE_D1", "QP", "?12", "?13", "?14", "?15" };
+	static const char *bus_st[] = { "IDLE", "RD1", "RD2", "MEM", "POST", "DONE", "UP1", "UP2" };
+	int i = 0;
+	while (i < n && w[i] != 0xA5F4)
+		i++;
+	if (n - i < 9) {
+		snprintf(out, len, "FMV diag: no window in the core (no 0xA5F4 signature)");
+		return 0;
+	}
+	const uint16_t *d = w + i + 1;
+	if (d[0] != 0xF401) {
+		snprintf(out, len, "FMV diag: unknown layout version %04x", d[0]);
+		return 0;
+	}
+	uint16_t f = d[1];
+	snprintf(out, len,
+	         "FMV diag: fmv_ddr %s for %u%s clocks, on %u, up_full %u, ev_empty %u, poll due %u, "
+	         "avl read %u write %u waitrequest %u; fmv_bus %s, ALIVE %u, status[64] %u; "
+	         "UQ_WPTR polls %u, read beats %u, uq_rd %u, UQ_WPTR read %u, events %u",
+	         ddr_st[f >> 12], d[4], d[4] == 0xFFFF ? "+" : "",
+	         (f >> 11) & 1, (f >> 10) & 1, (f >> 9) & 1, (f >> 8) & 1,
+	         (f >> 7) & 1, (f >> 6) & 1, (f >> 5) & 1,
+	         bus_st[(f >> 2) & 7], (f >> 1) & 1, f & 1,
+	         d[2], d[3], d[5], d[6], d[7]);
+	return 1;
+}

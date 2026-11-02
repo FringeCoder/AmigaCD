@@ -550,8 +550,9 @@ the shadow block, local acknowledges and the Z2 RAM exclusion.
 - What a good start looks like: `FMV board alive`, then within a moment
   `FMV: the core is reading the update queue`. If instead `the core has not
   taken the update queue in 2 s` appears, the board cannot join the chain,
-  and the line gives the three pointers. After the Amiga reset, the first
-  68k access shows up as an event.
+  and the line gives the three pointers, followed by up to three
+  `FMV diag:` lines a second apart: the core's own view, read over SPI.
+  After the Amiga reset, the first 68k access shows up as an event.
 
 ### Status, 2026-11-02
 
@@ -564,6 +565,7 @@ the shadow block, local acknowledges and the Z2 RAM exclusion.
 | Core front end (`rtl/fmv/`, AmigaCD_MiSTer 53e6d3f) | done: register file, both FIFOs, the ROM/RAM window, INT2, the Z2 exclusion, Gary's decode; `tb_fmv.sv` 80 checks, 13 mutations all caught; rtl-sim green |
 | Gate 3, the panel | seeds 1-20 (seed-lottery row 42): 2/20 close against row 41's 1/20, median setup -0.164 against -0.2605; no touched family near zero. **Worst hold -0.398 against +0.006**, not yet attributed: the FMV crossings have no SDC exceptions, and one is added only from a path report |
 | Gate 1, first hardware run (2026-11-02) | **failed, cause found.** Core seed 11 of fit run 41463624329, Main e2ab3b16. Main loaded ROM 40.30, decoded its autoconfig (`d5`, 1 MB Zorro II, 0202/6A) and queued `ALIVE`; after the reset, expansion.library's BoardList held only the Toccata and the A2065, and Main logged no event at all. Cause: v3 had Main resume from the window's `UQ_RDPTR`/`EV_WPTR`, but DDR3 is not cleared between core loads, so Main queued from a stale index while the fresh core waited at entry 0. `ALIVE` never landed, and `ac_present` stayed low. Fixed by contract v4 on both sides: `test_stale_window` reproduces it on the host and `tb_fmv.sv` M on the RTL (89 checks, 17 FMV mutations caught). Also from this run: the ROM is looked for beside the loaded Kickstart, and the run notes above |
+| Gate 1, second run (2026-11-02 evening) | **failed, cause not yet found.** Core seed 4 of fit run 41481408089, Main 8a2713b5. Main's side of v4 is right: the window, read back from the ARM, held 260 queued updates with matching SEQs, at the addresses fmv_ddr uses. The core never wrote `UQ_RDPTR` (0) or an event (`EV_WPTR` 0), and the new 2 s line fired. Ruled out by the owner: status[64] delivery, the clocks, readdatavalid routing, synthesis removing fmv_ddr. Ruled out here: the whole DDR3 path is fine in simulation when otherwise idle (`tb_fmv_chain.sv`: fmv_arb, ddram_ctrl mem2, q2, its arbiter and ddr_cmd_pipe take all 260 entries). Next: the core's FMV state over SPI (hps_ext `0xFA00`, independent of DDR3), printed at the start of a session and three times once the queue stalls. Its fmv_ddr state, dwell count and poll/beat counters say whether the master is stuck waiting on the arbiter, never on, or never polling |
 | Gates 1-2, hardware | to rerun on a fit of the v4 core: Cannon Fodder and a Video CD, with the command log compared against WinUAE |
 
 Unverified until the hardware log: the IO word bits (`fmv_board`), the

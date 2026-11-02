@@ -377,6 +377,28 @@ static void test_core_not_reading()
 	fmv_xport_free(x);
 }
 
+static void test_diag_format()
+{
+	// The core's diag window as hps_ext returns it, one word late (the
+	// signature search), stuck in S_QW_D with waitrequest low and no beats.
+	uint16_t w[12] = { 0x0000, 0xA5F4, 0xF401,
+	                   (uint16_t)(7 << 12 | 1 << 11 | 1 << 9 | 1 << 7 | 0 << 2 | 1),
+	                   5, 0, 0xFFFF, 0, 0, 0, 0, 0 };
+	char line[400];
+	check(fmv_diag_format(w, 12, line, sizeof line) == 1, "diag: decoded");
+	check(strstr(line, "fmv_ddr QW_D for 65535+ clocks") != 0, "diag: state and saturated dwell");
+	check(strstr(line, "on 1, up_full 0, ev_empty 1") != 0, "diag: flag bits");
+	check(strstr(line, "avl read 1 write 0") != 0, "diag: avalon bits");
+	check(strstr(line, "ALIVE 0, status[64] 1") != 0, "diag: bus side");
+	check(strstr(line, "UQ_WPTR polls 5, read beats 0") != 0, "diag: counters in word order");
+	uint16_t none[12] = { 0 };
+	check(fmv_diag_format(none, 12, line, sizeof line) == 0 && strstr(line, "no window"),
+	      "diag: a core without the window says so");
+	w[2] = 0xF402;
+	check(fmv_diag_format(w, 12, line, sizeof line) == 0 && strstr(line, "unknown layout"),
+	      "diag: an unknown version is not decoded");
+}
+
 static void test_guard_wraps()
 {
 	struct nullf : fmv_fpga_ref {
@@ -403,6 +425,7 @@ int main()
 	test_stale_window();
 	test_core_not_reading();
 	test_guard_wraps();
+	test_diag_format();
 	if (failures) {
 		printf("test_fmv_transport: %d FAILED\n", failures);
 		return 1;

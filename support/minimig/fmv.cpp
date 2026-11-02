@@ -16,6 +16,7 @@
 #include "../../cfg.h"
 #include "../../file_io.h"
 #include "../../shmem.h"
+#include "../../spi.h"
 #include "../../user_io.h"
 #include "fmv_transport.h"
 #include "minimig_config.h"
@@ -24,7 +25,9 @@
 static fmv_xport *xport;
 static volatile uint8_t *window;
 static uint64_t last_us;
-static int tried;           // one attempt per core load: a missing ROM is not retried every poll
+static int tried;
+static int diag_shown;      // stall snapshots printed this session
+static uint64_t diag_last_us;           // one attempt per core load: a missing ROM is not retried every poll
 
 static uint64_t now_us()
 {
@@ -82,6 +85,8 @@ static uint8_t *load_rom(int *len)
 	return 0;
 }
 
+static void diag_print();
+
 static void start()
 {
 	tried = 1;
@@ -116,8 +121,25 @@ static void start()
 	}
 	user_io_status_set(FMV_STATUS_OPT, 1);
 	last_us = now_us();
+	diag_print();              // the core's side as the session starts
 	printf("FMV: board on. It is configured at the next Amiga reset; Zorro II fast RAM "
 	       "is masked out while it is on (fmv-contract.md)\n");
+}
+
+// The core's FMV diag window over SPI (hps_ext 0xFA00). It does not go
+// through DDR3, so it still answers when the DDR3 path is what failed.
+static void diag_print()
+{
+	uint16_t w[12];
+	EnableIO();
+	spi8(UIO_DMA_READ);
+	spi32_w(0xFA00);
+	for (int i = 0; i < 12; i++)
+		w[i] = (uint16_t)spi_w(0);
+	DisableIO();
+	char line[400];
+	fmv_diag_format(w, 12, line, sizeof line);
+	printf("%s\n", line);
 }
 
 void fmv_shutdown(void)
@@ -132,6 +154,7 @@ void fmv_shutdown(void)
 		window = 0;
 	}
 	tried = 0;
+	diag_shown = 0;
 }
 
 void fmv_poll(void)
@@ -155,4 +178,12 @@ void fmv_poll(void)
 	if (dt > 100000)
 		dt = 100000;
 	fmv_xport_poll(xport, (uint32_t)dt);
+
+	// A stalled queue: three snapshots of the core's side, a second apart,
+	// so the log says which counters move and which state it sits in.
+	if (fmv_xport_stalled(xport) && diag_shown < 3 && t - diag_last_us >= 1000000) {
+		diag_last_us = t;
+		diag_shown++;
+		diag_print();
+	}
 }

@@ -66,6 +66,17 @@ void fmv_xport_get_stats(const fmv_xport *x, fmv_xport_stats *s);
 
 fmv_model *fmv_xport_model(fmv_xport *x);
 
+// True once the core has failed to take the update queue for 2 s (logged).
+bool fmv_xport_stalled(const fmv_xport *x);
+
+// The core's FMV diag window (hps_ext UIO_DMA_READ 0xFA00, laid out in
+// rtl/fmv/fmv.v of AmigaCD_MiSTer): `w` is what the read returned, `n`
+// words. Finds the 0xA5F4 signature, so a read misaligned by a word or two
+// still decodes, and writes one line to `out`. Returns 0 if there is no
+// window (a core without it, or a version this decoder does not know), with
+// a line that says so.
+int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len);
+
 // What the ROM's first 128 bytes say as autoconfig (for the log, and tests).
 struct fmv_autoconfig {
 	uint8_t  er_type, er_product, er_flags;
