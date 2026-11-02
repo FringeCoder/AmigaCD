@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-01
 **Status:** phase 0 done on paper (2026-11-01); phase 1 passed on hardware
-(2026-11-02); phase 2 in progress.
+(2026-11-02); phase 2 built and panelled, hardware gate pending.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -540,11 +540,13 @@ the shadow block, local acknowledges and the Z2 RAM exclusion.
 
 | Piece | State |
 |---|---|
-| Contract (`fmv-contract.md`) | v2. The register file lives in the FPGA, with an update queue from Main; v1's shadow snapshot could not serve CL450 `HOST_raddr`/`HOST_rdata` reads |
+| Contract (`fmv-contract.md`) | v3. The register file lives in the FPGA, with an update queue from Main (v1's shadow snapshot could not serve CL450 `HOST_raddr`/`HOST_rdata` reads); v3 adds `UQ_RDPTR` and the RDIDX back-pressure |
 | MODE2/2336 header fix | done: `akiko_raw_header()`, tested and falsified |
 | Chip model (`fmv_model.cpp`) | done: both chips' host protocols, from the manuals; 10 mutations, all caught |
-| Main transport (`fmv.cpp`) | next: map the window, load `fmv.rom` (log which dump; decode its autoconfig nibbles), drain the event ring, run the update queue, the OSD row |
-| Core front end (`rtl/fmv/`) | next: the register file, both rings, the ROM/RAM window, INT2, the Z2 exclusion, and a bench that matches `tests/test_fmv_model.cpp`'s FPGA reference |
+| Main transport (`fmv_transport.cpp`, `fmv.cpp`) | done: maps the window, loads `CD32FMV.rom` or `fmv.rom` (logs the dump, decodes its autoconfig), drains the event ring with the SEQ check, runs the update queue; `AMIGACD_FMV=1` in the ini. Tested against the shared FPGA reference (`tests/fmv_fpga_ref.h`). The OSD row moves to phase 5 |
+| Core front end (`rtl/fmv/`, AmigaCD_MiSTer 53e6d3f) | done: register file, both FIFOs, the ROM/RAM window, INT2, the Z2 exclusion, Gary's decode; `tb_fmv.sv` 80 checks, 13 mutations all caught; rtl-sim green |
+| Gate 3, the panel | seeds 1-20 (seed-lottery row 42): 2/20 close against row 41's 1/20, median setup -0.164 against -0.2605; no touched family near zero. **Worst hold -0.398 against +0.006**, not yet attributed: the FMV crossings have no SDC exceptions, and one is added only from a path report |
+| Gates 1-2, hardware | the owner's: Cannon Fodder and a Video CD, with the command log compared against WinUAE |
 
 Unverified until the hardware log: the IO word bits (`fmv_board`), the
 unit of HMEM `0xB` (words, as modelled), L64111 register lanes (low byte),
