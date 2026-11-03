@@ -195,6 +195,9 @@ static void test_reset_state()
 	uint16_t io = f.read(FMV_OFF_IO);
 	eq("IO: CL450 int bit high while inactive", io & 0x8000, 0x8000);
 	eq("IO: L64111 int bit high while inactive", io & 0x4000, 0x4000);
+	// The whole idle word is WinUAE's: CFLEVEL 1 (CMEM has room, no enable
+	// set), FALF 0 (gate 1, 2026-11-03: the ROM read 0xc400 here before)
+	eq("IO idle word as WinUAE reads it", io, 0xC800);
 	fmv_model_free(f.model);
 }
 
@@ -345,6 +348,29 @@ static void test_cmem_in_idle()
 	eq("CFLEVEL low while CMEM is full", f.read(FMV_OFF_IO) & 0x0800, 0);
 	f.write(CL + CL_CMEM_CONTROL, 0x0003);     // CRst
 	eq("CRst empties CMEM: CFLEVEL asserted", f.read(FMV_OFF_IO) & 0x0800, 0x0800);
+	fmv_model_free(f.model);
+}
+
+static void test_activity()
+{
+	// The 68k's accesses since the last line, including the polls the log
+	// leaves out (gate 1, 2026-11-03: quiet after SetThreshold)
+	fpga f;
+	attach(f);
+	char a[512];
+	fmv_model_activity(f.model, a, sizeof a);           // clear
+	for (int i = 0; i < 3; i++) f.read(CL + CL_HOST_NEWCMD);
+	f.read(CL + CL_CMEM_DMACTRL);
+	f.read(CL + CL_HOST_CONTROL);
+	f.read(CL + CL_HOST_CONTROL);
+	f.read(FMV_OFF_IO);
+	fmv_model_activity(f.model, a, sizeof a);
+	check(strstr(a, "7 board accesses") != 0, "activity: every access counted");
+	check(strstr(a, "HOST_newcmd 3, CMEM_dmactrl 1, HOST_control 2") != 0,
+	      "activity: the unlogged polls, per register");
+	check(strstr(a, "microcode not running") != 0, "activity: CL450 state shown");
+	fmv_model_activity(f.model, a, sizeof a);
+	check(strstr(a, " 0 board accesses") != 0, "activity: counts reset after each line");
 	fmv_model_free(f.model);
 }
 
@@ -536,6 +562,7 @@ int main()
 	test_boot_and_commands();
 	test_play_and_interrupts();
 	test_cmem_in_idle();
+	test_activity();
 	test_byte_swap();
 	test_l64111();
 	test_l64111_masks();

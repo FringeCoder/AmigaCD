@@ -434,6 +434,14 @@ static void test_diag_format()
 	      "diag y: counts, last command, its burstcount");
 	check(strstr(big, "on the pins write 03fe1001 (byte 1ff08008) x1, BUSY high for 65535+ clocks") != 0,
 	      "diag y: the held command and the BUSY run");
+	check(fmv_diag_port_dead(wy, 31), "dead port: 4 commands, 0 beats, BUSY held (2026-11-02)");
+	wy[19 + 7] = 0;                                    // BUSY not held: the beats rule alone
+	check(fmv_diag_port_dead(wy, 31), "dead port: 4 commands, 0 beats, BUSY low (the =4 run)");
+	wy[19 + 2] = 4; wy[19 + 7] = 0;                    // 4 beats back, BUSY run 0
+	check(!fmv_diag_port_dead(wy, 31), "healthy port: every read answered (2026-11-03)");
+	wy[19 + 7] = 0xFFFF;
+	check(fmv_diag_port_dead(wy, 31), "dead port: BUSY held 65535+ clocks");
+	check(!fmv_diag_port_dead(wx, 22), "no HPS block: no verdict");
 	check(fmv_diag_format(wx, 11, big, sizeof big) == 1 && !strstr(big, "fmv_arb"),
 	      "diag x: a short read decodes without the arbiter block");
 	uint16_t none[12] = { 0 };

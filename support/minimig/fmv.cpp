@@ -20,6 +20,7 @@
 #include "../../fpga_io.h"
 #include "../../user_io.h"
 #include "fmv_transport.h"
+#include "fmv_model.h"
 #include "minimig_config.h"
 #include "minimig_crc32.h"
 
@@ -144,6 +145,13 @@ static void diag_print()
 	fpga_sdr_status(r);
 	printf("%s; HPS: dramsts %08x fpgaportrst %08x protportdefault %08x brgmodrst %08x "
 	       "fpgaintf %08x\n", line, r[0], r[1], r[2], r[3], r[4]);
+	static int dead_said;
+	if (fmv_diag_port_dead(w, 31) && !dead_said) {
+		dead_said = 1;
+		printf("FMV: *** the core's DDR3 port is not answering reads (the HPS takes them and "
+		       "returns no data). The FMV board cannot work like this. Power-cycle the MiSTer: "
+		       "a core reload or a port reset did not clear it on 2026-11-02 ***\n");
+	}
 }
 
 void fmv_shutdown(void)
@@ -253,6 +261,19 @@ void fmv_poll(void)
 	if (fmv_xport_stalled(xport) && diag_shown < 3 && t - diag_last_us >= 1000000) {
 		diag_last_us = t;
 		diag_shown++;
+		diag_print();
+	}
+
+	// While the board is on: every 10 s, the core's side and what the 68k
+	// has done to the board, including the polls the log leaves out. Gate 1
+	// (2026-11-03) went quiet after SetThreshold, and a sleeping 68k, a
+	// polling one and one held on a board access look alike in the log.
+	static uint64_t act_last_us;
+	if (!fmv_xport_stalled(xport) && t - act_last_us >= 10000000) {
+		act_last_us = t;
+		char a[512];
+		fmv_model_activity(fmv_xport_model(xport), a, sizeof a);
+		printf("%s\n", a);
 		diag_print();
 	}
 }

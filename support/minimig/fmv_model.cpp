@@ -72,6 +72,9 @@ struct fmv_model {
 	uint32_t pictures;
 	uint32_t commands;
 	uint16_t last_cmd;
+	// 68k activity since the last fmv_model_activity() (Main prints it
+	// every 10 s): all events, and the reads the log leaves out
+	uint32_t act_events, act_rd_newcmd, act_rd_dmactrl, act_rd_hostctl;
 	uint16_t window[4], border[4];
 	uint16_t last_fullness;
 	bool     cflevel;
@@ -192,9 +195,14 @@ static void cl_publish_cmem(fmv_model *m)
 	set_reg(m, clx(CL_CMEM_STATUS), (uint16_t)(m->cmem_words << 8), 0x1F00);
 	// CFLEVEL [CL 8-10, table 8-6]: asserted on the empty bit the first
 	// enable selects.
+	// With no enable set, the board's CL450CFLEVEL bit reads 1 while CMEM
+	// has room: WinUAE, the oracle for board wiring the manuals leave open,
+	// reads it as 1 throughout (gate 1 run 2026-11-03: the ROM's first IO
+	// read here was 0xc400, WinUAE's idle value is 0xc800).
 	uint16_t en = m->R[clx(CL_CMEM_DMACTRL)];
 	bool lvl = (en & 0x10) ? (q & 0x100) : (en & 0x08) ? (q & 0x80) :
-	           (en & 0x04) ? (q & 0x40) : (en & 0x02) ? (q & 0x20) : false;
+	           (en & 0x04) ? (q & 0x40) : (en & 0x02) ? (q & 0x20) :
+	           (m->cmem_words < FMV_CMEM_WORDS);
 	if (lvl != m->cflevel) {
 		m->cflevel = lvl;
 		set_reg(m, FMV_IDX_IO, lvl ? m->b.io_cflevel : 0, m->b.io_cflevel);
@@ -1053,14 +1061,23 @@ void fmv_model_reset(fmv_model *m)
 	set_reg(m, FMV_IDX_IOMAP_L64, m->b.io_l64111_int, 0xFFFF);
 	set_reg(m, FMV_IDX_IOPOL, m->b.io_int_pol, 0xFFFF);
 	// The audio decoder's FIFO never fills here (the pre-parser is
-	// instant), so FALF reads as inactive: high, the pin being active low.
-	set_reg(m, FMV_IDX_IO, m->b.io_l64_falf, m->b.io_l64_falf);
+	// instant), so FALF reads as inactive. WinUAE never sets this bit, so
+	// inactive is 0 on this board (the first version took the pin's
+	// active-low sense and idled it high; see cl_publish_cmem for the run).
+	set_reg(m, FMV_IDX_IO, 0, m->b.io_l64_falf);
 	l64_reset(m);
 	logf(m, "FMV model reset");
 }
 
 void fmv_model_event(fmv_model *m, const fmv_event &e)
 {
+	m->act_events++;
+	if (e.read && (e.offset & 0xF0000) == FMV_OFF_CL450) {
+		uint32_t o = e.offset & 0xFE;
+		if (o == CL_HOST_NEWCMD) m->act_rd_newcmd++;
+		else if (o == CL_CMEM_DMACTRL) m->act_rd_dmactrl++;
+		else if (o == CL_HOST_CONTROL) m->act_rd_hostctl++;
+	}
 	if (e.reset) {
 		logf(m, "FMV Amiga reset");
 		fmv_model_reset(m);
@@ -1135,4 +1152,19 @@ void fmv_model_get_state(const fmv_model *m, fmv_model_state *s)
 	s->l64_cb_frames = m->cb_frames;
 	s->l64_sample_rate = m->sample_rate;
 	s->l64_int = m->l64_int;
+}
+
+void fmv_model_activity(fmv_model *m, char *out, size_t len)
+{
+	static const char *st[] = { "IDLE", "SETUP", "PLAY", "PAUSE", "OTHER" };
+	snprintf(out, len,
+	         "FMV activity: %u board accesses from the 68k since the last line "
+	         "(unlogged reads: HOST_newcmd %u, CMEM_dmactrl %u, HOST_control %u); "
+	         "CL450 %s%s, %u commands, last 0x%04x, int mask 0x%04x pending 0x%04x, "
+	         "HMEM[0xA] 0x%04x, HOST_control 0x%04x, threshold %u, CMEM %u words",
+	         m->act_events, m->act_rd_newcmd, m->act_rd_dmactrl, m->act_rd_hostctl,
+	         st[m->cl_state < 5 ? m->cl_state : 4], m->cl_running ? "" : " (microcode not running)",
+	         m->commands, m->last_cmd, m->int_mask, m->int_pending,
+	         m->R[FMV_IDX_HMEM + 0xA], m->R[clx(CL_HOST_CONTROL)], m->threshold, m->cmem_words);
+	m->act_events = m->act_rd_newcmd = m->act_rd_dmactrl = m->act_rd_hostctl = 0;
 }

@@ -190,4 +190,9 @@ struct fmv_model_state {
 };
 void fmv_model_get_state(const fmv_model *m, fmv_model_state *s);
 
+
+// One line on what the 68k has done to the board since the last call,
+// including the polls the log leaves out, and where the CL450 stands.
+// Resets the counts. Main prints it every 10 s while the board is on.
+void fmv_model_activity(fmv_model *m, char *out, size_t len);
 #endif // FMV_MODEL_H

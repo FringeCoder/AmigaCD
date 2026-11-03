@@ -79,6 +79,12 @@ bool fmv_xport_stalled(const fmv_xport *x);
 // a line that says so.
 int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len);
 
+// True if the diag window's HPS block says the core's DDR3 port is not
+// answering: reads accepted with no beat ever returned, or BUSY held for
+// 65535+ clocks. Seen 2026-11-02 after a long-running session; a core
+// reload and a port reset did not clear it, a power cycle did.
+int fmv_diag_port_dead(const uint16_t *w, int n);
+
 // What the ROM's first 128 bytes say as autoconfig (for the log, and tests).
 struct fmv_autoconfig {
 	uint8_t  er_type, er_product, er_flags;

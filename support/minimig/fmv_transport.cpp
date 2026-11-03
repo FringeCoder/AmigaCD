@@ -414,3 +414,17 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 	}
 	return 1;
 }
+
+int fmv_diag_port_dead(const uint16_t *w, int n)
+{
+	int i = 0;
+	while (i < n && w[i] != 0xA5F4)
+		i++;
+	if (n - i < 27 || w[i + 9] != 0xA5F5 || w[i + 18] != 0xA5F6)
+		return 0;
+	const uint16_t *y = w + i + 19;
+	// Reads taken but never one beat back, or BUSY held for 65535+ clocks
+	bool no_beats = y[0] >= 2 && y[1] == 0;
+	bool busy_stuck = y[6] == 0xFFFF;
+	return no_beats || busy_stuck;
+}
