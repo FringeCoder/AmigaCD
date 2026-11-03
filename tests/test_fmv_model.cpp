@@ -589,6 +589,41 @@ static void test_l64111()
 	fmv_model_free(f.model);
 }
 
+static void test_l64111_level_and_pts()
+{
+	// Gate 1 run v16, 2026-11-03: status 2 held 0x38, mask 2 was 0x42, INTR
+	// stayed 0, and the game waited for it to resume the CD. As WinUAE (the
+	// oracle) has it: INTR is the level of status & mask, a read clears the
+	// whole register, and PTS AVAILABLE comes with every audio PTS once
+	// synchronised.
+	fpga f;
+	attach(f);
+	std::vector<uint8_t> frame = mp2_frame();
+	for (int p = 0; p < 4; p++) {
+		l64_put(f, pack_header());
+		l64_put(f, audio_packet(frame, 90000u * (uint64_t)p + 0x100000ull));
+	}
+	check(!f.l64_int(), "no INTR with every mask off");
+	check(f.R[FMV_IDX_L64111 + 5] & 0x20, "PTS AVAILABLE set");
+	f.write(L64 + 2 * 5, 0x42);                  // the game's mask: NEW FRAME OUT, PTS AVAILABLE
+	check(f.l64_int(), "a mask written after the status raises INTR at once (a level)");
+	uint16_t st2 = f.read(L64 + 2 * 5);
+	check(st2 & 0x20, "the read reports PTS AVAILABLE");
+	check(!f.l64_int(), "and drops INTR");
+	eq("the read clears all of status 2, sync bits included", f.R[FMV_IDX_L64111 + 5] & 0xFF, 0);
+	l64_put(f, pack_header());
+	l64_put(f, audio_packet(frame, 0x200000ull));
+	check(f.l64_int(), "the next audio PTS raises it again: every PTS, not once");
+	f.read(L64 + 2 * 5);
+	f.write(L64 + 2 * 5, 0x00);
+	l64_put(f, pack_header());
+	l64_put(f, audio_packet(frame, 0x300000ull));
+	check(!f.l64_int(), "nothing with the mask off");
+	f.write(L64 + 2 * 4, 0x00);                  // a mask-1 write re-evaluates too: still nothing
+	check(!f.l64_int(), "and a mask 1 write with nothing set in status 1 leaves it low");
+	fmv_model_free(f.model);
+}
+
 static void test_l64111_masks()
 {
 	// Status 2 bit 0 has two masks: LAST FRAME alone (mask bit 0) must not
@@ -658,6 +693,7 @@ int main()
 	test_activity();
 	test_byte_swap();
 	test_l64111();
+	test_l64111_level_and_pts();
 	test_l64111_masks();
 	test_l64111_mask_shift();
 	test_reset_event();

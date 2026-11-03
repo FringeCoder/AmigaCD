@@ -742,30 +742,45 @@ static void l64_publish(fmv_model *m)
 	set_reg(m, FMV_IDX_L64111 + 18, (uint16_t)(m->cb_frames > 63 ? 63 : m->cb_frames), 0x007F);
 }
 
-// An L64111 interrupt source fired. Mask bit positions differ from status
-// bit positions in register 2 [L64 4-10, 4-11]: status bit n (1..6) is
-// enabled by mask bit n+1; status bit 0 by mask bit 1 (NEW FRAME OUT) or
-// mask bit 0 (LAST FRAME).
+// INTR is a level: asserted while any status bit is set and enabled, and
+// dropped by the read that clears the status (WinUAE, the oracle; it
+// re-evaluates status & mask on every check). Mask bit positions differ from
+// status bit positions in register 2 [L64 4-10, 4-11]: status bit n (1..6) is
+// enabled by mask bit n+1, and status bit 0 by mask bit 1 (NEW FRAME OUT) or
+// mask bit 0 (LAST FRAME). The first version raised INTR only at the instant
+// a bit was set with its mask already on. With PTS AVAILABLE set before its
+// mask, the line never rose (gate 1 run v16, 2026-11-03: status 2 0x38, mask
+// 2 0x42, INTR 0, and the game waited for it to resume the CD).
+static bool l64_level(const fmv_model *m)
+{
+	if (m->l64_st1 & m->l64_mask1)
+		return true;
+	for (int b = 1; b < 7; b++)
+		if ((m->l64_st2 & (1 << b)) && (m->l64_mask2 & (1 << (b + 1))))
+			return true;
+	return (m->l64_newout_ev && (m->l64_mask2 & 2)) || (m->l64_last_ev && (m->l64_mask2 & 1));
+}
+
+static void l64_check_int(fmv_model *m)
+{
+	if (l64_level(m) && !m->l64_int) {
+		m->l64_int = true;
+		set_reg(m, FMV_IDX_L64_INT, 1, 1, true);
+	}
+}
+
 static void l64_raise(fmv_model *m, int reg, uint8_t status_bit, bool last_frame = false)
 {
-	bool en;
 	if (reg == 1) {
 		m->l64_st1 |= status_bit;
-		en = m->l64_mask1 & status_bit;
 	} else {
 		m->l64_st2 |= status_bit;
 		if (status_bit == 1) {
 			if (last_frame) m->l64_last_ev = true; else m->l64_newout_ev = true;
-			en = last_frame ? (m->l64_mask2 & 1) : (m->l64_mask2 & 2);
-		} else {
-			en = m->l64_mask2 & (status_bit << 1);
 		}
 	}
 	l64_publish(m);
-	if (en && !m->l64_int) {
-		m->l64_int = true;
-		set_reg(m, FMV_IDX_L64_INT, 1, 1, true);
-	}
+	l64_check_int(m);
 }
 
 static void l64_reset(fmv_model *m)
@@ -865,7 +880,7 @@ static void l64_audio_byte(fmv_model *m, uint8_t byte)
 }
 
 // A presentation time stamp from a packet header: into registers 12-16 and
-// PTS AVAILABLE, which interrupts on its rising edge [L64 4-11, 4-17].
+// PTS AVAILABLE [L64 4-11, 4-17].
 static void l64_pts(fmv_model *m)
 {
 	const uint8_t *p = m->ps_pts;
@@ -874,10 +889,12 @@ static void l64_pts(fmv_model *m)
 	for (int k = 0; k < 4; k++)
 		set_reg(m, (uint8_t)(FMV_IDX_L64111 + 12 + k), (uint8_t)(pts >> (8 * k)), 0x00FF);
 	set_reg(m, FMV_IDX_L64111 + 16, (uint16_t)((pts >> 32) & 1), 0x00FF);
-	if (!m->l64_pts_ok) {
-		m->l64_pts_ok = true;
+	// Every audio PTS once synchronised raises PTS AVAILABLE, as WinUAE has
+	// it. The first version raised it once per session, and this game
+	// enables it (mask 2 0x42) and paces its CD reads on it.
+	m->l64_pts_ok = true;
+	if (m->l64_sync_aud)
 		l64_raise(m, 2, 0x20);
-	}
 }
 
 // ISO 11172-1 system stream pre-parser [L64 1-6, 2-5]. States:
@@ -1002,13 +1019,17 @@ static void l64_event(fmv_model *m, const fmv_event &e)
 			// "continue to reflect" status, which for an event is "since
 			// the last read").
 			m->l64_int = false;
+			// The read clears the register it reports, all of it, as WinUAE
+			// has it (the first version kept the sync and PTS bits as
+			// levels). INTR then follows what is still set and enabled.
 			if (r == 4)
-				m->l64_st1 &= (uint8_t)~0x08;
+				m->l64_st1 = 0;
 			else {
-				m->l64_st2 &= (uint8_t)~(0x40 | 0x04 | 0x02 | 0x01);
+				m->l64_st2 = 0;
 				m->l64_newout_ev = m->l64_last_ev = false;
 			}
 			l64_publish(m);
+			l64_check_int(m);
 		}
 		if (r != 4 && r != 5 && r != 18)
 			logf(m, "FMV R L64111 reg %2d = 0x%02x", r, e.data & 0xFF);
@@ -1037,8 +1058,8 @@ static void l64_event(fmv_model *m, const fmv_event &e)
 			l64_publish(m);
 		}
 		break;
-	case 4: m->l64_mask1 = (uint8_t)e.data; break;
-	case 5: m->l64_mask2 = (uint8_t)e.data; break;
+	case 4: m->l64_mask1 = (uint8_t)e.data; l64_check_int(m); break;
+	case 5: m->l64_mask2 = (uint8_t)e.data; l64_check_int(m); break;
 	case 19: case 20: case 25: case 26:
 		logf(m, "FMV L64111 channel buffer counter write at reg %d: cue/review "
 		     "(the manual gives these as 19/20 and 25/26) [L64 4-3, 4-19]", r);
