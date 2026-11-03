@@ -69,6 +69,7 @@ struct fmv_model {
 	uint32_t frame_us;
 	int32_t  decode_us, vsync_us, disp_us;
 	bool     und_reported;
+	uint8_t  dry_ticks;        // decode ticks in a row with no picture data
 	uint32_t pictures;
 	uint32_t commands;
 	uint16_t last_cmd;
@@ -230,13 +231,14 @@ static void cl_try_post(fmv_model *m)
 
 static void cl_publish_fullness(fmv_model *m, bool force)
 {
-	// HMEM[0xB], in 16-bit words: the manual says "accurate to +-32 words"
-	// on 11-19 but counts the threshold in bytes on 11-38. Words is the
-	// reading taken here; phase 2's log of what the ROM compares it with
-	// settles it.
-	uint16_t w = (uint16_t)(cl_fill(m) / 2);
+	// HMEM[0xB], in bytes. The manual says "accurate to +-32 words" on
+	// 11-19 but counts the threshold in bytes on 11-38. Words was the first
+	// reading. WinUAE (the oracle) reports bytes, and this ROM compares the
+	// value with a SetThreshold of 0x2000 (gate 1, 2026-11-03).
+	uint32_t fb = cl_fill(m);
+	uint16_t w = (uint16_t)(fb > 0xFFFF ? 0xFFFF : fb);
 	int d = (int)w - (int)m->last_fullness;
-	if (!force && d < 16 && d > -16)
+	if (!force && d < 32 && d > -32)
 		return;
 	m->last_fullness = w;
 	set_reg(m, FMV_IDX_HMEM + HMEM_FULLNESS, w, 0xFFFF);
@@ -268,6 +270,7 @@ static void cl_defaults(fmv_model *m, bool init)
 	m->sc_shift = 0xFFFFFFFF;
 	m->sc_capture = 0;
 	m->und_reported = false;
+	m->dry_ticks = 0;
 	m->last_fullness = 0xFFFF;
 	cl_publish_cmem(m);
 	// DRAM-resident variable defaults [CL 10-8, table 10-7; appendix A]
@@ -347,6 +350,7 @@ static void cl_data_word(fmv_model *m, uint16_t w)
 		cl_scan(m, (uint8_t)(w >> 8));
 		cl_scan(m, (uint8_t)w);
 		m->und_reported = false;
+		m->dry_ticks = 0;
 		return;
 	}
 	if (m->cmem_words >= FMV_CMEM_WORDS) {
@@ -496,13 +500,28 @@ static bool cl_decode_tick(fmv_model *m)
 		m->marks.pop_front();
 	}
 	if (m->marks.size() < 2) {
-		if (!m->und_reported) {
+		// One picture start and nothing after it is a picture still
+		// arriving: wait for it. Underflow is the buffer running dry -- no
+		// picture data at all -- on two decode ticks in a row, as WinUAE (the
+		// oracle) has it: UND only once the buffer has stayed empty. The
+		// first version raised it on any tick without a complete picture.
+		// That fired at Play before the first picture was in, latched 0x0100
+		// in Interrupt Status, which this ROM never clears for UND, and
+		// queued every later interrupt behind it (gate 1, 2026-11-03).
+		if (m->marks.empty()) {
+			if (m->dry_ticks < 255)
+				m->dry_ticks++;
+		} else {
+			m->dry_ticks = 0;
+		}
+		if (m->dry_ticks >= 2 && !m->und_reported) {
 			m->und_reported = true;
 			cl_raise(m, CLI_UND);
-			logf(m, "FMV CL450 underflow: no complete picture in the buffer");
+			logf(m, "FMV CL450 underflow: the bitstream buffer has run dry");
 		}
 		return false;
 	}
+	m->dry_ticks = 0;
 	mark_t pic = m->marks.front();
 	m->marks.pop_front();
 	m->out_pos = m->marks.front().pos - 4;     // up to the next start code
@@ -1045,6 +1064,7 @@ void fmv_model_reset(fmv_model *m)
 	m->vsync_us = 0;
 	m->disp_us = 512;
 	m->und_reported = false;
+	m->dry_ticks = 0;
 	m->pictures = 0;
 	m->last_fullness = 0xFFFF;
 	m->cflevel = false;

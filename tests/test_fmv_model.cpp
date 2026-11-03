@@ -307,14 +307,14 @@ static void test_play_and_interrupts()
 	eq("every picture decoded", s.cl_pictures, 10);
 	check(logged(f, "underflow"), "underflow once the buffer runs dry");
 
-	// InquireBufferFullness: HMEM[0xB] in words
+	// InquireBufferFullness: HMEM[0xB] in bytes (WinUAE; gate 1 2026-11-03)
 	f.write(CL + CL_HOST_CONTROL, 0x0080);
 	f.write(CL + CL_HOST_RADDR, HMEM_INT_STATUS);
 	f.write(CL + CL_HOST_RDATA, 0);
 	cl_send(f, es, 0, 400);
 	cl_command(f, CLC_INQUIRE_FULLNESS);
 	fmv_model_get_state(f.model, &s);
-	eq("InquireBufferFullness in HMEM[0xB], words", hmem_read(f, HMEM_FULLNESS), s.cl_buffer_bytes / 2);
+	eq("InquireBufferFullness in HMEM[0xB], bytes", hmem_read(f, HMEM_FULLNESS), s.cl_buffer_bytes);
 	cl_command(f, CLC_FLUSH, 3);
 	eq("FlushBitstream empties the buffer [CL 11-16]", hmem_read(f, HMEM_FULLNESS), 0);
 	fmv_model_free(f.model);
@@ -348,6 +348,34 @@ static void test_cmem_in_idle()
 	eq("CFLEVEL low while CMEM is full", f.read(FMV_OFF_IO) & 0x0800, 0);
 	f.write(CL + CL_CMEM_CONTROL, 0x0003);     // CRst
 	eq("CRst empties CMEM: CFLEVEL asserted", f.read(FMV_OFF_IO) & 0x0800, 0x0800);
+	fmv_model_free(f.model);
+}
+
+static void test_no_underflow_while_streaming()
+{
+	// Gate 1, 2026-11-03: Play, then the first picture arriving in pieces.
+	// The model raised UND on the first tick without a complete picture.
+	// This ROM never clears UND from Interrupt Status, so every later
+	// interrupt (RDY, PIC-V) queued behind it and the driver slept. A
+	// picture still arriving is not an underflow; a dry buffer is.
+	fpga f;
+	attach(f);
+	cl_boot(f);
+	fmv_model_advance(f.model, 3000);
+	f.write(CL + CL_HOST_CONTROL, 0x0081);
+	cl_command(f, CLC_SET_INT_MASK, CLI_UND | CLI_PIC_V | CLI_RDY | 0x0801);
+	cl_command(f, CLC_PLAY);
+	std::vector<uint8_t> es = video_es(10, 1000);
+	cl_send(f, es, 0, 400);                       // sequence header, half a picture
+	fmv_model_advance(f.model, 200000);           // five picture periods
+	check(!logged(f, "underflow"), "no UND while the first picture is still arriving");
+	check(!(hmem_read(f, HMEM_INT_STATUS) & CLI_UND), "Interrupt Status free of UND");
+	cl_send(f, es, 400, es.size());
+	fmv_model_advance(f.model, 100000);
+	fmv_model_state st;
+	fmv_model_get_state(f.model, &st);
+	check(st.cl_pictures > 0, "pictures decode once the data is in");
+	check(!logged(f, "underflow"), "and still no UND while data keeps coming");
 	fmv_model_free(f.model);
 }
 
@@ -562,6 +590,7 @@ int main()
 	test_boot_and_commands();
 	test_play_and_interrupts();
 	test_cmem_in_idle();
+	test_no_underflow_while_streaming();
 	test_activity();
 	test_byte_swap();
 	test_l64111();
