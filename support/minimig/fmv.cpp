@@ -271,7 +271,7 @@ void fmv_poll(void)
 	static uint64_t act_last_us;
 	if (!fmv_xport_stalled(xport) && t - act_last_us >= 10000000) {
 		act_last_us = t;
-		char a[512];
+		char a[768];
 		fmv_model_activity(fmv_xport_model(xport), a, sizeof a);
 		printf("%s\n", a);
 		diag_print();

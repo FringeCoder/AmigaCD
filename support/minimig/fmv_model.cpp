@@ -69,8 +69,8 @@ struct fmv_model {
 	uint32_t frame_us;
 	int32_t  decode_us, vsync_us, disp_us;
 	bool     und_reported;
-	uint8_t  dry_ticks;        // decode ticks in a row with no picture data
-	bool     und_armed;        // data has arrived since Play, a flush or reset
+	uint8_t  dry_ticks;        // audio ticks in a row with the buffer empty, to 2
+	int32_t  und_us;           // to the next audio tick
 	bool     np_mode;          // a NewPacket since Play, a flush or reset
 	uint32_t pictures;
 	uint32_t commands;
@@ -293,7 +293,6 @@ static void cl_defaults(fmv_model *m, bool init)
 	m->sc_capture = 0;
 	m->und_reported = false;
 	m->dry_ticks = 0;
-	m->und_armed = false;
 	m->np_mode = false;
 	m->last_fullness = 0xFFFF;
 	cl_publish_cmem(m);
@@ -325,7 +324,6 @@ static void cl_sequence_header(fmv_model *m, const uint8_t *b)
 static void cl_scan(fmv_model *m, uint8_t byte)
 {
 	m->in_pos++;
-	m->und_armed = true;
 	if (m->sc_capture) {
 		m->sc_bytes[m->sc_nbytes++] = byte;
 		if (--m->sc_capture == 0) {
@@ -436,7 +434,6 @@ static void cl_execute(fmv_model *m, const cmd_t &c)
 			// state the command asked for [CL 11-6].
 			m->cl_play_cmd = target;
 			m->cl_setup_us = 1000;
-			m->und_armed = false;     // no UND, no RDY before data (below)
 			m->np_mode = false;
 			cl_set_state(m, ST_SETUP, cmd_name(a[0]));
 		} else {
@@ -482,7 +479,6 @@ static void cl_accept_command(fmv_model *m)
 			m->out_pos = m->in_pos;
 			m->cmem_words = 0;
 			m->marks.clear();
-			m->und_armed = false;
 			m->np_mode = false;
 			m->sc_shift = 0xFFFFFFFF;
 			for (auto it = m->cl_fifo.begin(); it != m->cl_fifo.end();)
@@ -529,34 +525,19 @@ static bool cl_decode_tick(fmv_model *m)
 			cl_raise(m, CLI_END_D | CLI_END_V);
 		m->marks.pop_front();
 	}
+	if (m->marks.empty()) {
+		// No picture in progress: what is left (headers, an end code) has
+		// been read by the start-code scanner already, so the buffer is
+		// empty, as WinUAE's decoder empties it. Without this a trailing
+		// end code kept the fill above 0 and no underflow ever came.
+		m->out_pos = m->in_pos;
+		cl_publish_fullness(m, false);
+	}
 	if (m->marks.size() < 2) {
-		// One picture start and nothing after it is a picture still
-		// arriving: wait for it. Underflow is the buffer running dry -- no
-		// picture data at all -- on two decode ticks in a row, as WinUAE (the
-		// oracle) has it: UND only once the buffer has stayed empty. The
-		// first version raised it on any tick without a complete picture.
-		// That fired at Play before the first picture was in, latched 0x0100
-		// in Interrupt Status, which this ROM never clears for UND, and
-		// queued every later interrupt behind it (gate 1, 2026-11-03).
-		if (m->marks.empty()) {
-			if (m->dry_ticks < 255)
-				m->dry_ticks++;
-		} else {
-			m->dry_ticks = 0;
-		}
-		// ...and only once data has arrived since Play, a flush or a reset.
-		// At Play the buffer is empty by definition, and this ROM sends its
-		// first NewPacket only after it has serviced Play's interrupt, so
-		// an empty buffer there is no underflow. Raised there, 0x0100
-		// latched for good once more (gate 1, 2026-11-03 ~19:50).
-		if (m->und_armed && m->dry_ticks >= 2 && !m->und_reported) {
-			m->und_reported = true;
-			cl_raise(m, CLI_UND);
-			logf(m, "FMV CL450 underflow: the bitstream buffer has run dry");
-		}
+		// No complete picture: wait for one. Underflow is not judged here
+		// but on the audio tick (see fmv_model_advance), as WinUAE has it.
 		return false;
 	}
-	m->dry_ticks = 0;
 	mark_t pic = m->marks.front();
 	m->marks.pop_front();
 	m->out_pos = m->marks.front().pos - 4;     // up to the next start code
@@ -647,6 +628,36 @@ static void cl_advance(fmv_model *m, int32_t us)
 				cl_raise(m, CLI_RDY);
 		}
 		cl_try_post(m);
+	}
+	// The underflow check, once every 64 lines (4096 us), as WinUAE's audio
+	// handler runs it. Empty-buffer ticks count up to 2 and reset when the
+	// buffer holds data. From then on UND is raised on every empty tick, in
+	// every state, Play or not. So the first tick after Play, with nothing
+	// sent yet, posts 0x0100. That is this ROM's signal to start sending:
+	// its ISR reads HMEM[0xA] and goes straight to NewPacket (gate 1 runs
+	// v12/v13b). It never clears it, and in WinUAE nothing else does
+	// either, so the status stays 0x0100 and the driver streams by polling.
+	// The two versions before this gated UND on data having arrived since
+	// Play; that took the start signal away (run v15).
+	m->und_us -= us;
+	while (m->und_us <= 0) {
+		m->und_us += 4096;
+		if (!m->cl_running)
+			continue;
+		if (cl_fill(m) == 0) {
+			if (m->dry_ticks < 2)
+				m->dry_ticks++;
+			if (m->dry_ticks >= 2) {
+				cl_raise(m, CLI_UND);
+				if (!m->und_reported) {
+					m->und_reported = true;
+					logf(m, "FMV CL450 underflow: the bitstream buffer is empty");
+				}
+			}
+		} else {
+			m->dry_ticks = 0;
+			m->und_reported = false;
+		}
 	}
 	// PIC-D, once a display frame (40 ms, the PAL CD32's two fields) while
 	// the microcode runs, in every state and before any data: WinUAE posts
@@ -1114,7 +1125,6 @@ void fmv_model_reset(fmv_model *m)
 	m->disp_us = 512;
 	m->und_reported = false;
 	m->dry_ticks = 0;
-	m->und_armed = false;
 	m->np_mode = false;
 	m->pictures = 0;
 	m->last_fullness = 0xFFFF;
@@ -1233,11 +1243,15 @@ void fmv_model_activity(fmv_model *m, char *out, size_t len)
 	         "(unlogged reads: HOST_newcmd %u, CMEM_dmactrl %u, HOST_control %u); "
 	         "%u INTs with status 0; "
 	         "CL450 %s%s, %u commands, last 0x%04x, int mask 0x%04x pending 0x%04x, "
-	         "HMEM[0xA] 0x%04x, HOST_control 0x%04x, threshold %u, CMEM %u words",
+	         "HMEM[0xA] 0x%04x, HOST_control 0x%04x, threshold %u, CMEM %u words; "
+	         "L64111 INTR %u, status 1 0x%02x 2 0x%02x, mask 1 0x%02x 2 0x%02x, "
+	         "channel buffer %u frames, sync audio %u system %u",
 	         m->act_events, m->act_rd_newcmd, m->act_rd_dmactrl, m->act_rd_hostctl, m->act_int0,
 	         st[m->cl_state < 5 ? m->cl_state : 4], m->cl_running ? "" : " (microcode not running)",
 	         m->commands, m->last_cmd, m->int_mask, m->int_pending,
-	         m->R[FMV_IDX_HMEM + 0xA], m->R[clx(CL_HOST_CONTROL)], m->threshold, m->cmem_words);
+	         m->R[FMV_IDX_HMEM + 0xA], m->R[clx(CL_HOST_CONTROL)], m->threshold, m->cmem_words,
+	         m->l64_int, m->l64_st1, m->l64_st2, m->l64_mask1, m->l64_mask2, m->cb_frames,
+	         m->l64_sync_aud, m->l64_sync_sys);
 	m->act_events = m->act_rd_newcmd = m->act_rd_dmactrl = m->act_rd_hostctl = 0;
 	m->act_int0 = 0;
 }

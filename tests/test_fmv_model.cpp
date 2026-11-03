@@ -351,13 +351,13 @@ static void test_cmem_in_idle()
 	fmv_model_free(f.model);
 }
 
-static void test_no_underflow_while_streaming()
+static void test_und_starts_the_stream()
 {
-	// Gate 1, 2026-11-03: Play, then the first picture arriving in pieces.
-	// The model raised UND on the first tick without a complete picture.
-	// This ROM never clears UND from Interrupt Status, so every later
-	// interrupt (RDY, PIC-V) queued behind it and the driver slept. A
-	// picture still arriving is not an underflow; a dry buffer is.
+	// Gate 1 runs v12/v13b/v15 (2026-11-03), and WinUAE as the oracle:
+	// after Play with nothing sent, the audio tick posts UND. This ROM's
+	// ISR reads 0x0100 from HMEM[0xA] and starts sending. Status-0
+	// interrupts alone (v15) never start it. The ROM never clears the
+	// status, and neither does WinUAE, so it stays.
 	fpga f;
 	attach(f);
 	cl_boot(f);
@@ -365,32 +365,49 @@ static void test_no_underflow_while_streaming()
 	f.write(CL + CL_HOST_CONTROL, 0x0081);
 	cl_command(f, CLC_SET_INT_MASK, CLI_UND | CLI_PIC_V | CLI_RDY | 0x0801);
 	cl_command(f, CLC_PLAY);
-	// Gate 1, 2026-11-03 ~19:50: at Play the buffer is empty, and this ROM
-	// sends its first NewPacket only after it has serviced Play's
-	// interrupt. An empty buffer before any data is no underflow.
-	fmv_model_advance(f.model, 200000);           // five picture periods, no data
-	check(!logged(f, "underflow"), "no UND at Play, before any data has arrived");
-	// What does interrupt is the display tick: PIC-D, masked out here, so
-	// Interrupt Status stays 0 and INT fires anyway (WinUAE). This ROM
-	// starts its stream from that interrupt (gate 1, 2026-11-03 ~20:05).
-	eq("Interrupt Status still 0 before data flows", hmem_read(f, HMEM_INT_STATUS), 0);
-	check(f.cl_int(), "the display tick interrupts with status 0");
+	fmv_model_advance(f.model, 20000);
+	eq("UND at Play with the buffer empty: the start signal", hmem_read(f, HMEM_INT_STATUS), CLI_UND);
+	check(f.cl_int(), "INT asserted for it");
 	f.write(CL + CL_HOST_CONTROL, 0x0081);        // the ISR's acknowledge
-	check(!f.cl_int(), "the acknowledge drops INT");
-	fmv_model_advance(f.model, 41000);
-	check(f.cl_int(), "and the next frame's tick raises it again");
+	fmv_model_advance(f.model, 100000);
+	check(!f.cl_int(), "a latched status blocks every later post (no status-0 INTs either)");
+	eq("the status stays 0x0100: nothing clears it but the host", hmem_read(f, HMEM_INT_STATUS), CLI_UND);
 	std::vector<uint8_t> es = video_es(10, 1000);
-	cl_send(f, es, 0, 400);                       // sequence header, half a picture
-	fmv_model_advance(f.model, 200000);           // five picture periods
-	check(!logged(f, "underflow"), "no UND while the first picture is still arriving");
-	check(!(hmem_read(f, HMEM_INT_STATUS) & CLI_UND), "Interrupt Status free of UND");
+	cl_send(f, es, 0, 400);
+	fmv_model_advance(f.model, 20000);
 	cl_send(f, es, 400, es.size());
 	fmv_model_advance(f.model, 100000);
 	fmv_model_state st;
 	fmv_model_get_state(f.model, &st);
 	check(st.cl_pictures > 0, "pictures decode once the data is in");
-	check(!logged(f, "underflow"), "and still no UND while data keeps coming");
 	check(!(hmem_read(f, HMEM_INT_STATUS) & CLI_PIC_V), "no PIC-V latched per picture, though enabled");
+	// Host clears the status while data is buffered. The first post after
+	// it carries what was pending from the empty ticks before the data came
+	// (WinUAE: pending bits wait for the next post); clear that too, and
+	// then nothing new is raised while the buffer holds data.
+	f.write(CL + CL_HOST_RADDR, HMEM_INT_STATUS);
+	f.write(CL + CL_HOST_RDATA, 0);
+	fmv_model_advance(f.model, 1000);
+	f.write(CL + CL_HOST_RADDR, HMEM_INT_STATUS);
+	f.write(CL + CL_HOST_RDATA, 0);
+	f.write(CL + CL_HOST_CONTROL, 0x0081);
+	size_t n0 = f.log.size();
+	fmv_model_advance(f.model, 30000);
+	bool und_again = false;
+	for (size_t i = n0; i < f.log.size(); i++)
+		if (f.log[i].find("underflow") != std::string::npos) und_again = true;
+	check(!und_again, "no UND logged while the buffer holds data");
+	check(!(hmem_read(f, HMEM_INT_STATUS) & CLI_UND), "no UND posted while the buffer holds data");
+	// Run it dry: UND again, and on every empty tick, not once per spell
+	fmv_model_advance(f.model, 1000000);
+	f.write(CL + CL_HOST_RADDR, HMEM_INT_STATUS);
+	f.write(CL + CL_HOST_RDATA, 0);
+	fmv_model_advance(f.model, 20000);
+	eq("UND once the buffer has run dry", hmem_read(f, HMEM_INT_STATUS) & CLI_UND, CLI_UND);
+	f.write(CL + CL_HOST_RADDR, HMEM_INT_STATUS);
+	f.write(CL + CL_HOST_RDATA, 0);
+	fmv_model_advance(f.model, 20000);
+	eq("and again after the host clears it, while still dry", hmem_read(f, HMEM_INT_STATUS) & CLI_UND, CLI_UND);
 	fmv_model_free(f.model);
 }
 
@@ -442,6 +459,7 @@ static void test_activity()
 	check(strstr(a, "HOST_newcmd 3, CMEM_dmactrl 1, HOST_control 2") != 0,
 	      "activity: the unlogged polls, per register");
 	check(strstr(a, "microcode not running") != 0, "activity: CL450 state shown");
+	check(strstr(a, "L64111 INTR 0, status 1 0x00 2 0x00") != 0, "activity: L64111 state shown");
 	fmv_model_activity(f.model, a, sizeof a);
 	check(strstr(a, " 0 board accesses") != 0, "activity: counts reset after each line");
 	fmv_model_free(f.model);
@@ -635,7 +653,7 @@ int main()
 	test_boot_and_commands();
 	test_play_and_interrupts();
 	test_cmem_in_idle();
-	test_no_underflow_while_streaming();
+	test_und_starts_the_stream();
 	test_rdy();
 	test_activity();
 	test_byte_swap();
