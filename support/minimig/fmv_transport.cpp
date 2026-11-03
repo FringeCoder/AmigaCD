@@ -351,20 +351,29 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 		return 0;
 	}
 	const uint16_t *d = w + i + 1;
-	if (d[0] != 0xF401) {
+	if (d[0] != 0xF401 && d[0] != 0xF402) {
 		snprintf(out, len, "FMV diag: unknown layout version %04x", d[0]);
 		return 0;
 	}
+	// 0xF402: word 6 carries INT2, the L64111 latch and the CL450 INT in its
+	// top bits and UQ_WPTR's low 12 bits below them (AmigaCD_MiSTer fmv.v)
+	bool v2 = d[0] == 0xF402;
+	unsigned uqw = v2 ? (d[6] & 0x0FFFu) : d[6];
 	uint16_t f = d[1];
 	snprintf(out, len,
 	         "FMV diag: fmv_ddr %s for %u%s clocks, on %u, up_full %u, ev_empty %u, poll due %u, "
 	         "avl read %u write %u waitrequest %u; fmv_bus %s, ALIVE %u, status[64] %u; "
-	         "UQ_WPTR polls %u, read beats %u, uq_rd %u, UQ_WPTR read %u, events %u",
+	         "UQ_WPTR polls %u, read beats %u, uq_rd %u, UQ_WPTR read %u%s, events %u",
 	         ddr_st[f >> 12], d[4], d[4] == 0xFFFF ? "+" : "",
 	         (f >> 11) & 1, (f >> 10) & 1, (f >> 9) & 1, (f >> 8) & 1,
 	         (f >> 7) & 1, (f >> 6) & 1, (f >> 5) & 1,
 	         bus_st[(f >> 2) & 7], (f >> 1) & 1, f & 1,
-	         d[2], d[3], d[5], d[6], d[7]);
+	         d[2], d[3], d[5], uqw, v2 ? " (low 12 bits)" : "", d[7]);
+	if (v2) {
+		size_t u = strlen(out);
+		snprintf(out + u, len - u, "; FPGA: INT2 %u, L64111 latch %u, CL450 INT %u",
+		         (d[6] >> 15) & 1, (d[6] >> 14) & 1, (d[6] >> 13) & 1);
+	}
 
 	// The DDR3 arbiters behind it (AmigaCD.sv fmv_diag_x), after 0xA5F5
 	const uint16_t *x = d + 8;

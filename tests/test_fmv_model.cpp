@@ -614,6 +614,25 @@ static void test_l64111_level_and_pts()
 	l64_put(f, pack_header());
 	l64_put(f, audio_packet(frame, 0x200000ull));
 	check(f.l64_int(), "the next audio PTS raises it again: every PTS, not once");
+	// The owner's check (run v17): PTS set, read (clear), then a bit outside
+	// the mask raised -- INTR must end low.
+	f.read(L64 + 2 * 5);
+	check(!f.l64_int(), "after the read, INTR low");
+	l64_put(f, pack_header());                   // FRAME DETECT IN: not in mask 0x42...
+	fmv_model_state st0;
+	fmv_model_get_state(f.model, &st0);
+	(void)st0;
+	f.write(L64 + 2 * 5, 0x08);                  // ...enable FRAME DETECT IN only (mask bit 3 -> status bit 2)
+	f.read(L64 + 2 * 5);
+	f.write(L64 + 2 * 5, 0x40);                  // PTS AVAILABLE only
+	l64_put(f, audio_packet(frame, 0x280000ull)); // raises FRAME DETECT IN (masked out) and PTS AVAILABLE
+	check(f.l64_int(), "PTS AVAILABLE in the mask: INTR up");
+	f.read(L64 + 2 * 5);
+	f.write(L64 + 2 * 5, 0x08);                  // FRAME DETECT IN enabled, PTS not
+	f.write(L64 + 2 * 5, 0x00);                  // and off again before anything is raised
+	l64_put(f, pack_header());
+	l64_put(f, audio_packet(frame, 0x2C0000ull));
+	check(!f.l64_int(), "bits raised outside the mask leave INTR low");
 	f.read(L64 + 2 * 5);
 	f.write(L64 + 2 * 5, 0x00);
 	l64_put(f, pack_header());
@@ -621,6 +640,38 @@ static void test_l64111_level_and_pts()
 	check(!f.l64_int(), "nothing with the mask off");
 	f.write(L64 + 2 * 4, 0x00);                  // a mask-1 write re-evaluates too: still nothing
 	check(!f.l64_int(), "and a mask 1 write with nothing set in status 1 leaves it low");
+	fmv_model_free(f.model);
+}
+
+static void test_l64111_rearm()
+{
+	// A guarded raise the FPGA drops (it was made before a status read the
+	// model has not seen yet). If the model never sends it again, the two
+	// sides disagree for good: the model holds INTR 1 and the FPGA 0. While
+	// the level holds, the model re-sends it every 20 ms.
+	fpga f;
+	attach(f);
+	f.write(L64 + 2 * 5, 0x40);                  // PTS AVAILABLE
+	std::vector<uint8_t> frame = mp2_frame();
+	for (int p = 0; p < 4; p++) {
+		l64_put(f, pack_header());
+		l64_put(f, audio_packet(frame, 90000u * (uint64_t)p + 0x100000ull));
+	}
+	check(f.l64_int(), "raised");
+	f.R[FMV_IDX_L64_INT] = 0;                    // the FPGA dropped it
+	fmv_model_advance(f.model, 25000);
+	check(f.l64_int(), "re-sent while the level holds");
+	f.read(L64 + 2 * 5);                         // serviced
+	fmv_model_advance(f.model, 50000);
+	check(!f.l64_int(), "and not re-sent once the read has cleared it");
+	// Both directions: a mask that disables what is pending drops INTR
+	l64_put(f, pack_header());
+	l64_put(f, audio_packet(frame, 0x500000ull));
+	check(f.l64_int(), "the next PTS raises it");
+	f.write(L64 + 2 * 5, 0x00);
+	check(!f.l64_int(), "a mask write disabling it drops INTR, as a level does");
+	f.write(L64 + 2 * 5, 0x40);
+	check(f.l64_int(), "and enabling it again raises it, the status still set");
 	fmv_model_free(f.model);
 }
 
@@ -694,6 +745,7 @@ int main()
 	test_byte_swap();
 	test_l64111();
 	test_l64111_level_and_pts();
+	test_l64111_rearm();
 	test_l64111_masks();
 	test_l64111_mask_shift();
 	test_reset_event();

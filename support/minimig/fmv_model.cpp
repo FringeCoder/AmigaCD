@@ -79,6 +79,7 @@ struct fmv_model {
 	// every 10 s): all events, and the reads the log leaves out
 	uint32_t act_events, act_rd_newcmd, act_rd_dmactrl, act_rd_hostctl;
 	uint32_t act_int0;         // INTs posted with Interrupt Status 0
+	int32_t  l64_rearm_us;     // to the next re-send of a raised L64111 latch
 	uint16_t window[4], border[4];
 	uint16_t last_fullness;
 	bool     cflevel;
@@ -221,6 +222,8 @@ static void cl_publish_cmem(fmv_model *m)
 // host clears it. Gate 1 (2026-11-03 ~20:05): with the per-frame PIC-D
 // event masked out, the first version posted nothing at Play at all, and
 // this ROM waits for an interrupt after Play before it sends any data.
+static bool l64_level(const fmv_model *m);   // L64111 section below
+
 static void cl_raise(fmv_model *m, uint16_t bits)
 {
 	m->int_pending |= (uint16_t)(bits & m->int_mask);
@@ -763,9 +766,16 @@ static bool l64_level(const fmv_model *m)
 
 static void l64_check_int(fmv_model *m)
 {
-	if (l64_level(m) && !m->l64_int) {
+	bool lvl = l64_level(m);
+	if (lvl && !m->l64_int) {
 		m->l64_int = true;
 		set_reg(m, FMV_IDX_L64_INT, 1, 1, true);
+	} else if (!lvl && m->l64_int) {
+		// Both ways: a mask write that disables what is pending drops the
+		// line, as a level does. A status read already dropped it in the
+		// FPGA; this covers the mask.
+		m->l64_int = false;
+		set_reg(m, FMV_IDX_L64_INT, 0, 1);
 	}
 }
 
@@ -1214,6 +1224,20 @@ void fmv_model_advance(fmv_model *m, uint32_t usec)
 		usec -= (uint32_t)s;
 		cl_advance(m, s);
 		l64_advance(m, s);
+		// The L64111 latch, re-sent every 20 ms while the level holds. A raise
+		// is guarded: the FPGA drops one made before the 68k's latest status
+		// read, and Main is to raise it again once it has caught up if the
+		// source is still active (fmv-contract.md, the update queue). The model
+		// never did that, so a dropped raise would leave it believing the latch
+		// was up while the FPGA had it down. Gate 1 run v17 ended in that state
+		// as far as Main could see (model INTR 1, the 68k idle). Re-sending is
+		// idempotent in the FPGA.
+		m->l64_rearm_us -= s;
+		while (m->l64_rearm_us <= 0) {
+			m->l64_rearm_us += 20000;
+			if (m->l64_int && l64_level(m))
+				set_reg(m, FMV_IDX_L64_INT, 1, 1, true);
+		}
 		m->stat_us += s;
 		if (m->stat_us >= 1000000) {
 			if (m->stat_words || m->stat_l64_bytes)

@@ -444,10 +444,20 @@ static void test_diag_format()
 	check(!fmv_diag_port_dead(wx, 22), "no HPS block: no verdict");
 	check(fmv_diag_format(wx, 11, big, sizeof big) == 1 && !strstr(big, "fmv_arb"),
 	      "diag x: a short read decodes without the arbiter block");
+	// Layout 0xF402: word 6 has INT2, the L64111 latch and the CL450 INT on
+	// top, UQ_WPTR's low 12 bits below
+	// d[0] is index 2: version, flags, polls, beats, dwell, uq_rd, word 6, events
+	uint16_t w2[12] = { 0x0000, 0xA5F4, 0xF402, w[3], 5, 0, 0xFFFF, 0,
+	                    (uint16_t)(1 << 15 | 1 << 14 | 0x0123), 7, 0, 0 };
+	check(fmv_diag_format(w2, 12, line, sizeof line) == 1, "diag F402: decoded");
+	check(strstr(line, "UQ_WPTR read 291 (low 12 bits)") != 0, "diag F402: UQ_WPTR without the flag bits");
+	check(strstr(line, "FPGA: INT2 1, L64111 latch 1, CL450 INT 0") != 0, "diag F402: the interrupt lines");
+	check(fmv_diag_format(w, 12, line, sizeof line) == 1 && !strstr(line, "FPGA: INT2"),
+	      "diag F401: no interrupt lines claimed");
 	uint16_t none[12] = { 0 };
 	check(fmv_diag_format(none, 12, line, sizeof line) == 0 && strstr(line, "no window"),
 	      "diag: a core without the window says so");
-	w[2] = 0xF402;
+	w[2] = 0xF4FF;
 	check(fmv_diag_format(w, 12, line, sizeof line) == 0 && strstr(line, "unknown layout"),
 	      "diag: an unknown version is not decoded");
 }
