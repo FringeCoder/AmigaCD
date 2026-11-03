@@ -142,6 +142,7 @@ enum {
 	// 20 x 16384 bits = 40960 bytes, which a Video CD obeys.
 	FMV_CL_BUFFER_BYTES = 40960,
 	FMV_CMEM_WORDS      = 16,      // [CL 8-7]
+	FMV_PIC_D_US        = 40000,   // the display-time PIC-D event (WinUAE)
 	FMV_L64_FIFO_BYTES  = 128,     // [L64 2-5]
 	FMV_L64_CB_FRAMES   = 64,      // Layer II [L64 4-18]
 	FMV_CL_CMD_FIFO     = 126,     // [CL 11-7]

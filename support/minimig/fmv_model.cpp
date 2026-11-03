@@ -78,6 +78,7 @@ struct fmv_model {
 	// 68k activity since the last fmv_model_activity() (Main prints it
 	// every 10 s): all events, and the reads the log leaves out
 	uint32_t act_events, act_rd_newcmd, act_rd_dmactrl, act_rd_hostctl;
+	uint32_t act_int0;         // INTs posted with Interrupt Status 0
 	uint16_t window[4], border[4];
 	uint16_t last_fullness;
 	bool     cflevel;
@@ -212,9 +213,28 @@ static void cl_publish_cmem(fmv_model *m)
 	}
 }
 
+// An interrupt event [CL 12-7] as WinUAE (the oracle) posts it: the
+// enabled bits join the pending set; if Interrupt Status (HMEM[0xA]) is 0,
+// the pending set is written there and INT is driven by clearing Int,
+// HOST_control bit 7 -- even when nothing enabled is pending, so a zero
+// status still interrupts. A non-zero status blocks the event until the
+// host clears it. Gate 1 (2026-11-03 ~20:05): with the per-frame PIC-D
+// event masked out, the first version posted nothing at Play at all, and
+// this ROM waits for an interrupt after Play before it sends any data.
 static void cl_raise(fmv_model *m, uint16_t bits)
 {
 	m->int_pending |= (uint16_t)(bits & m->int_mask);
+	if (!m->cl_cpu_on || m->R[FMV_IDX_HMEM + HMEM_INT_STATUS] != 0)
+		return;
+	uint16_t p = m->int_pending;
+	m->int_pending = 0;
+	if (p)
+		set_reg(m, FMV_IDX_HMEM + HMEM_INT_STATUS, p, 0xFFFF);
+	set_reg(m, clx(CL_HOST_CONTROL), 0x0000, 0x0080);
+	if (p)
+		logf(m, "FMV CL450 INT posted, status 0x%04x", p);
+	else
+		m->act_int0++;
 }
 
 // Post queued interrupts when Interrupt Status is 0 [CL 12-7, 12.2.1]: write
@@ -541,9 +561,10 @@ static bool cl_decode_tick(fmv_model *m)
 	m->marks.pop_front();
 	m->out_pos = m->marks.front().pos - 4;     // up to the next start code
 	m->pictures++;
-	cl_raise(m, CLI_PIC_D | CLI_PIC_V);
-	if (pic.ptype == 1)
-		cl_raise(m, CLI_GOP);
+	// No PIC-V or GOP per decoded picture: WinUAE raises neither, and this
+	// ROM enables PIC-V but never clears it from Interrupt Status, so each
+	// would latch for good. PIC-D comes from the display tick instead.
+	(void)pic;
 	if (m->cl_state == ST_SETUP || m->cl_play_cmd) {
 		if (m->cl_play_cmd) {
 			cl_set_state(m, m->cl_play_cmd, "first picture decoded");
@@ -627,7 +648,15 @@ static void cl_advance(fmv_model *m, int32_t us)
 		}
 		cl_try_post(m);
 	}
-	(void)m->vsync_us;
+	// PIC-D, once a display frame (40 ms, the PAL CD32's two fields) while
+	// the microcode runs, in every state and before any data: WinUAE posts
+	// it from its display timing, not per decoded picture.
+	m->vsync_us -= us;
+	while (m->vsync_us <= 0) {
+		m->vsync_us += FMV_PIC_D_US;
+		if (m->cl_running)
+			cl_raise(m, CLI_PIC_D);
+	}
 }
 
 static void cl_event(fmv_model *m, const fmv_event &e)
@@ -1202,11 +1231,13 @@ void fmv_model_activity(fmv_model *m, char *out, size_t len)
 	snprintf(out, len,
 	         "FMV activity: %u board accesses from the 68k since the last line "
 	         "(unlogged reads: HOST_newcmd %u, CMEM_dmactrl %u, HOST_control %u); "
+	         "%u INTs with status 0; "
 	         "CL450 %s%s, %u commands, last 0x%04x, int mask 0x%04x pending 0x%04x, "
 	         "HMEM[0xA] 0x%04x, HOST_control 0x%04x, threshold %u, CMEM %u words",
-	         m->act_events, m->act_rd_newcmd, m->act_rd_dmactrl, m->act_rd_hostctl,
+	         m->act_events, m->act_rd_newcmd, m->act_rd_dmactrl, m->act_rd_hostctl, m->act_int0,
 	         st[m->cl_state < 5 ? m->cl_state : 4], m->cl_running ? "" : " (microcode not running)",
 	         m->commands, m->last_cmd, m->int_mask, m->int_pending,
 	         m->R[FMV_IDX_HMEM + 0xA], m->R[clx(CL_HOST_CONTROL)], m->threshold, m->cmem_words);
 	m->act_events = m->act_rd_newcmd = m->act_rd_dmactrl = m->act_rd_hostctl = 0;
+	m->act_int0 = 0;
 }

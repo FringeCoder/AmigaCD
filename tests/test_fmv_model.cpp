@@ -284,11 +284,10 @@ static void test_play_and_interrupts()
 	fmv_model_advance(f.model, 2000);
 	fmv_model_get_state(f.model, &s);
 	eq("PLAY after setup and the first picture", s.cl_state, 2);
-	check(f.cl_int() && f.int2(), "INT asserted for the first decoded picture");
+	check(f.cl_int() && f.int2(), "INT asserted");
 	uint16_t st = hmem_read(f, HMEM_INT_STATUS);
-	check(st & CLI_PIC_D, "Interrupt Status has PIC-D");
-	check(st & CLI_SEQ_D, "Interrupt Status has SEQ-D");
-	check(!(st & CLI_PIC_V), "PIC-V masked out: not enabled");
+	check(st & CLI_SEQ_D, "Interrupt Status has SEQ-D, the first event after the sequence header");
+	check(!(st & CLI_PIC_V), "PIC-V: not raised per picture (WinUAE), and not enabled here");
 
 	// Host service sequence [CL 12-37]: set Int to 1, then clear status.
 	f.write(CL + CL_HOST_CONTROL, 0x0080);
@@ -299,6 +298,7 @@ static void test_play_and_interrupts()
 	f.write(CL + CL_HOST_RDATA, 0);
 	fmv_model_advance(f.model, 1000);
 	check(f.cl_int(), "queued interrupts posted once the host clears Interrupt Status");
+	check(hmem_read(f, HMEM_INT_STATUS) & CLI_PIC_D, "the display tick's PIC-D was queued behind it");
 
 	fmv_model_get_state(f.model, &s);
 	check(s.cl_pictures >= 3 && s.cl_pictures <= 4, "about one picture per 40 ms");
@@ -370,7 +370,15 @@ static void test_no_underflow_while_streaming()
 	// interrupt. An empty buffer before any data is no underflow.
 	fmv_model_advance(f.model, 200000);           // five picture periods, no data
 	check(!logged(f, "underflow"), "no UND at Play, before any data has arrived");
-	check(!f.cl_int(), "no INT at all before data flows");
+	// What does interrupt is the display tick: PIC-D, masked out here, so
+	// Interrupt Status stays 0 and INT fires anyway (WinUAE). This ROM
+	// starts its stream from that interrupt (gate 1, 2026-11-03 ~20:05).
+	eq("Interrupt Status still 0 before data flows", hmem_read(f, HMEM_INT_STATUS), 0);
+	check(f.cl_int(), "the display tick interrupts with status 0");
+	f.write(CL + CL_HOST_CONTROL, 0x0081);        // the ISR's acknowledge
+	check(!f.cl_int(), "the acknowledge drops INT");
+	fmv_model_advance(f.model, 41000);
+	check(f.cl_int(), "and the next frame's tick raises it again");
 	std::vector<uint8_t> es = video_es(10, 1000);
 	cl_send(f, es, 0, 400);                       // sequence header, half a picture
 	fmv_model_advance(f.model, 200000);           // five picture periods
@@ -382,6 +390,7 @@ static void test_no_underflow_while_streaming()
 	fmv_model_get_state(f.model, &st);
 	check(st.cl_pictures > 0, "pictures decode once the data is in");
 	check(!logged(f, "underflow"), "and still no UND while data keeps coming");
+	check(!(hmem_read(f, HMEM_INT_STATUS) & CLI_PIC_V), "no PIC-V latched per picture, though enabled");
 	fmv_model_free(f.model);
 }
 
@@ -401,13 +410,13 @@ static void test_rdy()
 	std::vector<uint8_t> es = video_es(30, 1000);
 	cl_send(f, es, 0, 4000);                       // above the threshold
 	fmv_model_advance(f.model, 3000);
-	check(!f.cl_int(), "no RDY without a NewPacket, even in PLAY");
+	check(!(hmem_read(f, HMEM_INT_STATUS) & CLI_RDY), "no RDY without a NewPacket, even in PLAY");
 	cl_command(f, CLC_NEW_PACKET, 0x0400);
 	fmv_model_advance(f.model, 3000);
 	fmv_model_state st;
 	fmv_model_get_state(f.model, &st);
 	check(st.cl_buffer_bytes >= 2048, "buffer above the threshold");
-	check(!f.cl_int(), "no RDY while the buffer is above the threshold");
+	check(!(hmem_read(f, HMEM_INT_STATUS) & CLI_RDY), "no RDY while the buffer is above the threshold");
 	// Decoded down to the last picture (about 1000 bytes, still incomplete)
 	fmv_model_advance(f.model, 400000);
 	check(f.cl_int() && (hmem_read(f, HMEM_INT_STATUS) & CLI_RDY),
