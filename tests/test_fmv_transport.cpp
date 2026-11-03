@@ -434,6 +434,15 @@ static void test_diag_format()
 	      "diag y: counts, last command, its burstcount");
 	check(strstr(big, "on the pins write 03fe1001 (byte 1ff08008) x1, BUSY high for 65535+ clocks") != 0,
 	      "diag y: the held command and the BUSY run");
+	// The Amiga's interrupt block after 0xA5F7 (gate 1 run v18): INT2 storm
+	// or wait. INTENA 0x4008: master and PORTS on; INTREQ 0x0008 with Akiko
+	// IRQ up.
+	uint16_t wz[34];
+	memcpy(wz, wy, sizeof wy);
+	wz[28] = 0xA5F7; wz[29] = 0x4008; wz[30] = (uint16_t)(0x8000 | 0x0008);
+	check(fmv_diag_format(wz, 34, big, sizeof big) == 1, "diag z: decoded");
+	check(strstr(big, "Amiga: INTENA 4008 INTREQ 0008 (PORTS enabled 1, master 1, requested 1), Akiko IRQ 1") != 0,
+	      "diag z: INTENA, INTREQ, PORTS and Akiko IRQ");
 	check(fmv_diag_port_dead(wy, 31), "dead port: 4 commands, 0 beats, BUSY held (2026-11-02)");
 	wy[19 + 7] = 0;                                    // BUSY not held: the beats rule alone
 	check(fmv_diag_port_dead(wy, 31), "dead port: 4 commands, 0 beats, BUSY low (the =4 run)");

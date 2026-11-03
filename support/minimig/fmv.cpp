@@ -132,21 +132,21 @@ static void start()
 // through DDR3, so it still answers when the DDR3 path is what failed.
 static void diag_print()
 {
-	uint16_t w[31];
+	uint16_t w[34];
 	EnableIO();
 	spi8(UIO_DMA_READ);
 	spi32_w(0xFA00);
-	for (int i = 0; i < 31; i++)
+	for (int i = 0; i < 34; i++)
 		w[i] = (uint16_t)spi_w(0);
 	DisableIO();
-	char line[1600];
-	fmv_diag_format(w, 31, line, sizeof line);
+	char line[2000];
+	fmv_diag_format(w, 34, line, sizeof line);
 	uint32_t r[5];
 	fpga_sdr_status(r);
 	printf("%s; HPS: dramsts %08x fpgaportrst %08x protportdefault %08x brgmodrst %08x "
 	       "fpgaintf %08x\n", line, r[0], r[1], r[2], r[3], r[4]);
 	static int dead_said;
-	if (fmv_diag_port_dead(w, 31) && !dead_said) {
+	if (fmv_diag_port_dead(w, 34) && !dead_said) {
 		dead_said = 1;
 		printf("FMV: *** the core's DDR3 port is not answering reads (the HPS takes them and "
 		       "returns no data). The FMV board cannot work like this. Power-cycle the MiSTer: "

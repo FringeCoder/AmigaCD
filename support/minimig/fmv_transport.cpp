@@ -418,7 +418,20 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 			used += cmd(y[2], y[3], (uint8_t)y[7], out + used, len - used);
 			used += snprintf(out + used, len - used, ", on the pins ");
 			used += cmd(y[4], y[5], (uint8_t)(y[7] >> 8), out + used, len - used);
-			snprintf(out + used, len - used, ", BUSY high for %u%s clocks", y[6], y[6] == 0xFFFF ? "+" : "");
+			used += snprintf(out + used, len - used, ", BUSY high for %u%s clocks", y[6], y[6] == 0xFFFF ? "+" : "");
+
+			// The Amiga's interrupt state after 0xA5F7 (AmigaCD.sv
+			// fmv_diag_z): Paula's INTENA and INTREQ, and Akiko's IRQ,
+			// which shares INT2 with the board. PORTS is bit 3, the master
+			// enable bit 14.
+			const uint16_t *z = y + 8;
+			if (n - i >= 30 && z[0] == 0xA5F7) {
+				uint16_t en = z[1], rq = z[2] & 0x7FFF;
+				snprintf(out + used, len - used,
+				         "; Amiga: INTENA %04x INTREQ %04x (PORTS enabled %u, master %u, "
+				         "requested %u), Akiko IRQ %u",
+				         en, rq, (en >> 3) & 1, (en >> 14) & 1, (rq >> 3) & 1, (z[2] >> 15) & 1);
+			}
 		}
 	}
 	return 1;
