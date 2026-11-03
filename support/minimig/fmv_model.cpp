@@ -70,6 +70,8 @@ struct fmv_model {
 	int32_t  decode_us, vsync_us, disp_us;
 	bool     und_reported;
 	uint8_t  dry_ticks;        // decode ticks in a row with no picture data
+	bool     und_armed;        // data has arrived since Play, a flush or reset
+	bool     np_mode;          // a NewPacket since Play, a flush or reset
 	uint32_t pictures;
 	uint32_t commands;
 	uint16_t last_cmd;
@@ -271,6 +273,8 @@ static void cl_defaults(fmv_model *m, bool init)
 	m->sc_capture = 0;
 	m->und_reported = false;
 	m->dry_ticks = 0;
+	m->und_armed = false;
+	m->np_mode = false;
 	m->last_fullness = 0xFFFF;
 	cl_publish_cmem(m);
 	// DRAM-resident variable defaults [CL 10-8, table 10-7; appendix A]
@@ -301,6 +305,7 @@ static void cl_sequence_header(fmv_model *m, const uint8_t *b)
 static void cl_scan(fmv_model *m, uint8_t byte)
 {
 	m->in_pos++;
+	m->und_armed = true;
 	if (m->sc_capture) {
 		m->sc_bytes[m->sc_nbytes++] = byte;
 		if (--m->sc_capture == 0) {
@@ -411,6 +416,8 @@ static void cl_execute(fmv_model *m, const cmd_t &c)
 			// state the command asked for [CL 11-6].
 			m->cl_play_cmd = target;
 			m->cl_setup_us = 1000;
+			m->und_armed = false;     // no UND, no RDY before data (below)
+			m->np_mode = false;
 			cl_set_state(m, ST_SETUP, cmd_name(a[0]));
 		} else {
 			cl_set_state(m, target, cmd_name(a[0]));
@@ -455,6 +462,8 @@ static void cl_accept_command(fmv_model *m)
 			m->out_pos = m->in_pos;
 			m->cmem_words = 0;
 			m->marks.clear();
+			m->und_armed = false;
+			m->np_mode = false;
 			m->sc_shift = 0xFFFFFFFF;
 			for (auto it = m->cl_fifo.begin(); it != m->cl_fifo.end();)
 				it = it->w[0] == CLC_NEW_PACKET ? m->cl_fifo.erase(it) : it + 1;
@@ -476,6 +485,7 @@ static void cl_accept_command(fmv_model *m)
 		}
 	} else if (c.w[0] == CLC_NEW_PACKET) {
 		// Queued until its data is decoded; nothing to execute [CL 11-20].
+		m->np_mode = true;
 	} else {
 		if (m->cl_fifo.size() >= FMV_CL_CMD_FIFO)
 			logf(m, "FMV CL450 command FIFO overflow [CL 11-7]");
@@ -514,7 +524,12 @@ static bool cl_decode_tick(fmv_model *m)
 		} else {
 			m->dry_ticks = 0;
 		}
-		if (m->dry_ticks >= 2 && !m->und_reported) {
+		// ...and only once data has arrived since Play, a flush or a reset.
+		// At Play the buffer is empty by definition, and this ROM sends its
+		// first NewPacket only after it has serviced Play's interrupt, so
+		// an empty buffer there is no underflow. Raised there, 0x0100
+		// latched for good once more (gate 1, 2026-11-03 ~19:50).
+		if (m->und_armed && m->dry_ticks >= 2 && !m->und_reported) {
 			m->und_reported = true;
 			cl_raise(m, CLI_UND);
 			logf(m, "FMV CL450 underflow: the bitstream buffer has run dry");
@@ -602,7 +617,12 @@ static void cl_advance(fmv_model *m, int32_t us)
 		cl_drain_cmem(m);
 		if (m->cl_state != ST_IDLE && m->cl_state != ST_SETUP) {
 			cl_publish_fullness(m, false);
-			if (FMV_CL_BUFFER_BYTES - cl_fill(m) > m->threshold)
+			// RDY: in NewPacket mode, the buffer has fallen below the
+			// SetThreshold level, i.e. it is running low. WinUAE (the oracle)
+			// has it so. The first version raised it while *free* space was
+			// above the threshold, and with no NewPacket yet, so it fired
+			// the moment PLAY-SETUP ended, before any data.
+			if (m->np_mode && cl_fill(m) < m->threshold)
 				cl_raise(m, CLI_RDY);
 		}
 		cl_try_post(m);
@@ -1065,6 +1085,8 @@ void fmv_model_reset(fmv_model *m)
 	m->disp_us = 512;
 	m->und_reported = false;
 	m->dry_ticks = 0;
+	m->und_armed = false;
+	m->np_mode = false;
 	m->pictures = 0;
 	m->last_fullness = 0xFFFF;
 	m->cflevel = false;

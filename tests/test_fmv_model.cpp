@@ -365,6 +365,12 @@ static void test_no_underflow_while_streaming()
 	f.write(CL + CL_HOST_CONTROL, 0x0081);
 	cl_command(f, CLC_SET_INT_MASK, CLI_UND | CLI_PIC_V | CLI_RDY | 0x0801);
 	cl_command(f, CLC_PLAY);
+	// Gate 1, 2026-11-03 ~19:50: at Play the buffer is empty, and this ROM
+	// sends its first NewPacket only after it has serviced Play's
+	// interrupt. An empty buffer before any data is no underflow.
+	fmv_model_advance(f.model, 200000);           // five picture periods, no data
+	check(!logged(f, "underflow"), "no UND at Play, before any data has arrived");
+	check(!f.cl_int(), "no INT at all before data flows");
 	std::vector<uint8_t> es = video_es(10, 1000);
 	cl_send(f, es, 0, 400);                       // sequence header, half a picture
 	fmv_model_advance(f.model, 200000);           // five picture periods
@@ -376,6 +382,36 @@ static void test_no_underflow_while_streaming()
 	fmv_model_get_state(f.model, &st);
 	check(st.cl_pictures > 0, "pictures decode once the data is in");
 	check(!logged(f, "underflow"), "and still no UND while data keeps coming");
+	fmv_model_free(f.model);
+}
+
+static void test_rdy()
+{
+	// RDY: in NewPacket mode, when the buffer has fallen below the
+	// SetThreshold level (WinUAE, the oracle). Not before any NewPacket,
+	// and not while the buffer is above the threshold.
+	fpga f;
+	attach(f);
+	cl_boot(f);
+	fmv_model_advance(f.model, 3000);
+	f.write(CL + CL_HOST_CONTROL, 0x0081);
+	cl_command(f, CLC_SET_THRESHOLD, 0x0800);      // 2048 bytes
+	cl_command(f, CLC_SET_INT_MASK, CLI_RDY);
+	cl_command(f, CLC_PLAY);
+	std::vector<uint8_t> es = video_es(30, 1000);
+	cl_send(f, es, 0, 4000);                       // above the threshold
+	fmv_model_advance(f.model, 3000);
+	check(!f.cl_int(), "no RDY without a NewPacket, even in PLAY");
+	cl_command(f, CLC_NEW_PACKET, 0x0400);
+	fmv_model_advance(f.model, 3000);
+	fmv_model_state st;
+	fmv_model_get_state(f.model, &st);
+	check(st.cl_buffer_bytes >= 2048, "buffer above the threshold");
+	check(!f.cl_int(), "no RDY while the buffer is above the threshold");
+	// Decoded down to the last picture (about 1000 bytes, still incomplete)
+	fmv_model_advance(f.model, 400000);
+	check(f.cl_int() && (hmem_read(f, HMEM_INT_STATUS) & CLI_RDY),
+	      "RDY once the buffer has run below the threshold");
 	fmv_model_free(f.model);
 }
 
@@ -591,6 +627,7 @@ int main()
 	test_play_and_interrupts();
 	test_cmem_in_idle();
 	test_no_underflow_while_streaming();
+	test_rdy();
 	test_activity();
 	test_byte_swap();
 	test_l64111();
