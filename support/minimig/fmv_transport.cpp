@@ -427,10 +427,31 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 			const uint16_t *z = y + 8;
 			if (n - i >= 30 && z[0] == 0xA5F7) {
 				uint16_t en = z[1], rq = z[2] & 0x7FFF;
-				snprintf(out + used, len - used,
+				used += snprintf(out + used, len - used,
 				         "; Amiga: INTENA %04x INTREQ %04x (PORTS enabled %u, master %u, "
 				         "requested %u), Akiko IRQ %u",
 				         en, rq, (en >> 3) & 1, (en >> 14) & 1, (rq >> 3) & 1, (z[2] >> 15) & 1);
+				// The 68k's PC, halt flag and a ring of four PCs about 1.15 ms
+				// apart, oldest first (AmigaCD_MiSTer ae9912f)
+				if (n - i >= 41) {
+					auto pc = [&](int k) { return (uint32_t)z[k] | (uint32_t)z[k + 1] << 16; };
+					auto region = [](uint32_t a) -> const char * {
+						a &= 0xFFFFFF;
+						if (a < 0x200000) return "chip RAM";
+						if (a < 0x240000) return "FMV ROM";
+						if (a >= 0x280000 && a < 0x300000) return "FMV RAM";
+						if (a >= 0xE00000 && a < 0xE80000) return "ext ROM";
+						if (a >= 0xF80000) return "Kickstart";
+						return "other";
+					};
+					uint32_t now = pc(3);
+					used += snprintf(out + used, len - used, "; 68k: PC %06x (%s), halted %u, ring",
+					                 now & 0xFFFFFF, region(now), (z[5] >> 15) & 1);
+					for (int r = 0; r < 4; r++) {
+						uint32_t a = pc(6 + 2 * r);
+						used += snprintf(out + used, len - used, " %06x", a & 0xFFFFFF);
+					}
+				}
 			}
 		}
 	}

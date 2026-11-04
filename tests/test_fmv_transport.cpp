@@ -443,6 +443,22 @@ static void test_diag_format()
 	check(fmv_diag_format(wz, 34, big, sizeof big) == 1, "diag z: decoded");
 	check(strstr(big, "Amiga: INTENA 4008 INTREQ 0008 (PORTS enabled 1, master 1, requested 1), Akiko IRQ 1") != 0,
 	      "diag z: INTENA, INTREQ, PORTS and Akiko IRQ");
+	check(strstr(big, "68k:") == 0, "diag z: no PC claimed from a short block");
+	// With the PC block (run v19's question): PC in the FMV ROM, not halted,
+	// a ring of four
+	uint16_t wp[44];
+	memset(wp, 0, sizeof wp);
+	memcpy(wp, wz, sizeof wz);
+	uint16_t pcb[11] = { 0x1234, 0x0020, 0x0000,               // PC 0x201234, halt word
+	                     0x0040, 0x00FC, 0x0042, 0x00FC,         // ring: fc0040, fc0042,
+	                     0x1234, 0x0020, 0x1236, 0x0020 };       //       201234, 201236
+	memcpy(wp + 31, pcb, sizeof pcb);
+	check(fmv_diag_format(wp, 44, big, sizeof big) == 1, "diag pc: decoded");
+	check(strstr(big, "68k: PC 201234 (FMV ROM), halted 0, ring fc0040 fc0042 201234 201236") != 0,
+	      "diag pc: PC, region, halt flag and ring in order");
+	wp[33] = 0x8000;
+	fmv_diag_format(wp, 44, big, sizeof big);
+	check(strstr(big, "halted 1") != 0, "diag pc: the halt flag");
 	check(fmv_diag_port_dead(wy, 31), "dead port: 4 commands, 0 beats, BUSY held (2026-11-02)");
 	wy[19 + 7] = 0;                                    // BUSY not held: the beats rule alone
 	check(fmv_diag_port_dead(wy, 31), "dead port: 4 commands, 0 beats, BUSY low (the =4 run)");
