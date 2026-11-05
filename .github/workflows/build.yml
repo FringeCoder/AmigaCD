@@ -169,13 +169,18 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
+          # The runner's apt mirror list (mirror+file:) starts with the Azure
+          # mirror; archive.ubuntu.com goes first, Azure stays as the fallback.
+          printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\nhttp://azure.archive.ubuntu.com/ubuntu/\tpriority:2\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           sudo apt-get update -q
           # qemu-user, not qemu-user-static: from Ubuntu 26.04 on the latter is
           # a virtual package apt will not pick. fmvbench is linked static, so
           # the plain qemu-arm runs it without an ARM sysroot.
           # The mirror, not the test, is what hung this step three times on
-          # 2026-11-05: 84 MB of ffmpeg's packages at tens of KB/s, one of
-          # them stalling and re-fetched twice, until the timeout. Retries
+          # 2026-11-05: 84 MB of ffmpeg's packages at tens of KB/s from the
+          # Azure mirror, one of them stalling and re-fetched twice, until the
+          # timeout; the same package then came at once from archive.ubuntu.com. Retries
           # with a per-request timeout re-fetch a stalled package instead of
           # waiting on it, and no recommends leaves out what fmvbench's check
           # never runs.
@@ -377,9 +382,16 @@ jobs:
       # display order; RGB565 within one LSB of BT.601; every picture and audio
       # frame counted. Falsified 2026-11-01 with ten mutations of fmvbench.c,
       # each failing the check that names it (docs/fmv-plan.md, phase 1).
+      # The same ffmpeg install as the qemu step, so the same mirror risk and
+      # the same timeout: a fourth run (2026-11-05, ffabbc0) sat here instead.
       - name: fmvbench decode (host)
+        timeout-minutes: 15
         run: |
           set -euo pipefail
+          # The runner's apt mirror list (mirror+file:) starts with the Azure
+          # mirror; archive.ubuntu.com goes first, Azure stays as the fallback.
+          printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\nhttp://azure.archive.ubuntu.com/ubuntu/\tpriority:2\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           sudo apt-get update -q
           # See the qemu step: retries and no recommends, for the same mirror.
           sudo apt-get install -y -q --no-install-recommends -o Acquire::http::Timeout=30 -o Acquire::Retries=5 ffmpeg
