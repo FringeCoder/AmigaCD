@@ -51,6 +51,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "hardware.h"
 #include "menu.h"
 #include "support/minimig/minimig_armcpu.h"
+#include "support/minimig/fmv.h"
 #include "user_io.h"
 #include "debug.h"
 #include "fpga_io.h"
@@ -628,8 +629,10 @@ static int minimig_ss_blocked()
 	// MMU registers and the rest of CACR in the state (see ss_supported in
 	// AmigaCD.sv). The 68000 (fx68k) and Zorro III fast RAM stay refused.
 	int cpu = minimig_config.cpu & 0x03;
-	// The ARM CPU's state lives on the ARM, where no save state reaches.
-	return (minimig_fast_z3(minimig_config.cpu) && fastram >= 4) || (cpu == 0) || armcpu_wanted();
+	// The ARM CPU's state lives on the ARM, where no save state reaches; so
+	// does the FMV module's, the MPEG decoders and the chip model in Main.
+	return (minimig_fast_z3(minimig_config.cpu) && fastram >= 4) || (cpu == 0) || armcpu_wanted() ||
+	       fmv_wanted();
 }
 
 // Ask the core for a save, from either menu.
@@ -833,9 +836,10 @@ int amigacd_ss_hotkey(int action)
 
 	if (minimig_ss_blocked())
 	{
-		// The same two conditions that grey the Settings rows out. There they
+		// The same conditions that grey the Settings rows out. There they
 		// are visible before the press; here there is nothing to grey.
-		Info("Save states need 020 and no Z3 RAM", 2500, 0, 0, 0, 1);
+		Info(fmv_wanted() ? "No save states with the FMV module on"
+		                  : "Save states need 020 and no Z3 RAM", 2500, 0, 0, 0, 1);
 		return 1;
 	}
 
@@ -1080,7 +1084,7 @@ static constexpr unsigned rowhint_rows(uint32_t mask)
 // shows the row after it the wrong text, or nothing, and neither says
 // anything is wrong.
 #define AMIGACD_MAIN_MENUMASK     0x1FFFu
-#define AMIGACD_SETTINGS_MENUMASK 0xFFFu
+#define AMIGACD_SETTINGS_MENUMASK 0x1FFFu
 #define AMIGACD_CONFIGS_MENUMASK  0x0Fu
 #define AMIGACD_ADV_MENUMASK_SNAC 0x7FFu
 #define AMIGACD_ADV_MENUMASK      0x1FFu
@@ -1341,7 +1345,7 @@ static void amigacd_video_back()
 	if (is_amigacd())
 	{
 		menustate = MENU_AMIGACD_SETTINGS1;
-		menusub = 10;                      // the Video & Audio row
+		menusub = 11;                      // the Video & Audio row
 	}
 	else
 	{
@@ -8564,9 +8568,10 @@ void HandleUI(void)
 				/* 6 Save     */ "Capture the machine into the selected slot. Ctrl+Alt+F1 does it without opening the menu, which is the point of it.",
 				/* 7 Restore  */ "Put the selected slot back. Ctrl+Alt+F2 does it without the menu. Refused when there is no disc or HDF to name the save after.",
 				/* 8 CD speed */ "Fast is the rate this core has always used. CD32 (2x) is what the real machine does: four times the loading, four times the margin.",
-				/* 9 Clear NVR*/ "Erase the CD32 saved games for the disc in the drive. Not a save state. Asks first, and the machine needs a reset to see it.",
-				/*10 Video/A  */ "The Amiga's own video and audio: PAL or NTSC, stereo mix, the LED filter, Paula output, and screen centring.",
-				/*11 back     */ "Back to the main page.",
+				/* 9 FMV      */ "The CD32 FMV cartridge, for Video CDs and the games with FMV intros. Takes effect at the next reset. Needs CD32FMV.rom; no save states while it is on.",
+				/*10 Clear NVR*/ "Erase the CD32 saved games for the disc in the drive. Not a save state. Asks first, and the machine needs a reset to see it.",
+				/*11 Video/A  */ "The Amiga's own video and audio: PAL or NTSC, stereo mix, the LED filter, Paula output, and screen centring.",
+				/*12 back     */ "Back to the main page.",
 			};
 			static_assert(sizeof(tips) / sizeof(tips[0]) == rowhint_rows(AMIGACD_SETTINGS_MENUMASK),
 				"AmigaCD settings page: one hint per selectable row");
@@ -8618,11 +8623,13 @@ void HandleUI(void)
 		OsdWrite(m++, s, menusub == 2, (minimig_config.cpu & 0x03) != 0x03 || armcpu_wanted());
 
 		// No blank between the CPU rows and the ROMs. Row budget: this page
-		// draws fifteen lines before Back on line 15 -- eleven selectable, the
-		// NVRAM status line, and three spacers. A fourth spacer put Video &
+		// draws fifteen lines before Back on line 15 -- twelve selectable, the
+		// NVRAM status line, and two spacers. A fourth spacer once put Video &
 		// Audio on line 15, where Back was drawn over it: the cursor still
 		// stopped there, on nothing, and SELECT opened the video page from a
-		// row nobody could see. Count the lines before adding one.
+		// row nobody could see. The FMV module row took the spacer that stood
+		// between the save state rows and CD speed. Count the lines before
+		// adding one.
 		strcpy(s, " Main ROM : ");
 		{
 			const char *root = getRootDir();
@@ -8678,8 +8685,8 @@ void HandleUI(void)
 		// How fast sectors reach the machine. Grouped with the NVRAM rows
 		// below rather than with the CPU rows above because it is about the
 		// drive, and greyed out on the A1200 profile, which has no drive at
-		// all -- same reasoning as the CD rows on the main page.
-		OsdWrite(m++, "", 0, 0);
+		// all -- same reasoning as the CD rows on the main page. No spacer
+		// above it any more: the FMV module row below took that line.
 		{
 			const int has_cd = (amigacd_system() != AMIGACD_SYS_A1200);
 			// Range-checked rather than trusted: this byte arrives from a file,
@@ -8690,6 +8697,24 @@ void HandleUI(void)
 			strcpy(s, " CD speed : ");
 			strcat(s, config_cd_speed_msg[spd]);
 			OsdWrite(m++, s, menusub == 8, !has_cd);
+		}
+
+		// The CD32 FMV cartridge (support/minimig/fmv.cpp). Here, not on
+		// Advanced: it was a real CD32 accessory, and Advanced is for what
+		// the machine never had. Beside CD speed because it is about the
+		// disc. Greyed off a CD32, without the ROM, and with the ARM CPU,
+		// which needs the same ARM core as the MPEG decoders. Off/On is the
+		// setting; the board appears at the next Amiga reset.
+		{
+			const int cd32 = amigacd_system() == AMIGACD_SYS_CD32;
+			const int rom  = fmv_rom_found();
+			const int arm  = fmv_blocked_by_armcpu();
+			strcpy(s, " FMV module : ");
+			if (!cd32)     strcat(s, "N/A (CD32 only)");
+			else if (arm)  strcat(s, "N/A (ARM CPU)");
+			else if (!rom) strcat(s, "N/A (no CD32FMV.rom)");
+			else           strcat(s, fmv_module_on() ? "On" : "Off");
+			OsdWrite(m++, s, menusub == 9, !cd32 || !rom || arm);
 		}
 
 		// Per-game NVRAM. A CD32 save lives in a file named after a hash of
@@ -8722,7 +8747,7 @@ void HandleUI(void)
 			// Greyed rather than hidden when there is nothing to clear: the row
 			// keeps its position, and a row that is there and dim says "not
 			// now" where a row that vanishes says "you imagined it".
-			OsdWrite(m++, " Clear NVRAM", menusub == 9, !have_nvr);
+			OsdWrite(m++, " Clear NVRAM", menusub == 10, !have_nvr);
 		}
 
 		// The Amiga's own video and audio: TV standard, stereo mix, the LED
@@ -8740,10 +8765,10 @@ void HandleUI(void)
 		// patched by deriving it from the system profile rather than by giving
 		// the OSD a way in (minimig_config.cpp, "never shows that row"). This
 		// is the way in.
-		OsdWrite(m++, " Video & Audio            \x16", menusub == 10, 0);
+		OsdWrite(m++, " Video & Audio            \x16", menusub == 11, 0);
 
 		for (int i = m; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 11, 0);
+		OsdWrite(OsdGetSize() - 1, STD_BACK, menusub == 12, 0);
 
 		menustate = MENU_AMIGACD_SETTINGS2;
 		break;
@@ -8795,7 +8820,9 @@ void HandleUI(void)
 				// the 68000 machines it is the only other step. Its flag sits
 				// beside the CPU byte, which keeps the machine's CPU for when
 				// it is switched off.
-				const bool arm_ok = armcpu_core_has_proxy();
+				// Not with the FMV module on: its MPEG decoders run on the
+				// same ARM core (fmv.cpp).
+				const bool arm_ok = armcpu_core_has_proxy() && !fmv_module_on();
 				if (minimig_config.armcpu == 1)
 				{
 					minimig_config.armcpu = 0;
@@ -8951,7 +8978,20 @@ void HandleUI(void)
 				}
 				menustate = MENU_AMIGACD_SETTINGS1;
 			}
-			else if (menusub == 9 && select) // Clear NVRAM
+			else if (menusub == 9) // FMV module: Off <-> On
+			{
+				// Two values, so SELECT and -/+ all toggle. Re-checked rather
+				// than trusting the grey: a greyed row still takes the keys.
+				if (amigacd_system() == AMIGACD_SYS_CD32 && fmv_rom_found() &&
+				    !fmv_blocked_by_armcpu())
+				{
+					minimig_config.fmv_module = fmv_module_on() ? 0 : 1;
+					Info(fmv_module_on() ? "FMV module on: reset the Amiga"
+					                     : "FMV module off", 2000);
+				}
+				menustate = MENU_AMIGACD_SETTINGS1;
+			}
+			else if (menusub == 10 && select) // Clear NVRAM
 			{
 				// Confirmed, because this deletes somebody's saves. The row is
 				// greyed when there is nothing to clear, but a greyed row still
@@ -8962,12 +9002,12 @@ void HandleUI(void)
 					menustate = MENU_AMIGACD_NVRCLEAR1;
 				}
 			}
-			else if (menusub == 10 && select) // Video & Audio
+			else if (menusub == 11 && select) // Video & Audio
 			{
 				menustate = MENU_MINIMIG_VIDEO1;
 				menusub = 0;
 			}
-			else if (menusub == 11 && select) // Back
+			else if (menusub == 12 && select) // Back
 			{
 				menustate = MENU_AMIGACD_MAIN1;
 				menusub = 7;   // Settings row -- 5 was Hard Disk 1, see above
@@ -9354,7 +9394,7 @@ void HandleUI(void)
 				// result -- it is the result: the disc has no save, which is
 				// the state a disc that was never saved on is in.
 				menustate = MENU_AMIGACD_SETTINGS1;
-				menusub = 9;                 // the Clear NVRAM row
+				menusub = 10;                // the Clear NVRAM row
 			}
 			else
 			{
@@ -9369,7 +9409,7 @@ void HandleUI(void)
 		else if (select || menu || back || left)
 		{
 			menustate = MENU_AMIGACD_SETTINGS1;
-			menusub = 9;                 // the Clear NVRAM row
+			menusub = 10;                // the Clear NVRAM row
 		}
 		break;
 

@@ -816,14 +816,19 @@ static constexpr mglcfg_field mm_cfg_fields[] =
 	MMF("floppy0_path",      floppy_path[0],      MGLCFG_STR),
 	MMF("floppy1_path",      floppy_path[1],      MGLCFG_STR),
 	MMF("armcpu",            armcpu,              MGLCFG_U8),
+	MMF("fmv_module",        fmv_module,          MGLCFG_U32),
 };
 #undef MMHF
 #undef MMF
 static constexpr int mm_cfg_nfields = sizeof(mm_cfg_fields) / sizeof(mm_cfg_fields[0]);
 static_assert(sizeof(((mm_configTYPE *)0)->userport) == 4, "userport is written as a 32-bit value");
-// armcpu took the struct's last tail-padding byte; the size, which
-// minimig_cfg_load dispatches on, must not have moved
-static_assert(sizeof(mm_configTYPE) == 9332, "armcpu must fit in the tail padding");
+// armcpu took the struct's last tail-padding byte (9332); fmv_module was
+// then appended as a word, so no padding is left for the .mgl table to skip.
+// The size is what minimig_cfg_load dispatches on: a change here needs a
+// branch there for the old size.
+static_assert(sizeof(mm_configTYPE) == 9336, "fmv_module appended as a word, no padding");
+static_assert(offsetof(mm_configTYPE, fmv_module) == MM_CONFIG_SIZE_NO_FMV,
+	"the 9332-byte layout must be a prefix of this one");
 
 // "All settings" has to stay true when the struct grows. The table must walk
 // the struct in order, without overlaps, from the end of id/version to the
@@ -1427,7 +1432,26 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		// the migrations below reaches it: without this a migrated config
 		// would mount whatever the previous load left there.
 		memset(minimig_config.floppy_path, 0, sizeof(minimig_config.floppy_path));
-		if (size == MM_CONFIG_SIZE_NO_FLOPPY_PATH)
+		// Likewise fmv_module: only the current layout carries it.
+		minimig_config.fmv_module = 0;
+		if (size == MM_CONFIG_SIZE_NO_FMV)
+		{
+			// The layout before fmv_module: a prefix of this one. The module
+			// off, which is what such a config meant.
+			printf("Pre FMV-module configuration file, migrating.\n");
+			static mm_configTYPE tmpconf;
+			memset((void*)&tmpconf, 0, sizeof(tmpconf));
+			if (FileLoadConfig(filename, &tmpconf, MM_CONFIG_SIZE_NO_FMV)
+			    && !strncmp(tmpconf.id, config_id, sizeof(minimig_config.id))
+			    && tmpconf.floppy.drives <= 4)
+			{
+				tmpconf.fmv_module = 0;
+				memcpy((void*)&minimig_config, (void*)&tmpconf, sizeof(minimig_config));
+				result = 1;
+			}
+			else BootPrint("Cannot migrate configuration file\n");
+		}
+		else if (size == MM_CONFIG_SIZE_NO_FLOPPY_PATH)
 		{
 			// The layout before floppy_path: a prefix of this one, one byte
 			// short of it (the old tail padding, where floppy_path now
@@ -1697,6 +1721,7 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
 		minimig_config.cd_speed       = AMIGACD_CD_SPEED_DEFAULT;
 		minimig_config.cd_audio_buffer = AMIGACD_CD_AUDIO_BUFFER_DEFAULT;
+		minimig_config.fmv_module = 0;
 		BootPrintEx(">>> No config found. Using defaults. <<<");
 
 		// AmigaCD console variant: no saved CFG -> start as a CD32 with its

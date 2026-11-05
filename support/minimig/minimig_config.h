@@ -201,11 +201,24 @@ typedef struct
 	// files load through the current-layout branch with a zero here: off.
 	// Read as == 1, never as truthy: it is a byte from a file.
 	uint8_t         armcpu;
+
+	// The CD32 FMV module (support/minimig/fmv.cpp, docs/fmv-plan.md phase
+	// 5): 1 puts the cartridge in the CD32's expansion slot, from the next
+	// Amiga reset. Settings page row "FMV module"; .mgl key fmv_module.
+	//
+	// Appended, so the size changed (9332 -> 9336) and minimig_cfg_load has a
+	// branch for the old size: a prefix of this layout, read with this at 0.
+	// 32 bits rather than 8 because the struct had no padding left, and a
+	// byte would have left three that the .mgl table must not skip. Read
+	// through fmv_module_on(), as == 1: it is a word from a file.
+	uint32_t        fmv_module;
 } mm_configTYPE;
 
 // The layout before floppy_path was appended. Every config written before
 // 2026-10-13 is this size.
 #define MM_CONFIG_SIZE_NO_FLOPPY_PATH 7284
+// The layout before fmv_module was appended (2026-11-05).
+#define MM_CONFIG_SIZE_NO_FMV 9332
 
 // Seconds. Kept here because the menu, the config loader and akiko all need it.
 //
@@ -332,6 +345,11 @@ enum mm_cdAudioBuffer
 
 
 extern mm_configTYPE minimig_config;
+
+static inline int fmv_module_on(void)
+{
+	return minimig_config.fmv_module == 1;
+}
 
 static inline int amigacd_cd_audio_buffer(void)
 {

@@ -352,6 +352,39 @@ core.
 
 ---
 
+## 5. The CD32 FMV module
+
+Needs `CD32FMV.rom` (or `fmv.rom`) beside the Kickstart, in `games/Amiga`,
+or in the root folder, and a disc with MPEG on it: Cannon Fodder for its
+intro, a Video CD for the player. What each check is about is in
+[`fmv-plan.md`](fmv-plan.md); runs v21-v24 there are the record so far.
+`DEBUG=2` under `[AmigaCD]` in `MiSTer.ini` puts the `FMV ...` lines in
+`/tmp/debug.txt`. Each check is ✅ where a run has passed it, ⏳ where none
+has.
+
+| Check | Pass | Watch for |
+|---|---|---|
+| Settings page, CD32, no ROM on the card | `FMV module : N/A (no CD32FMV.rom)`, greyed | |
+| ... on a CDTV, A500 or A1200 | `N/A (CD32 only)`, greyed | |
+| ... with the ARM CPU on (test core) | `N/A (ARM CPU)`, greyed; and the CPU row skips ARM while the module is on | ⏳ |
+| ROM present, the row toggled On | `FMV module on: reset the Amiga`; after the reset `FMV board alive` in the log | ⏳ from the row; ✅ with `AMIGACD_FMV=1` (v21-v24) |
+| Save state rows with the module on | Greyed; `Ctrl+Alt+F1` toasts `No save states with the FMV module on` | ⏳ |
+| `.mgl` written with the module on | Carries `fmv_module` `1`; launching it brings the module up | ⏳ |
+| A config saved before this build | Loads, the module Off (`Pre FMV-module configuration file, migrating.` in the log) | ⏳ |
+| Cannon Fodder, the first reset | The intro streams to its end and the game loads | ✅ v21-v24 |
+| ... warm resets mid-stream | The intro starts again each time | ✅ v22-v24 |
+| ... the picture | Right colours, aspect and content, centred with no ini offsets | ✅ v23, v24, HDMI PAL |
+| ... in motion | No tearing | ⏳ needs watching, not stills |
+| ... the sound | Clean, right level and pitch, in step with the picture | ⏳ needs listening; v24's counters only say it reached the FIFO |
+| ... `FMV audio:` and `FMV decoder:` lines | `missing` and `late` near 0, 0 dropped | ⏳ the split counters are new |
+| Analog out, NTSC | Picture placed and keyed as on HDMI PAL | ⏳ |
+| A Video CD | The FMV ROM's player runs a track to its end (gate 2) | ⏳ |
+| ... 60 minutes of it | Lips in sync, under one frame of drift, CDDA underrun and starve counters 0 | ⏳ |
+| CD audio after FMV | A game's CD music plays after its FMV intro | ⏳ |
+| The module Off | The machine boots exactly as without it: no board, Zorro II RAM back | ⏳ |
+
+---
+
 ## Still open, not from this batch
 
 These predate #52 and are unrelated to it: `timing-probe.sh diagnose`,

@@ -7,7 +7,8 @@ run v21; repeat boots and warm resets 2026-11-05, run v22); gate 2 pending.
 Phase 3: the picture works on hardware (Cannon Fodder, HDMI PAL, run v23,
 2026-11-05); analog out, NTSC, a Video CD and tearing in motion not yet seen.
 Phase 4 (sound) runs on hardware (run v24: every frame played reached the
-FIFO), not yet heard. Phase 3 and 4 run on a closed-timing build.
+FIFO), not yet heard. Phase 3 and 4 run on a closed-timing build. Phase 5
+(OSD row, save-state and ARM CPU refusals, docs) built, not yet run.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -831,6 +832,31 @@ tearing in motion, other discs.
 
 **Gate:** the hardware test plan rows pass on the test machine, from CHD and
 from Real CD.
+
+### Status, 2026-11-05: built, not yet run on hardware
+
+- **The OSD row** is on the Settings page, not Advanced: the cartridge was a
+  real CD32 accessory, and Advanced is for what the machine never had. It
+  sits beside CD speed, in the line the spacer above CD speed had (the page
+  has no line to spare). `FMV module : Off/On`, or greyed with `N/A (CD32
+  only)`, `N/A (ARM CPU)` or `N/A (no CD32FMV.rom)`. The board appears at
+  the next Amiga reset, and the toggle says so.
+- **The setting** is `minimig_config.fmv_module`, appended to the config,
+  which grows 9332 -> 9336 bytes. A 9332-byte file loads through its own
+  branch with the module off. The `.mgl` key is `fmv_module`.
+  `AMIGACD_FMV=1` in `MiSTer.ini` still turns it on (the test harness), and
+  2-4 keep the diag modes.
+- **Save states are refused** while the module is wanted
+  (`minimig_ss_blocked`): the rows grey out and the hotkeys say why.
+- **The ARM CPU**: the CPU row skips the ARM step while the module is on,
+  the module's row greys while the ARM CPU is on, and Main does not start
+  the board if a config brings both.
+- **Docs**: [`hardware-test-plan.md`](hardware-test-plan.md) section 5, and
+  the README row. The release notes are generated from the commits.
+
+Not tested on the host: the config loader (it needs MiSTer headers, as
+every rung of it does); static_asserts pin the new size and that the old
+layout is a prefix of it.
 
 ## Risks, ranked
 

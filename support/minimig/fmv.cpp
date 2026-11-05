@@ -27,6 +27,8 @@
 #include "akiko_cd32.h"
 #include "minimig_config.h"
 #include "minimig_crc32.h"
+#include "minimig_armcpu.h"
+#include "minimig_profile.h"
 
 static fmv_xport *xport;
 static volatile uint8_t *window;
@@ -209,7 +211,12 @@ static void fmv_log(void *, const char *line)
 // Looked for beside the Kickstart this config actually loaded (CD32.rom may
 // live in games/AmigaCD32 while HomeDir() is games/Amiga, as on the owner's
 // card, 2026-11-02), then in HomeDir(), then in the root folder.
-static uint8_t *load_rom(int *len)
+// Where the ROM is, by the names it goes by: WinUAE's "CD32FMV", and the
+// plain one. Looked for beside the Kickstart this config actually loaded
+// (CD32.rom may live in games/AmigaCD32 while HomeDir() is games/Amiga, as
+// on the owner's card, 2026-11-02), then in HomeDir(), then in the root
+// folder. 0 if none; the path in out.
+static int find_rom(char *out, size_t outsz, int quiet)
 {
 	static const char *names[] = { "CD32FMV.rom", "fmv.rom" };
 	char dirs[3][1024];
@@ -222,31 +229,68 @@ static uint8_t *load_rom(int *len)
 	}
 	snprintf(dirs[nd++], sizeof dirs[0], "%s", HomeDir());
 	dirs[nd++][0] = 0;
-	char path[1100];
 	for (int d = 0; d < nd; d++) {
 		for (const char *n : names) {
 			if (dirs[d][0])
-				snprintf(path, sizeof path, "%s/%s", dirs[d], n);
+				snprintf(out, outsz, "%s/%s", dirs[d], n);
 			else
-				snprintf(path, sizeof path, "%s", n);
-			int size = FileLoad(path, 0, 0);
-			if (size <= 0)
-				continue;
-			uint8_t *buf = (uint8_t *)malloc(size);
-			if (!buf)
-				return 0;
-			if (FileLoad(path, buf, size) != size) {
-				free(buf);
-				continue;
-			}
-			printf("FMV ROM file: %s\n", path);
-			*len = size;
-			return buf;
+				snprintf(out, outsz, "%s", n);
+			if (FileLoad(out, 0, 0) > 0)
+				return 1;
 		}
 	}
-	printf("FMV: looked for CD32FMV.rom / fmv.rom in %s%s%s and the root folder\n",
-	       nd > 2 ? dirs[0] : "", nd > 2 ? ", " : "", HomeDir());
+	if (!quiet)
+		printf("FMV: looked for CD32FMV.rom / fmv.rom in %s%s%s and the root folder\n",
+		       nd > 2 ? dirs[0] : "", nd > 2 ? ", " : "", HomeDir());
 	return 0;
+}
+
+static uint8_t *load_rom(int *len)
+{
+	char path[1100];
+	if (!find_rom(path, sizeof path, 0))
+		return 0;
+	int size = FileLoad(path, 0, 0);
+	uint8_t *buf = (uint8_t *)malloc(size);
+	if (!buf)
+		return 0;
+	if (FileLoad(path, buf, size) != size) {
+		free(buf);
+		return 0;
+	}
+	printf("FMV ROM file: %s\n", path);
+	*len = size;
+	return buf;
+}
+
+int fmv_rom_found(void)
+{
+	// The OSD asks on every redraw; the search is a few stat()s, so keep the
+	// answer for a second, and against the Kickstart path it was made for.
+	static char ks[sizeof minimig_config.kickstart];
+	static uint64_t at;
+	static int found;
+	uint64_t t = now_us();
+	if (at && t - at < 1000000 && !strcmp(ks, minimig_config.kickstart))
+		return found;
+	char path[1100];
+	found = find_rom(path, sizeof path, 1);
+	snprintf(ks, sizeof ks, "%s", minimig_config.kickstart);
+	at = t;
+	return found;
+}
+
+int fmv_blocked_by_armcpu(void)
+{
+	return armcpu_wanted();
+}
+
+int fmv_wanted(void)
+{
+	// The OSD row, or AMIGACD_FMV=1 in MiSTer.ini, which the test harness
+	// uses. A CD32 only: the cartridge is the CD32's.
+	return (fmv_module_on() || cfg.amigacd_fmv == 1) &&
+	       amigacd_system() == AMIGACD_SYS_CD32 && !fmv_blocked_by_armcpu();
 }
 
 static void diag_print();
@@ -257,7 +301,7 @@ static void start()
 	int len = 0;
 	uint8_t *rom = load_rom(&len);
 	if (!rom) {
-		printf("FMV: AMIGACD_FMV=1 but no CD32FMV.rom or fmv.rom found; the board stays off\n");
+		printf("FMV: the module is on but no CD32FMV.rom or fmv.rom was found; the board stays off\n");
 		return;
 	}
 	// status[64] stays clear until the session is set up: while it is, the
@@ -405,13 +449,21 @@ static void diag_only_poll()
 
 void fmv_poll(void)
 {
-	if (!is_minimig() || !cfg.amigacd_fmv) {
-		if (xport)
-			fmv_shutdown();
+	if (is_minimig() && cfg.amigacd_fmv >= 2) {
+		diag_only_poll();
 		return;
 	}
-	if (cfg.amigacd_fmv >= 2) {
-		diag_only_poll();
+	if (!is_minimig() || !fmv_wanted()) {
+		static int said_arm;
+		if (is_minimig() && (fmv_module_on() || cfg.amigacd_fmv == 1) &&
+		    fmv_blocked_by_armcpu() && !said_arm) {
+			said_arm = 1;
+			printf("FMV: the module is on, but so is the ARM CPU, and both use ARM core 0; "
+			       "the board stays off\n");
+		}
+		if (xport)
+			fmv_shutdown();
+		tried = 0;          // switched on again (the ROM added, say): try again
 		return;
 	}
 	if (!xport) {

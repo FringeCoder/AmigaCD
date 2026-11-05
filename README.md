@@ -119,7 +119,7 @@ See "Still to do" in [`docs/integration-plan.md`](docs/integration-plan.md).
 | Comparing the core against real hardware | [`docs/vamigats.md`](docs/vamigats.md), [`docs/timing-probe.md`](docs/timing-probe.md) |
 | What still needs testing on a machine | [`docs/hardware-test-plan.md`](docs/hardware-test-plan.md) |
 | Open items that are not hardware verification | [`docs/state-todo.md`](docs/state-todo.md) |
-| The CD32 FMV module (plan, not started) | [`docs/fmv-plan.md`](docs/fmv-plan.md) |
+| The CD32 FMV module: picture and sound in, Video CD not yet tested | [`docs/fmv-plan.md`](docs/fmv-plan.md) |
 
 ## Getting online over serial (PPP)
 
