@@ -242,6 +242,11 @@ static uint32_t cd_sec_dbg_n        = 0;
 // comparing the two says whether the guest was handed a completion for a
 // sector that was never shipped.
 static uint32_t cd_sec_pushed       = 0;
+// The FPGA counter as the arm found it. The counter resets on the guest's
+// CDFLAG_ENABLE 0->1, not on PLAY DATA, so until the guest re-enables DMA it
+// still holds the previous read's count; akiko_ctr_verdict() needs this to
+// tell that from a counter that really ran ahead.
+static uint16_t cd_sec_ctr_at_arm   = 0;
 static uint32_t cd_sec_last_ms      = 0;
 static bool     cd_stall_reported   = false;
 // When we started declining sector requests because of a pause, and whether
@@ -1310,10 +1315,18 @@ static void cmd_pause(const uint8_t *cmd)
 	// cost more than the condition it reported. cd_sec_pushed already counts
 	// every sector of the current read exactly, so one line here at the moment
 	// of the pause gives the true figure for nothing.
+	//
+	// Delivered means staged. The core has one staging buffer and the guest
+	// usually pauses with it full, so fpga_ctr is one less: that sector is
+	// base+fpga_ctr, the next one the read wants, and is dropped at the next
+	// ENABLE rise. The verdict says so rather than leaving it to be re-derived.
 	if (cd_data_lba_base != -1) {
+		const uint16_t ctr = akiko_read_sec_counter();
 		akiko_diag("[akiko] PAUSE during a data read: %u sectors delivered "
-		           "(base=%d, fpga_ctr=%u)",
-		           cd_sec_pushed, cd_data_lba_base, akiko_read_sec_counter());
+		           "(base=%d, fpga_ctr=%u)%s",
+		           cd_sec_pushed, cd_data_lba_base, ctr,
+		           akiko_ctr_verdict_note(akiko_ctr_verdict(cd_sec_pushed, ctr,
+		                                                    cd_sec_ctr_at_arm)));
 	}
 }
 
@@ -1576,9 +1589,10 @@ static void cmd_multi(const uint8_t *cmd)
 			// prev= is the read that just ended, counted exactly rather than
 			// inferred from a trace capped at 24 lines. Six reads make up a
 			// boot, so this one field turns each round into a sector profile.
+			cd_sec_ctr_at_arm = akiko_read_sec_counter();
 			akiko_diag("[akiko] PLAY DATA arm: start_lba=%d (cmd7=0x%02x) "
 			           "fpga_ctr@arm=%u prev=%u",
-			           (int32_t)s_lba, cmd[7], akiko_read_sec_counter(),
+			           (int32_t)s_lba, cmd[7], cd_sec_ctr_at_arm,
 			           cd_sec_pushed);
 			cd_sec_pushed     = 0;
 			cd_sec_last_ms    = (uint32_t)GetTimer(0);
@@ -3454,12 +3468,17 @@ void akiko_cd32_poll(void)
 		uint32_t idle = (uint32_t)GetTimer(0) - cd_sec_last_ms;
 		if (idle >= 1500) {
 			cd_stall_reported = true;
+			// `ctr > pushed` used to be flagged as ahead outright. pushed resets
+			// at PLAY DATA and the counter at the guest's ENABLE rise, which can
+			// come seconds later: Cannon Fodder's post-FMV load printed twelve
+			// "pushed=0 fpga_ctr=11" lines that were only the previous read's
+			// count, and loaded. The verdict keeps the flag for a counter that
+			// moved past what this read pushed (akiko_pace.h).
 			uint16_t ctr = akiko_read_sec_counter();
 			akiko_diag("[akiko] STALL %u ms: base=%d pushed=%u fpga_ctr=%u%s",
 			           idle, cd_data_lba_base, cd_sec_pushed, ctr,
-			           (ctr > cd_sec_pushed)
-			             ? "  <-- COUNTER AHEAD OF SECTORS PUSHED"
-			             : "");
+			           akiko_ctr_verdict_note(akiko_ctr_verdict(cd_sec_pushed, ctr,
+			                                                    cd_sec_ctr_at_arm)));
 		}
 	}
 

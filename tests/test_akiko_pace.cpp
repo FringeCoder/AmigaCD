@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "../support/minimig/akiko_pace.h"
 
@@ -173,6 +174,72 @@ int main(void)
 		// A disc whose span we do not know yet must not come out free.
 		check_i64("no span means assume the worst",
 		          akiko_seek_us(0, 25622, 0), AKIKO_SEEK_FULL_US);
+	}
+
+	// ------------------------------------- the counter against the pushes
+	// akiko_ctr_verdict() names what the FPGA's cdrom_sector_counter says
+	// about the current read, for the STALL and PAUSE lines. Two clocks:
+	// `pushed` counts sectors the Main STAGED since its PLAY DATA arm, the
+	// counter counts sectors the core SHIPPED since the guest's last
+	// CDFLAG_ENABLE 0->1 (akiko.v cfg_high, PBX_FIN). They reset on different
+	// events, so not every mismatch is a fault.
+	{
+		// Every staged sector has shipped.
+		check("in step",        akiko_ctr_verdict(12, 12, 0), AKIKO_CTR_IN_STEP);
+		check("nothing yet",    akiko_ctr_verdict(0, 0, 0),   AKIKO_CTR_IN_STEP);
+		check("nothing yet, reset since a nonzero arm",
+		      akiko_ctr_verdict(0, 0, 11), AKIKO_CTR_IN_STEP);
+
+		// pushed = ctr + 1, the pattern every data-read PAUSE showed: the
+		// core's one staging buffer holds base+ctr, which is exactly the next
+		// LBA the read wants. Not an off-by-one on either side.
+		check("one staged",     akiko_ctr_verdict(12, 11, 0), AKIKO_CTR_STAGED);
+		check("one staged at the start", akiko_ctr_verdict(1, 0, 7), AKIKO_CTR_STAGED);
+
+		// Cannon Fodder, v21: STALL base=25802 pushed=0 fpga_ctr=11, right
+		// after an arm whose fpga_ctr@arm was the previous read's 11. The
+		// guest has sent PLAY DATA but not re-pulsed ENABLE, so the counter
+		// is the last read's and nothing has been asked for.
+		check("v21: previous read's counter, not ahead",
+		      akiko_ctr_verdict(0, 11, 11), AKIKO_CTR_NOT_RESET);
+
+		// The counter MOVED with nothing pushed for this read: the previous
+		// read's staged sector shipped into this one (no ENABLE rise to drop
+		// it). That is the real fault, and it must still be called ahead.
+		check("stale staged sector shipped into a new read",
+		      akiko_ctr_verdict(0, 12, 11), AKIKO_CTR_AHEAD);
+		check("ahead mid-read",  akiko_ctr_verdict(5, 7, 0),  AKIKO_CTR_AHEAD);
+		check("ahead by one mid-read", akiko_ctr_verdict(5, 6, 0), AKIKO_CTR_AHEAD);
+		// Equal to the arm value is only "not reset" while nothing is pushed.
+		check("arm value with pushes is ahead",
+		      akiko_ctr_verdict(3, 11, 11), AKIKO_CTR_AHEAD);
+
+		// Behind by more than the staged one: ENABLE re-pulsed mid-read, or
+		// pre-gap requests, which count as pushed and ship nothing.
+		check("behind",          akiko_ctr_verdict(34, 0, 0), AKIKO_CTR_BEHIND);
+
+		// The counter is 16 bits and wraps within one long ENABLE period
+		// (CF streams for minutes); pushed is 32. Compare modulo 2^16.
+		check("in step across the wrap",
+		      akiko_ctr_verdict(65536 + 3, 3, 0), AKIKO_CTR_IN_STEP);
+		check("staged across the wrap",
+		      akiko_ctr_verdict(65536, 65535, 0), AKIKO_CTR_STAGED);
+
+		// Only AHEAD is flagged; the others say what they are.
+		check_bool("ahead is the only flag",
+		           akiko_ctr_verdict_is_fault(AKIKO_CTR_AHEAD), true);
+		check_bool("not-reset is not a fault",
+		           akiko_ctr_verdict_is_fault(AKIKO_CTR_NOT_RESET), false);
+		check_bool("staged is not a fault",
+		           akiko_ctr_verdict_is_fault(AKIKO_CTR_STAGED), false);
+		check_bool("v21 note no longer says AHEAD",
+		           strstr(akiko_ctr_verdict_note(AKIKO_CTR_NOT_RESET), "AHEAD") != NULL,
+		           false);
+		check_bool("a real one still says AHEAD",
+		           strstr(akiko_ctr_verdict_note(AKIKO_CTR_AHEAD),
+		                  "COUNTER AHEAD OF SECTORS PUSHED") != NULL, true);
+		check_bool("in step adds nothing",
+		           akiko_ctr_verdict_note(AKIKO_CTR_IN_STEP)[0] == 0, true);
 	}
 
 	if (failures) { printf("%d FAILURES\n", failures); return 1; }

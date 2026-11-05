@@ -124,4 +124,41 @@ bool akiko_sec_should_serve(int32_t data_lba_base, int paused);
 // which is the caller's cue to say so rather than to keep quiet.
 bool akiko_pause_stuck(uint32_t since_ms, uint32_t now_ms, uint32_t limit_ms);
 
+
+// What the FPGA's sector counter says about the current data read.
+//
+// Two clocks that reset on different events. `pushed` counts sectors the Main
+// has STAGED since its PLAY DATA arm (cd_sec_pushed). The core's
+// cdrom_sector_counter counts sectors SHIPPED into PBX slots since the guest
+// last wrote CDFLAG_ENABLE 0->1 (akiko.v cfg_high; it advances at PBX_FIN).
+// PLAY DATA is a command-buffer frame and ENABLE a CONFIG register write, so a
+// guest that sends the command and enables DMA later leaves the previous
+// read's count in the counter for as long as it likes. `ctr_at_arm` is the
+// counter read at the arm, which is what tells that apart from a real excess.
+//
+//   IN_STEP    ctr == pushed: every staged sector has shipped.
+//   STAGED     ctr + 1 == pushed: one sector sits in the core's single staging
+//              buffer. It is base+ctr, the next LBA the read wants, and the
+//              next ENABLE rise drops it. Every data-read PAUSE shows this.
+//   NOT_RESET  pushed == 0 and ctr == ctr_at_arm != 0: the previous read's
+//              count, ENABLE not yet re-pulsed; nothing has been asked for.
+//   BEHIND     pushed > ctr + 1: ENABLE re-pulsed mid-read, or pre-gap
+//              requests, which count as pushed and ship nothing.
+//   AHEAD      anything else above pushed. With pushed == 0 that is the
+//              previous read's staged sector shipping into this one -- the
+//              wrong data, and base+ctr serving the wrong LBA after it.
+//
+// The counter is 16 bits and pushed 32, so they compare modulo 2^16.
+enum akiko_ctr_verdict_t {
+	AKIKO_CTR_IN_STEP = 0,
+	AKIKO_CTR_STAGED,
+	AKIKO_CTR_NOT_RESET,
+	AKIKO_CTR_BEHIND,
+	AKIKO_CTR_AHEAD,
+};
+int akiko_ctr_verdict(uint32_t pushed, uint16_t ctr, uint16_t ctr_at_arm);
+bool akiko_ctr_verdict_is_fault(int verdict);
+// Suffix for a log line, "" for IN_STEP. Only AHEAD keeps the old flag.
+const char *akiko_ctr_verdict_note(int verdict);
+
 #endif

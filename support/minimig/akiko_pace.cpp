@@ -71,3 +71,42 @@ int64_t akiko_seek_us(int32_t from_lba, int32_t to_lba, uint32_t span_lba)
 	if (us > AKIKO_SEEK_FULL_US) us = AKIKO_SEEK_FULL_US;   // dist beyond the span
 	return us;
 }
+
+int akiko_ctr_verdict(uint32_t pushed, uint16_t ctr, uint16_t ctr_at_arm)
+{
+	// Nothing pushed for this read and the counter where the arm found it:
+	// the guest has not re-enabled DMA yet. Checked first, because by the
+	// arithmetic alone it is "ahead". It cannot be reached the other way --
+	// reset to 0 and climbed back -- because with nothing pushed the counter
+	// can move at most once after a reset, and the reset drops the staged
+	// sector that would move it.
+	if (pushed == 0 && ctr != 0 && ctr == ctr_at_arm) return AKIKO_CTR_NOT_RESET;
+
+	const int16_t diff = (int16_t)(uint16_t)(ctr - (uint16_t)pushed);
+	if (diff == 0)  return AKIKO_CTR_IN_STEP;
+	if (diff == -1) return AKIKO_CTR_STAGED;
+	if (diff < -1)  return AKIKO_CTR_BEHIND;
+	return AKIKO_CTR_AHEAD;
+}
+
+bool akiko_ctr_verdict_is_fault(int verdict)
+{
+	return verdict == AKIKO_CTR_AHEAD;
+}
+
+const char *akiko_ctr_verdict_note(int verdict)
+{
+	switch (verdict) {
+	case AKIKO_CTR_STAGED:
+		return "  (one sector staged, not yet shipped: normal)";
+	case AKIKO_CTR_NOT_RESET:
+		return "  (counter is the previous read's: guest has not re-enabled "
+		       "DMA since PLAY DATA, nothing asked for yet: not a fault)";
+	case AKIKO_CTR_BEHIND:
+		return "  (counter behind: ENABLE re-pulsed mid-read, or pre-gap)";
+	case AKIKO_CTR_AHEAD:
+		return "  <-- COUNTER AHEAD OF SECTORS PUSHED";
+	default:
+		return "";
+	}
+}
