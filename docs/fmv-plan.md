@@ -884,6 +884,48 @@ Not tested on the host: the config loader (it needs MiSTer headers, as
 every rung of it does); static_asserts pin the new size and that the old
 layout is a prefix of it.
 
+### Run v25, 2026-11-05: the row, the migration and the save states pass
+
+Core seed 5 of fit run 42068080918 (closed), Main 83eb2d80, Cannon Fodder,
+HDMI, PAL, no `AMIGACD_FMV` in `MiSTer.ini`.
+
+- **The old config**: a 9332-byte file loaded through its branch, the row
+  Off.
+- **The row**: toggled On, the board came up (`FMV board alive`), and after
+  one OSD reset the intro streamed. No ini override.
+- **Save states**: during the intro the three rows were greyed, and
+  Ctrl+Alt+F1 was refused with `No save states during FMV playback`,
+  writing nothing. Once the intro had ended the rows were enabled, and the
+  same keys wrote a 3.6 MB state in the credits. Restoring it went back
+  from the title screen to the earlier credits screen. A restore refused
+  during playback was not tried.
+- **The module Off**: no FMV line in 45 s after a reset. Whether the boot
+  finished, and Zorro II RAM came back, was not checked.
+- **The log's fds**: the new log fd is close-on-exec. The 28 older ones
+  came from binaries earlier in the exec chain and go at a real restart.
+- **Audio**, with the split counters: 6245 played, **1 missing, 16 late**.
+  So the silent frames are the decoder being late, not the stream: about
+  4-5 early, then climbing through the second half. The audio thread now
+  runs at nice -10, ahead of the video decoder on core 0. That is not
+  yet measured.
+- **Polls blocked**: 3599, all FIFO full, none CD audio, 0 samples dropped.
+  That is back-pressure (Main offering a sector before the FIFO has room),
+  not a fault. Its size depends on how often Main polls, which is why it
+  is 5x v24's lumped count. The audio line now prints the FIFO's own
+  underrun and starve counts since the session began, the gate's measure,
+  in its place.
+- The picture as v24: 4142 pictures, 4140 shown, 2 late, 0 dropped.
+- **CI**: the fmvbench qemu step timed out (15 min) for the third time, with
+  the binary already uploaded. Its log, readable now that it times out,
+  shows the cause: apt fetching 84 MB of ffmpeg's packages from the Azure
+  Ubuntu mirror at tens of KB/s, one package stalling and re-fetched
+  twice. Now with `--no-install-recommends` and apt retries with a
+  per-request timeout, in both jobs that install ffmpeg.
+
+Not tested in v25: the sound heard, tearing, A/V sync, the `.mgl` rows, the
+row off a CD32 or with no ROM, the ARM CPU exclusion, a mismatched
+restore, CD audio after FMV, a Video CD, analog, NTSC, Real CD.
+
 ## Risks, ranked
 
 1. **Genlock fidelity.** Nobody seems to know the rule, WinUAE included. A

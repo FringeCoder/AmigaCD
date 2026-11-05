@@ -173,7 +173,13 @@ jobs:
           # qemu-user, not qemu-user-static: from Ubuntu 26.04 on the latter is
           # a virtual package apt will not pick. fmvbench is linked static, so
           # the plain qemu-arm runs it without an ARM sysroot.
-          sudo apt-get install -y -q ffmpeg qemu-user
+          # The mirror, not the test, is what hung this step three times on
+          # 2026-11-05: 84 MB of ffmpeg's packages at tens of KB/s, one of
+          # them stalling and re-fetched twice, until the timeout. Retries
+          # with a per-request timeout re-fetch a stalled package instead of
+          # waiting on it, and no recommends leaves out what fmvbench's check
+          # never runs.
+          sudo apt-get install -y -q --no-install-recommends -o Acquire::http::Timeout=30 -o Acquire::Retries=5 ffmpeg qemu-user
           qemu="$(command -v qemu-arm || command -v qemu-arm-static)"
           FMVBENCH_BIN=tools/fmvbench/fmvbench FMVBENCH_RUNNER="$qemu" \
           FMVBENCH_ACCELS="c arm" python3 tools/fmvbench/test_fmvbench.py
@@ -375,7 +381,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -q
-          sudo apt-get install -y -q ffmpeg
+          # See the qemu step: retries and no recommends, for the same mirror.
+          sudo apt-get install -y -q --no-install-recommends -o Acquire::http::Timeout=30 -o Acquire::Retries=5 ffmpeg
           make -C tools/fmvbench host
           python3 tools/fmvbench/test_fmvbench.py
 

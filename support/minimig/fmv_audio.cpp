@@ -7,6 +7,9 @@
 #include <pthread.h>
 #include <sched.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include <deque>
 #include <vector>
@@ -53,6 +56,14 @@ struct fmv_audio {
 static void *thread_main(void *arg)
 {
 	fmv_audio *a = (fmv_audio *)arg;
+	// Ahead of the video decoder, which shares core 0. Run v25 split v24's
+	// silent frames: 16 decoded too late against 1 not yet arrived, rising
+	// through the stream, so the decoder is what is late. A frame is ~2 ms
+	// of work and the stream has ~26 ms per frame, but a large picture on
+	// the same core can hold it past its tick. Audio is ~8 % of the core,
+	// so it cannot starve the pictures. Fails quietly where not permitted
+	// (the host tests run unprivileged); Main runs as root.
+	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -10);
 	kjmp2_context_t mp2;
 	kjmp2_init(&mp2);
 	std::vector<uint8_t> in;

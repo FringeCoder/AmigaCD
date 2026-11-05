@@ -2460,6 +2460,16 @@ static bool akiko_cdda_stats(cdda_stats_t *st)
 	return false;
 }
 
+bool akiko_cd32_cdda_counters(uint16_t *underruns, uint16_t *starves)
+{
+	cdda_stats_t st;
+	if (!akiko_cdda_stats(&st))
+		return false;
+	*underruns = st.underruns;
+	*starves = st.starves;
+	return true;
+}
+
 // Write the FIFO's control word. Refused unless the core has been seen to have
 // one -- see AKIKO_CDDA_CTL_ADDR for what an older core would do with it.
 static bool akiko_cdda_ctl(uint16_t w)

@@ -46,6 +46,8 @@ static fmv_window win_sent;
 static fmv_audio *audio;
 static uint32_t   audio_full;        // polls with a sector waiting and the FIFO full
 static uint32_t   audio_cdda;        // ... and CD audio owning the FIFO
+static uint16_t   cdda_under0, cdda_starve0;   // the FIFO's counters at session start
+static bool       cdda_base;
 
 static void aud_frame(void *, const uint8_t *p, size_t n, uint32_t rate)
 {
@@ -172,6 +174,7 @@ static void picture_start()
 	if (!audio)
 		printf("FMV: the audio thread did not start; no sound\n");
 	audio_full = audio_cdda = 0;
+	cdda_base = akiko_cd32_cdda_counters(&cdda_under0, &cdda_starve0);
 	fmv_model_set_audio_hooks(fmv_xport_model(xport), aud_frame, aud_tick, aud_flush);
 }
 
@@ -535,11 +538,20 @@ void fmv_poll(void)
 		if (audio) {
 			fmv_audio_stats as;
 			fmv_audio_get_stats(audio, &as);
+			// The FIFO's own underrun and starve counts since the session
+			// began are the phase 4 gate's measure (both 0). Polls blocked
+			// "FIFO full" are back-pressure, Main offering a sector before
+			// the FIFO has room, and say little on their own.
+			uint16_t u = 0, sv = 0;
+			char fifo[64] = "FIFO counters n/a";
+			if (cdda_base && akiko_cd32_cdda_counters(&u, &sv))
+				snprintf(fifo, sizeof fifo, "FIFO underruns %u, starves %u",
+				         (unsigned)(uint16_t)(u - cdda_under0), (unsigned)(uint16_t)(sv - cdda_starve0));
 			printf("FMV audio: %u frames in, %u decoded, %u bad, %u played (%u missing, %u late, "
-			       "%u muted, %u not 44.1 kHz), %u sectors to the CDDA FIFO, polls blocked "
+			       "%u muted, %u not 44.1 kHz), %u sectors to the CDDA FIFO, %s, polls blocked "
 			       "%u FIFO full / %u CD audio, %u samples dropped, %u flushes\n",
 			       as.frames_in, as.decoded, as.bad, as.ticks, as.missing, as.late, as.muted,
-			       as.wrong_rate, as.sectors, audio_full, audio_cdda, as.dropped, as.flushes);
+			       as.wrong_rate, as.sectors, fifo, audio_full, audio_cdda, as.dropped, as.flushes);
 		}
 		diag_print();
 	}
