@@ -52,6 +52,14 @@ struct fmv_cl_display {
 
 // Board-side placement not in the chip: where the core's beam counter sits
 // against the CL450's HSYNC/VSYNC reference, found on hardware.
+//
+// Measured 2026-11-05 (phase 3 run v23, Cannon Fodder, HDMI PAL): with the
+// manual's auto-centre (leftBorder 60, topBorder 18) the picture's left was
+// off screen and its top clipped. 93 display pixels and 3 lines more put
+// the 704-pixel window 23 px from the left and 24 from the right of the
+// MiSTer's visible area. Centred on the MiSTer's picture, not checked
+// against a real CD32 with the cartridge. The ini values add to these.
+enum { FMV_CALIB_HOFS = 93, FMV_CALIB_VOFS = 3 };
 struct fmv_calib {
 	int  hofs;                    // display pixels added to DISP_X
 	int  vofs;                    // lines added to DISP_Y

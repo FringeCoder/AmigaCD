@@ -4,6 +4,8 @@
 **Status:** phase 0 done on paper (2026-11-01); phase 1 passed on hardware
 (2026-11-02); phase 2 built, and gate 1 passes on hardware (stream 2026-11-04,
 run v21; repeat boots and warm resets 2026-11-05, run v22); gate 2 pending.
+Phase 3: the picture works on hardware (Cannon Fodder, HDMI PAL, run v23,
+2026-11-05); analog out, NTSC, a Video CD and tearing in motion not yet seen.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -641,9 +643,11 @@ interface. What was built against it:
   first and their tests were tightened. In the core, `tb_fmv_video.sv` plus
   13 mutations.
 
-**Calibration, under `[AmigaCD]` in `MiSTer.ini`.** The picture's position
-against the core's beam has not been measured. The manual's auto-centre
-assumes leftBorder 60 and topBorder 18 for the CL450's own video timing.
+**Calibration, under `[AmigaCD]` in `MiSTer.ini`.** The manual's auto-centre
+assumes leftBorder 60 and topBorder 18 for the CL450's own video timing. On
+the core that put the picture's left off screen; run v23 measured 93 display
+pixels and 3 lines more, now built in (`FMV_CALIB_HOFS`/`VOFS` in
+`fmv_picture.h`). The ini values add to those:
 - `AMIGACD_FMV_HOFS=n`: display pixels (hires) added to the left edge,
   -512 to 512.
 - `AMIGACD_FMV_VOFS=n`: lines added to the top edge, -128 to 128.
@@ -657,10 +661,44 @@ pixel X, line Y` whenever the window changes, `FMV picture: on/off` whenever
 those change, and a `FMV decoder:` line every 10 s with bytes in, pictures
 decoded and shown, ticks with nothing new, and dropped bytes.
 
-Open, for the first hardware run: whether `0x4000` is the video-on bit;
-whether ZD's default mode is the key Cannon Fodder's intro needs (it may
-use none of ZD's other modes, or another key entirely); the offsets; and
-whether decoding keeps up with the model's schedule (the `late` count).
+### Run v23, 2026-11-05: the picture works
+
+Core dddc7d5 seed 19 of fit run 42047243339 (setup -0.013, hold +0.183, not
+closed), Main f4fc3f4c. Cannon Fodder, HDMI, PAL.
+
+- **The intro plays start to end with the picture right**: colours, aspect
+  and content correct in about 25 stills, the 352x288 window as expected.
+  After the intro the picture goes off and the Amiga's own screens return.
+- **`0x4000` is the video-on bit.** `FMV picture: on` came with
+  `AMIGACD_FMV_SHOW=0`, no override needed.
+- **ZD's default mode is the key this intro needs.** With `SHOW=0` no holes
+  or Denise pixels showed in the window, and its bounds match the `SHOW=2`
+  run (by eye and by bounds, not pixel by pixel). Outside the window the
+  screen reads (4,4,4) while streaming in both, the ROM's border colour.
+- **Offsets**: at 0/0 the left was off screen and the top clipped a few
+  lines. `HOFS=93 VOFS=3` centres it, 23 px left and 24 px right in a
+  720x286 screenshot (window at display pixel 153, line 21). Now the
+  built-in default (above).
+- **Decoding keeps up**: 24624480 bytes in, 3 sequences, 4168 pictures
+  decoded, 4164 shown, 5 late ticks, 0 bytes dropped, 5 flushes. 27 of the
+  pictures came from the stream before the OSD reset, leaving 4141 against
+  the model's 4142. That one is not looked into. A candidate: the
+  driver's closing Reset()/FlushBitstream() drops a picture that was
+  decoded and not yet shown.
+- **Boots**: 6 of 6 load_core boots reached the picture. **Warm resets**: 3
+  of 3 mid-stream OSD resets recovered, the picture back each time.
+- **The stream** matches v21/v22: 10711 NewPackets, 4142 pictures, audio
+  6292 in and 6251 out. Underflows as in v22: 2 at the start and 3 at the
+  end. The 12 Akiko COUNTER AHEAD lines (12 in v21, 0 in v22) are all in
+  the post-intro load, so it varies from run to run. Not investigated.
+- The game loaded for about 3 minutes after the intro and reached the
+  credits. The run was stopped there, before the recruit screen v21/v22
+  reached.
+
+Not yet seen: tearing in motion (stills only, none torn), analog out, NTSC,
+a Video CD, other discs, a late fetch under load, and the ARM's load while
+decoding. Timing: seed-lottery row 52. No seed closes, the DDR3 families
+lost about 0.2 ns, and hold fails on 3 of 20 seeds, not yet attributed.
 
 ## Phase 4: sound
 

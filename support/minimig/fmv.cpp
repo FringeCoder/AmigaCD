@@ -66,8 +66,8 @@ static void vid_picture(void *)
 static fmv_calib calib()
 {
 	fmv_calib c;
-	c.hofs = cfg.amigacd_fmv_hofs;
-	c.vofs = cfg.amigacd_fmv_vofs;
+	c.hofs = FMV_CALIB_HOFS + cfg.amigacd_fmv_hofs;
+	c.vofs = FMV_CALIB_VOFS + cfg.amigacd_fmv_vofs;
 	c.force_on = cfg.amigacd_fmv_show >= 1;
 	c.key_all = cfg.amigacd_fmv_show >= 2;
 	return c;
@@ -401,7 +401,7 @@ void fmv_poll(void)
 			fmv_decoder_stats ds;
 			fmv_decoder_get_stats(decoder, &ds);
 			printf("FMV decoder: %u bytes in, %u sequences (%ux%u), %u pictures, %u shown, "
-			       "%u ticks with none new, %u bytes dropped, %u flushes; buffer %d\n",
+			       "%u late (ticks with none new), %u bytes dropped, %u flushes; buffer %d\n",
 			       ds.bytes_in, ds.sequences, ds.width, ds.height, ds.pictures, ds.presented,
 			       ds.late, ds.dropped_bytes, ds.flushes, ds.shown);
 		}
