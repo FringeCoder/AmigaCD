@@ -5,9 +5,9 @@ void akiko_cd32_init(void);
 void akiko_cd32_poll(void);
 
 // The CD32 FMV module's sound into the CDDA FIFO (docs/fmv-plan.md phase 4).
-// True if the FIFO has room for a sector and CD audio is not playing: CD
-// audio owns the FIFO while it plays.
-bool akiko_cd32_pcm_room(void);
+// 0 if the FIFO has room for a sector; 1 if CD audio is playing (it owns
+// the FIFO while it plays); 2 if the FIFO is full.
+int akiko_cd32_pcm_room(void);
 // One sector, 588 stereo samples, L R interleaved, host order.
 void akiko_cd32_pcm_push(const int16_t *lr);
 

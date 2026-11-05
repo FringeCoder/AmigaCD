@@ -55,7 +55,9 @@ struct fmv_audio_stats {
 	uint32_t decoded;
 	uint32_t bad;             // kjmp2 could not decode (Layer I, or damaged)
 	uint32_t ticks;
-	uint32_t late;            // ticks whose frame was not decoded yet: silence
+	uint32_t missing;         // ticks with no frame handed over yet (its bytes
+	                          // had not arrived, or it was cut short): silence
+	uint32_t late;            // ticks whose frame was handed over, not yet decoded: silence
 	uint32_t muted;           // ticks played as silence for the mute
 	uint32_t wrong_rate;      // frames not at 44.1 kHz: silence
 	uint32_t flushes;

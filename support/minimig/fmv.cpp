@@ -42,7 +42,8 @@ static fmv_window win_sent;
 
 // ---- the sound (phase 4) ----
 static fmv_audio *audio;
-static uint32_t   audio_blocked;     // polls with a sector waiting and no room
+static uint32_t   audio_full;        // polls with a sector waiting and the FIFO full
+static uint32_t   audio_cdda;        // ... and CD audio owning the FIFO
 
 static void aud_frame(void *, const uint8_t *p, size_t n, uint32_t rate)
 {
@@ -69,8 +70,9 @@ static void audio_poll()
 		return;
 	int16_t sec[2 * FMV_AUDIO_SECTOR_FRAMES];
 	for (int k = 0; k < 2 && fmv_audio_pending(audio) >= FMV_AUDIO_SECTOR_FRAMES; k++) {
-		if (!akiko_cd32_pcm_room()) {
-			audio_blocked++;
+		int r = akiko_cd32_pcm_room();
+		if (r) {
+			if (r == 1) audio_cdda++; else audio_full++;
 			break;
 		}
 		fmv_audio_sector(audio, sec);
@@ -167,7 +169,7 @@ static void picture_start()
 	audio = fmv_audio_new(0);           // core 0, beside the video decoder
 	if (!audio)
 		printf("FMV: the audio thread did not start; no sound\n");
-	audio_blocked = 0;
+	audio_full = audio_cdda = 0;
 	fmv_model_set_audio_hooks(fmv_xport_model(xport), aud_frame, aud_tick, aud_flush);
 }
 
@@ -460,11 +462,11 @@ void fmv_poll(void)
 		if (audio) {
 			fmv_audio_stats as;
 			fmv_audio_get_stats(audio, &as);
-			printf("FMV audio: %u frames in, %u decoded, %u bad, %u played (%u late, %u muted, "
-			       "%u not 44.1 kHz), %u sectors to the CDDA FIFO, %u polls blocked, "
-			       "%u samples dropped, %u flushes\n",
-			       as.frames_in, as.decoded, as.bad, as.ticks, as.late, as.muted, as.wrong_rate,
-			       as.sectors, audio_blocked, as.dropped, as.flushes);
+			printf("FMV audio: %u frames in, %u decoded, %u bad, %u played (%u missing, %u late, "
+			       "%u muted, %u not 44.1 kHz), %u sectors to the CDDA FIFO, polls blocked "
+			       "%u FIFO full / %u CD audio, %u samples dropped, %u flushes\n",
+			       as.frames_in, as.decoded, as.bad, as.ticks, as.missing, as.late, as.muted,
+			       as.wrong_rate, as.sectors, audio_full, audio_cdda, as.dropped, as.flushes);
 		}
 		diag_print();
 	}

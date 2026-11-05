@@ -178,7 +178,7 @@ void fmv_audio_tick(fmv_audio *a, bool muted)
 	if (a->slots.empty()) {
 		// The model played a frame this side never received (a frame cut
 		// short): keep the time with silence.
-		a->st.late++;
+		a->st.missing++;
 		pthread_mutex_unlock(&a->mu);
 		push_silence(a);
 		return;

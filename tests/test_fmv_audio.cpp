@@ -130,6 +130,7 @@ static void test_decode(const std::vector<std::vector<uint8_t>> &fr)
 	fmv_audio_get_stats(a, &s);
 	eq("all decoded", s.decoded, (long)fr.size());
 	eq("none late", s.late, 0);
+	eq("none missing", s.missing, 0);
 	eq("sectors counted", s.sectors, (long)(fr.size() * 1152 / 588));
 	fmv_audio_free(a);
 }
@@ -160,7 +161,8 @@ static void test_schedule(const std::vector<std::vector<uint8_t>> &fr)
 	fmv_audio_stats s;
 	fmv_audio_get_stats(a, &s);
 	eq("muted ticks counted", s.muted, 1);
-	eq("the tick with no frame counted late", s.late, 1);
+	eq("the tick with no frame counted missing, not late", s.missing, 1);
+	eq("...so none late", s.late, 0);
 
 	// A flush drops frames handed over and not yet played
 	size_t left = fmv_audio_pending(a);

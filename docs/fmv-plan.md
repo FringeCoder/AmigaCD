@@ -6,7 +6,8 @@
 run v21; repeat boots and warm resets 2026-11-05, run v22); gate 2 pending.
 Phase 3: the picture works on hardware (Cannon Fodder, HDMI PAL, run v23,
 2026-11-05); analog out, NTSC, a Video CD and tearing in motion not yet seen.
-Phase 4 (sound) built, not yet heard on hardware.
+Phase 4 (sound) runs on hardware (run v24: every frame played reached the
+FIFO), not yet heard. Phase 3 and 4 run on a closed-timing build.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -770,8 +771,50 @@ against the picture by a constant. It is under the gate's one frame at
 hold the picture by the same amount, not to cut the FIFO.
 
 Main prints a `FMV audio:` line every 10 s: frames in, decoded, bad,
-played (late, muted, not 44.1 kHz), sectors to the FIFO, polls blocked,
-samples dropped, flushes.
+played (missing, late, muted, not 44.1 kHz), sectors to the FIFO, polls
+blocked (FIFO full / CD audio), samples dropped, flushes.
+
+### Run v24, 2026-11-05: the sound path runs; not yet heard
+
+Core 4fd09c1 (RTL e14af8b) seed 5 of fit run 42068080918, **the first
+closed-timing build with the picture** (setup +0.195, hold +0.250). Main
+676bc001 with the built-in offsets. Cannon Fodder, HDMI, PAL. Read from the
+counters only: quality, level, mute and lip sync wait for someone to
+listen.
+
+- **Audio**: 6285 frames in, 6274 decoded, 0 bad, 6245 played (12 late,
+  0 muted, 0 not 44.1 kHz), 12235 sectors to the FIFO, 0 samples dropped,
+  7 flushes. 6245 x 1152 / 588 = 12235: everything played reached the
+  FIFO. The 12 "late" counted both kinds of silence. They came 1-6 through
+  most of the stream and 6 to 11 in one 29 s stretch near the end. From
+  this run on the line splits them: `missing` (the frame had not arrived
+  when the chip played it) and `late` (it had, and was not decoded yet).
+  697 polls blocked, in bursts; now split into FIFO full and CD audio.
+  The 40 frames between in and played at the end match v21/v22's in/out
+  gap, read as flushed at shutdown, not confirmed. The stream line's 6286
+  in against the audio's 6285 is off by one, not looked at.
+- **The picture with sound on**: 4142 pictures, 4140 shown, 2 late, 0 bytes
+  dropped. 4142 matches the model exactly this time (v23 was one short).
+  The sound cost the picture nothing measurable.
+- **Placement**: the built-in offsets put the window at display pixel 153,
+  line 21, the same bounds as v23's HOFS 93 / VOFS 3.
+- **Boots**: 5 of 5 boots whose reset reached the Amiga got picture and
+  sound. 2 of 2 mid-stream warm resets recovered, and a reset from the
+  recruit screen reached the stream too.
+- Underflows: 4 lines, 1 at the start and 3 at the end. COUNTER AHEAD: 12,
+  as in v21 and v23.
+- **Without the board**: twice the harness's reset did not reach the Amiga
+  ("reset sent", no `FMV Amiga reset`). The board was never configured,
+  and the game skipped the intro and reached the recruit screen by itself
+  within about 150 s. So the game runs without the board.
+- **Harness**: with `DEBUG=2`, each load_core left `/tmp/debug.txt` open
+  across Main's re-exec (23 fds on deleted copies after a day), and
+  `/tmp` filled. Fixed: the log is opened close-on-exec, as `/dev/null`
+  already was.
+
+Not yet: hearing it, A/V sync, either mute path (0 muted frames), CD audio
+taking the FIFO back, the 60-minute Video CD gate, analog out, NTSC,
+tearing in motion, other discs.
 
 
 ## Phase 5: product

@@ -2410,11 +2410,11 @@ static void akiko_push_audio_sector(const uint8_t *buf2352)
 	DisableIO();
 }
 
-bool akiko_cd32_pcm_room(void)
+int akiko_cd32_pcm_room(void)
 {
 	if (akiko_cdda_streaming() || cd_cdda_lba_next >= 0)
-		return false;
-	return akiko_audio_fifo_ready();
+		return 1;
+	return akiko_audio_fifo_ready() ? 0 : 2;
 }
 
 void akiko_cd32_pcm_push(const int16_t *lr)

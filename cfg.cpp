@@ -444,8 +444,12 @@ static void ini_parse_var(char* buf)
 			{
 				if (cfg.debug == 2 && !debug_file)
 				{
-					debug_file = fopen("/tmp/debug.txt", "w");
-					setvbuf(debug_file, NULL, _IONBF, 0);
+					// "e": O_CLOEXEC, as /dev/null gets below. Main re-execs
+					// itself on every core load, and without it each exec
+					// kept the old log open: 23 fds on deleted copies after a
+					// day of DEBUG=2 rounds filled /tmp (2026-11-05, FMV run v24).
+					debug_file = fopen("/tmp/debug.txt", "we");
+					if (debug_file) setvbuf(debug_file, NULL, _IONBF, 0);
 				}
 				stdout = (cfg.debug == 2) ? debug_file : cfg.debug ? orig_stdout : dev_null;
 			}
