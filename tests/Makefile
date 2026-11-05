@@ -36,7 +36,7 @@ TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_cryp
         test_mgl_rbf test_mgl_cfg test_cd_savename test_vadjust_info \
         test_osd_rowguard \
         test_dms test_mgl_path test_minimig_status test_restore_watch \
-        test_fmv_model test_fmv_transport test_fmv_picture test_fmv_decoder
+        test_fmv_model test_fmv_transport test_fmv_picture test_fmv_decoder test_fmv_audio
 
 # test_dms #includes support/minimig/dms.cpp rather than linking it -- its
 # encoders need the decoder's file-local window model and tables -- so dms.cpp
@@ -92,6 +92,15 @@ LM2_OBJ   = $(patsubst $(LM2)/libmpeg2/%.c,$(BUILDDIR)/lm2/%.o,$(LM2_SRC))
 $(BUILDDIR)/test_fmv_decoder: test_fmv_decoder.cpp ../support/minimig/fmv_decoder.cpp $(SRC) $(LM2_OBJ)
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -I$(LM2)/include -o $@ $< ../support/minimig/fmv_decoder.cpp $(SRC) $(LM2_OBJ) -lpthread
+
+# The FMV audio test runs kjmp2 (C, vendored in lib/kjmp2) on a thread.
+KJ        = ../lib/kjmp2
+$(BUILDDIR)/kj/kjmp2.o: $(KJ)/kjmp2.c
+	@mkdir -p $(BUILDDIR)/kj
+	$(CC) -std=gnu99 -O1 -g -I$(KJ) -w -c -o $@ $<
+$(BUILDDIR)/test_fmv_audio: test_fmv_audio.cpp ../support/minimig/fmv_audio.cpp $(SRC) $(BUILDDIR)/kj/kjmp2.o
+	@mkdir -p $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) -I$(KJ) -o $@ $< ../support/minimig/fmv_audio.cpp $(SRC) $(BUILDDIR)/kj/kjmp2.o -lpthread
 
 -include $(addprefix $(BUILDDIR)/,$(addsuffix .d,$(TESTS)))
 

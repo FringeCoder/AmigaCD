@@ -2410,6 +2410,23 @@ static void akiko_push_audio_sector(const uint8_t *buf2352)
 	DisableIO();
 }
 
+bool akiko_cd32_pcm_room(void)
+{
+	if (akiko_cdda_streaming() || cd_cdda_lba_next >= 0)
+		return false;
+	return akiko_audio_fifo_ready();
+}
+
+void akiko_cd32_pcm_push(const int16_t *lr)
+{
+	EnableIO();
+	spi8(UIO_DMA_WRITE);
+	spi32_w(AKIKO_CDDA_ADDR);
+	for (int i = 0; i < 2 * AKIKO_CDDA_FRAMES; i++)
+		spi_w((uint16_t)lr[i]);              // left first: LRCK 0, then right
+	DisableIO();
+}
+
 static int64_t cdda_now_us(void)
 {
 	struct timespec ts;

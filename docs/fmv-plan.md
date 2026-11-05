@@ -6,6 +6,7 @@
 run v21; repeat boots and warm resets 2026-11-05, run v22); gate 2 pending.
 Phase 3: the picture works on hardware (Cannon Fodder, HDMI PAL, run v23,
 2026-11-05); analog out, NTSC, a Video CD and tearing in motion not yet seen.
+Phase 4 (sound) built, not yet heard on hardware.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -719,6 +720,59 @@ repeated: never stretch audio.
 **Gate:** lips stay in sync over a full Video CD (>= 60 min), audio and video
 drift under one frame, and the CDDA underrun and starve counters stay at
 zero.
+
+### Status, 2026-11-05: built, not yet heard on hardware
+
+No RTL, as planned. Main writes the decoded sound into the existing CDDA
+FIFO (`cdda.v`), which plays whatever it is given, mixed with Paula at full
+gain in CD32 mode.
+
+- **The model** hands over each whole Layer II frame as the L64111 takes it
+  into its channel buffer (header included, across packet boundaries). It
+  ticks each time the chip puts a frame out, and flushes on BUF_RST, a soft
+  reset or a board reset.
+- **`fmv_audio.cpp`** decodes with kjmp2 on a thread on core 0, beside the
+  video decoder. Phase 1 measured about 2 ms a frame, which is too much
+  for Main's own thread at 38 frames a second. Frames are numbered in
+  stream order. **The tick is the clock**: each one adds that frame's 1152
+  stereo samples to the output, or 1152 of silence if the frame is not
+  decoded yet, the chip is muted, or the stream is not 44.1 kHz (the FIFO's
+  only rate). So the sound never drifts from the chip, and the game paces
+  its CD reads on the chip's interrupts, which follow the same schedule.
+- **Mute**: the L64111's SOFT_MUTE (control 2 bit 5) or the board's IO
+  word bit `0x0200` as written (WinUAE's name, unverified). Each plays as
+  silence and keeps its time.
+- **Into the FIFO**: a 588-frame sector at a time whenever the core asks
+  (`cdda_req`) and CD audio is not playing. CD audio owns the FIFO while it
+  plays (`akiko_cd32_pcm_room`). More than eight sectors (about 107 ms)
+  waiting means the FIFO is not taking them, and the output is dropped
+  rather than left to trail the picture.
+- **Tests**: `test_fmv_audio` covers decode order and channels against a
+  continuous kjmp2 decode, the tick schedule, silence for a missing,
+  muted or 48 kHz frame, flush and drop, and the model's frame and tick
+  hooks and both mutes, on generated 44.1 and 48 kHz Layer II streams. It
+  passes under ASan/UBSan and ThreadSanitizer. 10 mutations, all caught;
+  one was not at first, because the flush test had not decoded the frame
+  it flushed.
+
+**Sync, a change from the plan.** The plan said to sync audio PTS against
+the CL450 SCR in Main. What is built instead paces both halves from the
+model's own schedules: pictures at the sequence's frame rate, audio at the
+stream's sample rate, from the same clock. Both started together, and in
+v23 the picture kept up (5 late ticks in 166 s). That keeps the two in
+step as long as neither schedule drops anything. A PTS/SCR loop is what
+fixes it if they drift. The gate's 60-minute Video CD will say whether
+that is needed.
+
+The FIFO's own latency (up to 46 ms in its normal mode) delays the sound
+against the picture by a constant. It is under the gate's one frame at
+25 fps only at the FIFO's low end. If it shows on hardware, the fix is to
+hold the picture by the same amount, not to cut the FIFO.
+
+Main prints a `FMV audio:` line every 10 s: frames in, decoded, bad,
+played (late, muted, not 44.1 kHz), sectors to the FIFO, polls blocked,
+samples dropped, flushes.
+
 
 ## Phase 5: product
 

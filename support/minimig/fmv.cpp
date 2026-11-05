@@ -23,6 +23,8 @@
 #include "fmv_model.h"
 #include "fmv_picture.h"
 #include "fmv_decoder.h"
+#include "fmv_audio.h"
+#include "akiko_cd32.h"
 #include "minimig_config.h"
 #include "minimig_crc32.h"
 
@@ -37,6 +39,46 @@ static bool     have_picture;       // one named since the last flush
 static uint16_t disp_sent[7];
 static bool     disp_valid;         // disp_sent is what the core holds
 static fmv_window win_sent;
+
+// ---- the sound (phase 4) ----
+static fmv_audio *audio;
+static uint32_t   audio_blocked;     // polls with a sector waiting and no room
+
+static void aud_frame(void *, const uint8_t *p, size_t n, uint32_t rate)
+{
+	if (audio) fmv_audio_frame(audio, p, n, rate);
+}
+
+static void aud_tick(void *)
+{
+	if (audio) fmv_audio_tick(audio, fmv_model_audio_muted(fmv_xport_model(xport)));
+}
+
+static void aud_flush(void *)
+{
+	if (audio) fmv_audio_flush(audio);
+}
+
+// Hand the core what is due. The CDDA FIFO asks for a sector while it holds
+// at most 1459 frames (33 ms); more than about 100 ms waiting here means
+// the FIFO is not taking it (CD audio owns it, or Main stalled), and the
+// sound would trail the picture by that much for good: drop it.
+static void audio_poll()
+{
+	if (!audio)
+		return;
+	int16_t sec[2 * FMV_AUDIO_SECTOR_FRAMES];
+	for (int k = 0; k < 2 && fmv_audio_pending(audio) >= FMV_AUDIO_SECTOR_FRAMES; k++) {
+		if (!akiko_cd32_pcm_room()) {
+			audio_blocked++;
+			break;
+		}
+		fmv_audio_sector(audio, sec);
+		akiko_cd32_pcm_push(sec);
+	}
+	if (fmv_audio_pending(audio) > 8 * FMV_AUDIO_SECTOR_FRAMES)
+		fmv_audio_drop_output(audio);
+}
 
 static void vid_bytes(void *, const uint8_t *p, size_t n)
 {
@@ -122,12 +164,21 @@ static void picture_start()
 	}
 	fmv_model_set_video_hooks(fmv_xport_model(xport), 0, vid_bytes, vid_flush, vid_picture);
 	disp_update();
+	audio = fmv_audio_new(0);           // core 0, beside the video decoder
+	if (!audio)
+		printf("FMV: the audio thread did not start; no sound\n");
+	audio_blocked = 0;
+	fmv_model_set_audio_hooks(fmv_xport_model(xport), aud_frame, aud_tick, aud_flush);
 }
 
 static void picture_stop()
 {
-	if (xport)
+	if (xport) {
 		fmv_model_set_video_hooks(fmv_xport_model(xport), 0, 0, 0, 0);
+		fmv_model_set_audio_hooks(fmv_xport_model(xport), 0, 0, 0);
+	}
+	fmv_audio_free(audio);
+	audio = 0;
 	fmv_decoder_free(decoder);
 	decoder = 0;
 	if (fbmap) {
@@ -378,6 +429,7 @@ void fmv_poll(void)
 	if (decoder)
 		fmv_decoder_poll(decoder);
 	disp_update();
+	audio_poll();
 
 	// A stalled queue: three snapshots of the core's side, a second apart,
 	// so the log says which counters move and which state it sits in.
@@ -404,6 +456,15 @@ void fmv_poll(void)
 			       "%u late (ticks with none new), %u bytes dropped, %u flushes; buffer %d\n",
 			       ds.bytes_in, ds.sequences, ds.width, ds.height, ds.pictures, ds.presented,
 			       ds.late, ds.dropped_bytes, ds.flushes, ds.shown);
+		}
+		if (audio) {
+			fmv_audio_stats as;
+			fmv_audio_get_stats(audio, &as);
+			printf("FMV audio: %u frames in, %u decoded, %u bad, %u played (%u late, %u muted, "
+			       "%u not 44.1 kHz), %u sectors to the CDDA FIFO, %u polls blocked, "
+			       "%u samples dropped, %u flushes\n",
+			       as.frames_in, as.decoded, as.bad, as.ticks, as.late, as.muted, as.wrong_rate,
+			       as.sectors, audio_blocked, as.dropped, as.flushes);
 		}
 		diag_print();
 	}

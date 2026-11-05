@@ -26,6 +26,7 @@ INCLUDE += -I./lib/libchdr/include
 INCLUDE += -I./lib/bluetooth
 INCLUDE += -I./lib/serial_server/library
 INCLUDE += -I./lib/libmpeg2/include
+INCLUDE += -I./lib/kjmp2
 
 BUILDDIR = bin
 
@@ -39,6 +40,7 @@ C_SRC =   $(wildcard *.c) \
           $(wildcard ./lib/libchdr/*.c) \
           $(addprefix lib/libmpeg2/libmpeg2/,alloc.c cpu_accel.c cpu_state.c decode.c \
             header.c idct.c motion_comp.c slice.c) \
+          lib/kjmp2/kjmp2.c \
           lib/libco/arm.c
 
 CPP_SRC = $(wildcard *.cpp) \

@@ -299,7 +299,7 @@ static void command(vfpga &f, uint16_t code, uint16_t a1 = 0, uint16_t a2 = 0, u
 static void test_model_hooks()
 {
 	vfpga f;
-	fmv_hooks h = { &f, h_update, h_dram, h_log, 0, 0, 0, 0 };
+	fmv_hooks h = { &f, h_update, h_dram, h_log, 0, 0, 0, 0, 0, 0, 0 };
 	f.model = fmv_model_new(h);
 	fmv_model_set_video_hooks(f.model, &f, v_bytes, v_flush, v_picture);
 	fmv_model_reset(f.model);

@@ -124,6 +124,15 @@ struct fmv_hooks {
 	void (*video_flush)(void *ctx);
 	// The model has taken a picture off its schedule: show the next one.
 	void (*video_picture)(void *ctx);
+	// Phase 4 (fmv_audio.cpp). Optional, may be null; same context, set
+	// with fmv_model_set_audio_hooks().
+	// One whole MPEG audio frame the L64111 has taken into its channel
+	// buffer, header included, in stream order.
+	void (*audio_frame)(void *ctx, const uint8_t *p, size_t n, uint32_t sample_rate);
+	// The L64111 puts out the next frame (NEW FRAME OUT): play it.
+	void (*audio_tick)(void *ctx);
+	// The channel buffer is emptied (BUF_RST, a soft reset, a board reset).
+	void (*audio_flush)(void *ctx);
 };
 
 // ------------------------------------------------------------- board wiring
@@ -141,6 +150,7 @@ struct fmv_board {
 	uint16_t io_int_pol;      // value of the int bits while asserted
 	uint16_t io_video_on;     // 0x4000 as WRITTEN, "CL450 video on": the
 	                          // cartridge's picture is selected (contract v5)
+	uint16_t io_audio_mute;   // 0x0200 as WRITTEN, "L64111 mute" (WinUAE's name, unverified)
 };
 extern const fmv_board fmv_board_default;
 
@@ -208,6 +218,13 @@ void fmv_model_get_state(const fmv_model *m, fmv_model_state *s);
 // What the CL450 has been told about its output (fmv_picture.h).
 struct fmv_cl_display;
 void fmv_model_display(const fmv_model *m, fmv_cl_display *d);
+
+void fmv_model_set_audio_hooks(fmv_model *m,
+                               void (*frame)(void *, const uint8_t *, size_t, uint32_t),
+                               void (*tick)(void *), void (*flush)(void *));
+// Whether the L64111's output is silent now: SOFT_MUTE (control 2 bit 5)
+// [L64 4-7], or the board's mute bit in the IO word, as last written.
+bool fmv_model_audio_muted(const fmv_model *m);
 
 
 // One line on what the 68k has done to the board since the last call,

@@ -14,7 +14,7 @@
 
 #include "fmv_picture.h"
 
-const fmv_board fmv_board_default = { 0x8000, 0x4000, 0x0800, 0x0400, 0x0000, 0x4000 };
+const fmv_board fmv_board_default = { 0x8000, 0x4000, 0x0800, 0x0400, 0x0000, 0x4000, 0x0200 };
 
 namespace {
 
@@ -86,6 +86,11 @@ struct fmv_model {
 	uint16_t video_format;     // SetVideoFormat(): 3 PAL, 4 NTSC [CL 11-40]
 	bool     blank;            // SetBlank(1) [CL 11-29]
 	bool     io_video_on;      // the IO word's video-on bit, as last written
+	bool     io_audio_mute;    // the IO word's audio mute bit, as last written
+	// the frame being taken into the channel buffer, for audio_frame
+	uint8_t  af_buf[2048];
+	uint32_t af_len;
+	bool     af_cap;
 	uint16_t last_fullness;
 	bool     cflevel;
 	// data-port statistics, logged once a second rather than per word
@@ -843,7 +848,10 @@ static void l64_reset(fmv_model *m)
 	m->af_in_place = 0;
 	m->cb_frames = 0;
 	m->play_us = 0;
+	m->af_cap = false;
 	m->l64_sync_sys = m->l64_sync_aud = m->l64_pts_ok = false;
+	if (m->h.audio_flush)
+		m->h.audio_flush(m->h.vctx);
 	// Reset values [L64 4-4..4-8]: CR3 ignores the stream ID; CR1 STARTI and
 	// CR2 AUDIO ONLY follow pins the board fixes, taken as 0 here.
 	set_reg(m, FMV_IDX_L64111 + 1, 0x00, 0x00FF);
@@ -900,6 +908,13 @@ static void l64_frame_header(fmv_model *m, const uint8_t *h)
 	}
 	m->cb_frames++;
 	l64_publish(m);
+	// Keep the frame for the decoder (phase 4): the header now, the rest
+	// as it arrives.
+	if (m->h.audio_frame && n <= sizeof m->af_buf) {
+		memcpy(m->af_buf, h, 4);
+		m->af_len = 4;
+		m->af_cap = true;
+	}
 }
 
 // Audio elementary-stream bytes: find frames [L64 2-5, 2-7].
@@ -907,8 +922,16 @@ static void l64_audio_byte(fmv_model *m, uint8_t byte)
 {
 	if (m->af_skip) {
 		m->af_skip--;
+		if (m->af_cap) {
+			m->af_buf[m->af_len++] = byte;
+			if (!m->af_skip) {
+				m->af_cap = false;
+				m->h.audio_frame(m->h.vctx, m->af_buf, m->af_len, m->sample_rate);
+			}
+		}
 		return;
 	}
+	m->af_cap = false;          // a frame cut short (resync): not handed over
 	if (m->af_hdr_n == 0 && byte != 0xFF) {
 		m->af_in_place = 0;                        // not where a sync should be
 		return;
@@ -1047,6 +1070,8 @@ static void l64_advance(fmv_model *m, int32_t us)
 		m->play_us -= frame_us;
 		m->cb_frames--;
 		m->frames_out++;
+		if (m->h.audio_tick)
+			m->h.audio_tick(m->h.vctx);
 		l64_raise(m, 2, 0x01, false);              // NEW FRAME OUT
 		if (m->cb_frames == 1)
 			l64_raise(m, 2, 0x01, true);           // LAST FRAME
@@ -1101,7 +1126,10 @@ static void l64_event(fmv_model *m, const fmv_event &e)
 		}
 		if (e.data & 0x04) {                       // BUF_RST: not self-clearing
 			m->cb_frames = 0;
+			m->af_cap = false;
 			l64_publish(m);
+			if (m->h.audio_flush)
+				m->h.audio_flush(m->h.vctx);
 		}
 		break;
 	case 4: m->l64_mask1 = (uint8_t)e.data; l64_check_int(m); break;
@@ -1213,6 +1241,7 @@ void fmv_model_reset(fmv_model *m)
 	m->video_format = 4;
 	m->blank = false;
 	m->io_video_on = false;
+	m->io_audio_mute = false;
 	cl_video_flush(m);
 	// Hardware reset of the CL450: Int is 1 (INT inactive) [CL table 10-6].
 	set_reg(m, clx(CL_HOST_CONTROL), 0x0080, 0xFFFF);
@@ -1257,6 +1286,8 @@ void fmv_model_event(fmv_model *m, const fmv_event &e)
 			uint16_t lanes = (uint16_t)((e.uds ? 0xFF00 : 0) | (e.lds ? 0x00FF : 0));
 			if (lanes & m->b.io_video_on)
 				m->io_video_on = (e.data & m->b.io_video_on & lanes) != 0;
+			if (lanes & m->b.io_audio_mute)
+				m->io_audio_mute = (e.data & m->b.io_audio_mute & lanes) != 0;
 		}
 	} else if (o < FMV_OFF_CMEM) {
 		l64_event(m, e);
@@ -1307,6 +1338,20 @@ void fmv_model_advance(fmv_model *m, uint32_t usec)
 }
 
 uint16_t fmv_model_reg(const fmv_model *m, uint8_t index) { return m->R[index]; }
+
+void fmv_model_set_audio_hooks(fmv_model *m,
+                               void (*frame)(void *, const uint8_t *, size_t, uint32_t),
+                               void (*tick)(void *), void (*flush)(void *))
+{
+	m->h.audio_frame = frame;
+	m->h.audio_tick = tick;
+	m->h.audio_flush = flush;
+}
+
+bool fmv_model_audio_muted(const fmv_model *m)
+{
+	return (m->R[FMV_IDX_L64111 + 2] & 0x20) || m->io_audio_mute;
+}
 
 void fmv_model_display(const fmv_model *m, fmv_cl_display *d)
 {
