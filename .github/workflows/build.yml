@@ -117,24 +117,6 @@ jobs:
       - name: Build fmvbench
         run: make -C tools/fmvbench
 
-      # The binary that goes to the MiSTer, run under user-mode qemu against
-      # ffmpeg's decode of Video CD streams, with both of libmpeg2's motion
-      # compensation paths (C and the ARM assembler, -a c|arm). The host test
-      # job checks the same source built for x86; only this checks what the ARM
-      # compiler and the assembler made of it. A bench number from a binary
-      # that decodes wrongly would be a number about nothing.
-      - name: fmvbench ARM binary decodes correctly (qemu)
-        run: |
-          set -euo pipefail
-          sudo apt-get update -q
-          # qemu-user, not qemu-user-static: from Ubuntu 26.04 on the latter is
-          # a virtual package apt will not pick. fmvbench is linked static, so
-          # the plain qemu-arm runs it without an ARM sysroot.
-          sudo apt-get install -y -q ffmpeg qemu-user
-          qemu="$(command -v qemu-arm || command -v qemu-arm-static)"
-          FMVBENCH_BIN=tools/fmvbench/fmvbench FMVBENCH_RUNNER="$qemu" \
-          FMVBENCH_ACCELS="c arm" python3 tools/fmvbench/test_fmvbench.py
-
       # bin/MiSTer is stripped by the Makefile; bin/MiSTer.elf keeps symbols.
       # `file` is the quickest confirmation this really is an ARM binary and not
       # something the host toolchain produced. The GLIBC_* dump is the number to
@@ -170,6 +152,31 @@ jobs:
           # pulls a run's binary onto the MiSTer, and that is always a recent run.
           # Anything older is rebuilt faster than it would be retrieved.
           retention-days: 14
+
+      # The binary that goes to the MiSTer, run under user-mode qemu against
+      # ffmpeg's decode of Video CD streams, with both of libmpeg2's motion
+      # compensation paths (C and the ARM assembler, -a c|arm). The host test
+      # job checks the same source built for x86; only this checks what the ARM
+      # compiler and the assembler made of it. A bench number from a binary
+      # that decodes wrongly would be a number about nothing.
+      #
+      # Last, after the upload, and with a timeout: on 2026-11-05 this step
+      # hung for 28 and then 9 minutes in two of three runs (where in the step
+      # is not known: the log of a running step could not be read), and the
+      # Main binary, built and checked long before, waited on it. The job still goes red if this fails or times
+      # out; the binary is just not held back by it.
+      - name: fmvbench ARM binary decodes correctly (qemu)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          # qemu-user, not qemu-user-static: from Ubuntu 26.04 on the latter is
+          # a virtual package apt will not pick. fmvbench is linked static, so
+          # the plain qemu-arm runs it without an ARM sysroot.
+          sudo apt-get install -y -q ffmpeg qemu-user
+          qemu="$(command -v qemu-arm || command -v qemu-arm-static)"
+          FMVBENCH_BIN=tools/fmvbench/fmvbench FMVBENCH_RUNNER="$qemu" \
+          FMVBENCH_ACCELS="c arm" python3 tools/fmvbench/test_fmvbench.py
 
   # RTL simulation. Icarus rather than ModelSim: ModelSim is not installed on the
   # dev machine (C:\intelFPGA_lite\17.0 carries quartus only), and the testbench is
