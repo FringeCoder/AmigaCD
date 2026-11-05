@@ -150,6 +150,9 @@ static const ini_var_t ini_vars[] =
 	{ "KEYBOARD_AS_JOYSTICK", (void*)(cfg.keyboard_as_joystick), HEX32ARR, 0, 0xFFFFFFFF },
 	{ "SNAC_PSX", (void*)(&(cfg.snac_psx)), UINT8, 0, 1 },
 	{ "AMIGACD_FMV", (void*)(&(cfg.amigacd_fmv)), UINT8, 0, 4 },
+	{ "AMIGACD_FMV_HOFS", (void*)(&(cfg.amigacd_fmv_hofs)), INT16, -512, 512 },
+	{ "AMIGACD_FMV_VOFS", (void*)(&(cfg.amigacd_fmv_vofs)), INT16, -128, 128 },
+	{ "AMIGACD_FMV_SHOW", (void*)(&(cfg.amigacd_fmv_show)), UINT8, 0, 2 },
 	{ "SANITY_CHECK", (void *)(&(cfg.sanity_check)), UINT8, 0, 1 },
 };
 

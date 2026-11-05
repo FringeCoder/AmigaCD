@@ -21,11 +21,120 @@
 #include "../../user_io.h"
 #include "fmv_transport.h"
 #include "fmv_model.h"
+#include "fmv_picture.h"
+#include "fmv_decoder.h"
 #include "minimig_config.h"
 #include "minimig_crc32.h"
 
 static fmv_xport *xport;
 static volatile uint8_t *window;
+
+// ---- the picture (phase 3, contract v5) ----
+static volatile uint8_t *fbmap;     // the four frame buffers
+static fmv_decoder *decoder;
+static int      cur_buf;            // the buffer named in DISP_CTRL
+static bool     have_picture;       // one named since the last flush
+static uint16_t disp_sent[7];
+static bool     disp_valid;         // disp_sent is what the core holds
+static fmv_window win_sent;
+
+static void vid_bytes(void *, const uint8_t *p, size_t n)
+{
+	if (decoder) fmv_decoder_bytes(decoder, p, n);
+}
+
+static void vid_flush(void *)
+{
+	if (decoder) fmv_decoder_flush(decoder);
+	have_picture = false;
+}
+
+// The model's picture schedule: show the next decoded picture, if there is
+// one. If the decoder is late the one shown stays, as a CL450 repeats a
+// picture it has not replaced.
+static void vid_picture(void *)
+{
+	if (!decoder)
+		return;
+	int b = fmv_decoder_present(decoder);
+	if (b >= 0) {
+		cur_buf = b;
+		have_picture = true;
+	}
+}
+
+static fmv_calib calib()
+{
+	fmv_calib c;
+	c.hofs = cfg.amigacd_fmv_hofs;
+	c.vofs = cfg.amigacd_fmv_vofs;
+	c.force_on = cfg.amigacd_fmv_show >= 1;
+	c.key_all = cfg.amigacd_fmv_show >= 2;
+	return c;
+}
+
+// The display registers, sent whenever they change (and all of them once a
+// session starts: the core keeps 0xE0-0xE6 across sessions).
+static void disp_update()
+{
+	fmv_cl_display d;
+	fmv_model_display(fmv_xport_model(xport), &d);
+	fmv_calib c = calib();
+	fmv_window w;
+	fmv_window_compute(d, c, &w);
+	if (decoder && memcmp(&w, &win_sent, sizeof w)) {
+		fmv_decoder_set_window(decoder, w);
+		win_sent = w;
+		printf("FMV picture window: %ux%u from (%u,%u) of the picture, at display pixel %d, "
+		       "line %d\n", w.src_w, w.src_h, w.src_x, w.src_y, w.disp_x, w.disp_y);
+	}
+	uint16_t r[7];
+	fmv_disp_regs(d, c, have_picture && decoder, r);
+	r[0] |= fmv_disp_buf(cur_buf);
+	if (!decoder)
+		r[0] &= (uint16_t)~FMV_DISP_ON;   // nothing to show: leave the Amiga's picture alone
+	for (int i = 0; i < 7; i++) {
+		if (disp_valid && r[i] == disp_sent[i])
+			continue;
+		fmv_update u = { (uint8_t)(FMV_IDX_DISP_CTRL + i), false, false, r[i], 0xFFFF };
+		fmv_xport_update(xport, u);
+		if (i == 0 && (!disp_valid || ((r[0] ^ disp_sent[0]) & (FMV_DISP_ON | FMV_DISP_BLANK))))
+			printf("FMV picture: %s%s\n", (r[0] & FMV_DISP_ON) ? "on" : "off",
+			       (r[0] & FMV_DISP_BLANK) ? ", blanked (border colour)" : "");
+		disp_sent[i] = r[i];
+	}
+	disp_valid = true;
+}
+
+static void picture_start()
+{
+	cur_buf = 0;
+	have_picture = false;
+	disp_valid = false;
+	memset(&win_sent, 0xFF, sizeof win_sent);
+	fbmap = (volatile uint8_t *)shmem_map(FMV_FB_PHYS, FMV_FB_BUFS * FMV_FB_BUF_BYTES);
+	if (!fbmap) {
+		printf("FMV: cannot map the frame buffers at 0x%08x; no picture\n", FMV_FB_PHYS);
+	} else {
+		decoder = fmv_decoder_new(fbmap, 0);     // core 0: Main runs on core 1
+		if (!decoder)
+			printf("FMV: the decoder thread did not start; no picture\n");
+	}
+	fmv_model_set_video_hooks(fmv_xport_model(xport), 0, vid_bytes, vid_flush, vid_picture);
+	disp_update();
+}
+
+static void picture_stop()
+{
+	if (xport)
+		fmv_model_set_video_hooks(fmv_xport_model(xport), 0, 0, 0, 0);
+	fmv_decoder_free(decoder);
+	decoder = 0;
+	if (fbmap) {
+		shmem_unmap((void *)fbmap, FMV_FB_BUFS * FMV_FB_BUF_BYTES);
+		fbmap = 0;
+	}
+}
 static uint64_t last_us;
 static int tried;           // one attempt per core load: a missing ROM is not retried every poll
 static int diag_shown;      // diag snapshots printed this session
@@ -121,6 +230,7 @@ static void start()
 		window = 0;
 		return;
 	}
+	picture_start();
 	user_io_status_set(FMV_STATUS_OPT, 1);
 	last_us = now_us();
 	diag_print();              // the core's side as the session starts
@@ -165,6 +275,7 @@ static void diag_print()
 
 void fmv_shutdown(void)
 {
+	picture_stop();
 	if (xport) {
 		fmv_xport_stop(xport);
 		fmv_xport_free(xport);
@@ -264,6 +375,9 @@ void fmv_poll(void)
 	if (dt > 100000)
 		dt = 100000;
 	fmv_xport_poll(xport, (uint32_t)dt);
+	if (decoder)
+		fmv_decoder_poll(decoder);
+	disp_update();
 
 	// A stalled queue: three snapshots of the core's side, a second apart,
 	// so the log says which counters move and which state it sits in.
@@ -283,6 +397,14 @@ void fmv_poll(void)
 		char a[768];
 		fmv_model_activity(fmv_xport_model(xport), a, sizeof a);
 		printf("%s\n", a);
+		if (decoder) {
+			fmv_decoder_stats ds;
+			fmv_decoder_get_stats(decoder, &ds);
+			printf("FMV decoder: %u bytes in, %u sequences (%ux%u), %u pictures, %u shown, "
+			       "%u ticks with none new, %u bytes dropped, %u flushes; buffer %d\n",
+			       ds.bytes_in, ds.sequences, ds.width, ds.height, ds.pictures, ds.presented,
+			       ds.late, ds.dropped_bytes, ds.flushes, ds.shown);
+		}
 		diag_print();
 	}
 }

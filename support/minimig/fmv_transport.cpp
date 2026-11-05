@@ -215,7 +215,7 @@ fmv_xport *fmv_xport_new(volatile uint8_t *win, fmv_log_fn log, void *log_ctx)
 	wr64(x, FMV_WIN_UQ_WPTR, 0);
 	barrier();
 	x->rdidx_pub = x->ev_rd - 1;     // publish once at the first poll
-	fmv_hooks h = { x, hook_update, hook_dram, hook_log };
+	fmv_hooks h = { x, hook_update, hook_dram, hook_log, 0, 0, 0, 0 };
 	x->model = fmv_model_new(h);     // pushes the masks and reset values
 	return x;
 }
@@ -229,6 +229,8 @@ void fmv_xport_free(fmv_xport *x)
 }
 
 fmv_model *fmv_xport_model(fmv_xport *x) { return x->model; }
+
+void fmv_xport_update(fmv_xport *x, const fmv_update &u) { hook_update(x, u); }
 
 void fmv_decode_autoconfig(const uint8_t *rom, fmv_autoconfig *ac)
 {

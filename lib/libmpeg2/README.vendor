@@ -7,8 +7,12 @@ SHA-256: dee22e893cb5fc2b2b6ebd60b88478ab8556cb3b93f9a0d7ce8f3b61851871d4
 Licence: GPL-2.0-or-later (COPYING), compatible with this repository's GPL-3.
 
 Used by tools/fmvbench (phase 1 of docs/fmv-plan.md) to measure MPEG-1
-decoding on the MiSTer's ARM. Not part of the Main binary: the top-level
-Makefile lists its lib/ directories by name and this is not one of them.
+decoding on the MiSTer's ARM, and since phase 3 by Main itself, as the CD32
+FMV module's video decoder (support/minimig/fmv_decoder.cpp). The top-level
+Makefile builds the portable C files only, not motion_comp_arm*: phase 1
+measured the ARM assembler at no gain. tests/Makefile builds the same files
+for test_fmv_decoder, without sanitizers (slice.c left-shifts negative
+values, which UBSan reports and GCC defines).
 
 Taken, unchanged:
   COPYING AUTHORS README

@@ -12,7 +12,9 @@
 
 #include <deque>
 
-const fmv_board fmv_board_default = { 0x8000, 0x4000, 0x0800, 0x0400, 0x0000 };
+#include "fmv_picture.h"
+
+const fmv_board fmv_board_default = { 0x8000, 0x4000, 0x0800, 0x0400, 0x0000, 0x4000 };
 
 namespace {
 
@@ -81,6 +83,9 @@ struct fmv_model {
 	uint32_t act_int0;         // INTs posted with Interrupt Status 0
 	int32_t  l64_rearm_us;     // to the next re-send of a raised L64111 latch
 	uint16_t window[4], border[4];
+	uint16_t video_format;     // SetVideoFormat(): 3 PAL, 4 NTSC [CL 11-40]
+	bool     blank;            // SetBlank(1) [CL 11-29]
+	bool     io_video_on;      // the IO word's video-on bit, as last written
 	uint16_t last_fullness;
 	bool     cflevel;
 	// data-port statistics, logged once a second rather than per word
@@ -283,6 +288,10 @@ static void cl_defaults(fmv_model *m, bool init)
 		set_reg(m, clx(CL_HOST_SCR0), 0, 0xFFFF);
 		m->int_mask = 0;                                  // Table 10-3
 		m->threshold = 4096;
+		m->video_format = 4;                              // NTSC
+		m->blank = false;
+		memset(m->window, 0, sizeof m->window);           // auto-size
+		memset(m->border, 0, sizeof m->border);           // auto-centre, sub-black
 	}
 	for (int i = 0; i < 16; i++)
 		set_reg(m, (uint8_t)(FMV_IDX_HMEM + i), 0, 0xFFFF);
@@ -367,6 +376,20 @@ static void cl_drain_cmem(fmv_model *m)
 		m->cmem_words--;
 }
 
+static void cl_video_word(fmv_model *m, uint16_t w)
+{
+	if (m->h.video_bytes) {
+		uint8_t b[2] = { (uint8_t)(w >> 8), (uint8_t)w };
+		m->h.video_bytes(m->h.vctx, b, 2);
+	}
+}
+
+static void cl_video_flush(fmv_model *m)
+{
+	if (m->h.video_flush)
+		m->h.video_flush(m->h.vctx);
+}
+
 static void cl_data_word(fmv_model *m, uint16_t w)
 {
 	m->stat_words++;
@@ -375,6 +398,7 @@ static void cl_data_word(fmv_model *m, uint16_t w)
 	if (cl_accepting(m) && !m->cmem_words && cl_fill(m) + 2 <= FMV_CL_BUFFER_BYTES) {
 		cl_scan(m, (uint8_t)(w >> 8));
 		cl_scan(m, (uint8_t)w);
+		cl_video_word(m, w);
 		m->und_reported = false;
 		m->dry_ticks = 0;
 		return;
@@ -388,6 +412,7 @@ static void cl_data_word(fmv_model *m, uint16_t w)
 	m->cmem_words++;
 	cl_scan(m, (uint8_t)(w >> 8));
 	cl_scan(m, (uint8_t)w);
+	cl_video_word(m, w);
 	cl_publish_cmem(m);
 }
 
@@ -429,6 +454,13 @@ static void cl_execute(fmv_model *m, const cmd_t &c)
 	case CLC_SET_BORDER:
 		memcpy(m->border, a + 1, sizeof m->border);
 		break;
+	case CLC_SET_BLANK:
+		m->blank = a[1] & 1;
+		break;
+	case CLC_SET_VIDEO_FORMAT:
+		if ((a[1] & 7) == 3 || (a[1] & 7) == 4)
+			m->video_format = a[1] & 7;
+		break;
 	case CLC_PLAY: case CLC_PAUSE: case CLC_SCAN: case CLC_SINGLE_STEP:
 	case CLC_SLOW_MOTION: case CLC_DISPLAY_STILL: {
 		int target = a[0] == CLC_PLAY ? ST_PLAY : a[0] == CLC_PAUSE ? ST_PAUSE : ST_OTHER;
@@ -445,7 +477,7 @@ static void cl_execute(fmv_model *m, const cmd_t &c)
 		break;
 	}
 	default:
-		break;   // SetBlank, SetColorMode, SetVideoFormat: logged, phase 3
+		break;   // SetColorMode: logged; RGB is assumed (the default)
 	}
 }
 
@@ -488,6 +520,7 @@ static void cl_accept_command(fmv_model *m)
 				it = it->w[0] == CLC_NEW_PACKET ? m->cl_fifo.erase(it) : it + 1;
 			cl_publish_cmem(m);
 			cl_publish_fullness(m, true);
+			cl_video_flush(m);
 			break;
 		case CLC_RESET:
 			// Reset() is not complete when HOST_newcmd clears [CL 11-27]:
@@ -496,6 +529,7 @@ static void cl_accept_command(fmv_model *m)
 			m->cl_reset_us = 1000;
 			m->cl_state = ST_IDLE;
 			m->cl_fifo.clear();
+			cl_video_flush(m);
 			break;
 		default:
 			if (!nm)
@@ -545,6 +579,8 @@ static bool cl_decode_tick(fmv_model *m)
 	m->marks.pop_front();
 	m->out_pos = m->marks.front().pos - 4;     // up to the next start code
 	m->pictures++;
+	if (m->h.video_picture)
+		m->h.video_picture(m->h.vctx);
 	// No PIC-V or GOP per decoded picture: WinUAE raises neither, and this
 	// ROM enables PIC-V but never clears it from Interrupt Status, so each
 	// would latch for good. PIC-D comes from the display tick instead.
@@ -1128,6 +1164,16 @@ fmv_model *fmv_model_new(const fmv_hooks &hooks)
 
 void fmv_model_free(fmv_model *m) { delete m; }
 
+void fmv_model_set_video_hooks(fmv_model *m, void *vctx,
+                               void (*bytes)(void *, const uint8_t *, size_t),
+                               void (*flush)(void *), void (*picture)(void *))
+{
+	m->h.vctx = vctx;
+	m->h.video_bytes = bytes;
+	m->h.video_flush = flush;
+	m->h.video_picture = picture;
+}
+
 void fmv_model_reset(fmv_model *m)
 {
 	push_masks(m);
@@ -1164,6 +1210,10 @@ void fmv_model_reset(fmv_model *m)
 	m->stat_us = 0;
 	memset(m->window, 0, sizeof m->window);
 	memset(m->border, 0, sizeof m->border);
+	m->video_format = 4;
+	m->blank = false;
+	m->io_video_on = false;
+	cl_video_flush(m);
 	// Hardware reset of the CL450: Int is 1 (INT inactive) [CL table 10-6].
 	set_reg(m, clx(CL_HOST_CONTROL), 0x0080, 0xFFFF);
 	set_reg(m, clx(CL_HOST_NEWCMD), 0, 0xFFFF);
@@ -1201,8 +1251,13 @@ void fmv_model_event(fmv_model *m, const fmv_event &e)
 	} else if (o < FMV_OFF_L64111) {
 		if (e.read)
 			logf(m, "FMV R IO = 0x%04x", e.data);
-		else
+		else {
 			logf(m, "FMV W IO = 0x%04x", e.data);
+			// Only a write that reaches the bit's byte lane changes it.
+			uint16_t lanes = (uint16_t)((e.uds ? 0xFF00 : 0) | (e.lds ? 0x00FF : 0));
+			if (lanes & m->b.io_video_on)
+				m->io_video_on = (e.data & m->b.io_video_on & lanes) != 0;
+		}
 	} else if (o < FMV_OFF_CMEM) {
 		l64_event(m, e);
 	} else if (o < FMV_OFF_CL450) {
@@ -1252,6 +1307,18 @@ void fmv_model_advance(fmv_model *m, uint32_t usec)
 }
 
 uint16_t fmv_model_reg(const fmv_model *m, uint8_t index) { return m->R[index]; }
+
+void fmv_model_display(const fmv_model *m, fmv_cl_display *d)
+{
+	d->seq_w = m->width;
+	d->seq_h = m->height;
+	memcpy(d->window, m->window, sizeof d->window);
+	memcpy(d->border, m->border, sizeof d->border);
+	d->video_format = m->video_format;
+	d->blank = m->blank;
+	d->idle = !m->cl_running || m->cl_state == ST_IDLE;
+	d->video_on = m->io_video_on;
+}
 
 void fmv_model_get_state(const fmv_model *m, fmv_model_state *s)
 {

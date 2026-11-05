@@ -609,6 +609,59 @@ into shadows.
 right border and no tearing, on HDMI and on analog out, PAL and NTSC. Timing
 gets the same panel check as phase 2.
 
+### Status, 2026-11-05: built, not yet run on hardware
+
+Contract v5 ([`fmv-contract.md`](fmv-contract.md), "The picture") is the
+interface. What was built against it:
+
+- **Main.** The model hands every bitstream byte it accepts to
+  `fmv_decoder.cpp`: libmpeg2 on a thread pinned to core 0. Each picture, in
+  display order, is cropped to the CL450's output window and written as
+  RGB565 into one of four frame buffers at `0x27200000`. The model's picture
+  schedule, the one gate 1 passed on, names the next ready buffer. A buffer
+  is not reused until a whole present after it was replaced, so the core
+  never shows one being written. `fmv_picture.cpp` turns `SetWindow()`,
+  `SetBorder()`, `SetVideoFormat()`, `SetBlank()` and the sequence header
+  into the display registers, following the manual's units and its
+  auto-size and auto-centre rules (pp. 11-29 to 11-44). The board's "CL450
+  video on" IO bit (`0x4000` as written, from WinUAE's names and so
+  unverified) switches the picture on. The window is blanked to the border
+  colour in IDLE, under `SetBlank(1)`, and until the first picture.
+- **Core** (`FringeCoder/AmigaCD_MiSTer` `rtl/fmv/fmv_video.v`). It counts
+  from the core's own `_hsync`/`_vsync`, as the CL450 counts from the
+  Amiga's. It fetches each window line a line ahead into a two-line buffer,
+  shows the border colour outside the window, and latches the registers at
+  VSYNC. `minimig.v` selects it over Denise's pixel where Denise's new ZD
+  output (Lisa's default mode) is asserted.
+- **Tests.** `test_fmv_picture` covers the window rules, the registers, the
+  buffer ring, the conversion and the model's hooks. `test_fmv_decoder`
+  covers the real decoder on a generated 9-picture I/B/P stream: display
+  order, colours, back-pressure, flushes, crops, and the shown buffer kept
+  intact. 20 mutations of the Main side, all caught; five were not at
+  first and their tests were tightened. In the core, `tb_fmv_video.sv` plus
+  13 mutations.
+
+**Calibration, under `[AmigaCD]` in `MiSTer.ini`.** The picture's position
+against the core's beam has not been measured. The manual's auto-centre
+assumes leftBorder 60 and topBorder 18 for the CL450's own video timing.
+- `AMIGACD_FMV_HOFS=n`: display pixels (hires) added to the left edge,
+  -512 to 512.
+- `AMIGACD_FMV_VOFS=n`: lines added to the top edge, -128 to 128.
+- `AMIGACD_FMV_SHOW=1`: the picture on whatever the IO word says (if the
+  video-on bit turns out to be another one). `=2` also ignores the ZD key, so
+  the whole screen shows the cartridge's output: the window and the border
+  colour around it. That is the view to measure the offsets in.
+
+Main prints `FMV picture window: WxH from (x,y) of the picture, at display
+pixel X, line Y` whenever the window changes, `FMV picture: on/off` whenever
+those change, and a `FMV decoder:` line every 10 s with bytes in, pictures
+decoded and shown, ticks with nothing new, and dropped bytes.
+
+Open, for the first hardware run: whether `0x4000` is the video-on bit;
+whether ZD's default mode is the key Cannon Fodder's intro needs (it may
+use none of ZD's other modes, or another key entirely); the offsets; and
+whether decoding keeps up with the model's schedule (the `late` count).
+
 ## Phase 4: sound
 
 The L64111 outputs 44.1 kHz stereo, the same as CD audio, and a Video CD's

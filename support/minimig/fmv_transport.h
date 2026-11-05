@@ -65,6 +65,9 @@ struct fmv_xport_stats {
 void fmv_xport_get_stats(const fmv_xport *x, fmv_xport_stats *s);
 
 fmv_model *fmv_xport_model(fmv_xport *x);
+// An update of Main's own (the display registers, contract v5), queued in
+// order with the model's.
+void fmv_xport_update(fmv_xport *x, const fmv_update &u);
 
 // True once the core has failed to take the update queue for 2 s (logged).
 bool fmv_xport_stalled(const fmv_xport *x);

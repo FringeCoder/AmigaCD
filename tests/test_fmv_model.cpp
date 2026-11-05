@@ -94,7 +94,7 @@ static void hook_log(void *ctx, const char *line)
 
 static void attach(fpga &f)
 {
-	fmv_hooks h = { &f, hook_update, hook_dram, hook_log };
+	fmv_hooks h = { &f, hook_update, hook_dram, hook_log, 0, 0, 0, 0 };
 	f.model = fmv_model_new(h);
 	g_fpga = &f;
 }

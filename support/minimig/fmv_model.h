@@ -115,6 +115,15 @@ struct fmv_hooks {
 	// written by the decoder's microcode [CL ch. 14, appendix A].
 	void (*dram_write)(void *ctx, uint32_t waddr, uint16_t value);
 	void (*log)(void *ctx, const char *line);
+	// Phase 3 (fmv_decoder.cpp), with a context of their own. Optional, may
+	// be null; set with fmv_model_set_video_hooks().
+	void *vctx;
+	// Bitstream bytes the CL450 has accepted, in order, as they arrive.
+	void (*video_bytes)(void *ctx, const uint8_t *p, size_t n);
+	// The bitstream restarts: FlushBitstream(), Reset(), a board reset.
+	void (*video_flush)(void *ctx);
+	// The model has taken a picture off its schedule: show the next one.
+	void (*video_picture)(void *ctx);
 };
 
 // ------------------------------------------------------------- board wiring
@@ -130,6 +139,8 @@ struct fmv_board {
 	uint16_t io_l64_falf;     // 0x0400: WinUAE gives FALF, FALE and FEMP the
 	                          // same bit; taken here as FALF (stop writing)
 	uint16_t io_int_pol;      // value of the int bits while asserted
+	uint16_t io_video_on;     // 0x4000 as WRITTEN, "CL450 video on": the
+	                          // cartridge's picture is selected (contract v5)
 };
 extern const fmv_board fmv_board_default;
 
@@ -152,6 +163,9 @@ struct fmv_model;
 
 fmv_model *fmv_model_new(const fmv_hooks &hooks);
 void fmv_model_free(fmv_model *m);
+void fmv_model_set_video_hooks(fmv_model *m, void *vctx,
+                               void (*bytes)(void *, const uint8_t *, size_t),
+                               void (*flush)(void *), void (*picture)(void *));
 
 // Power on, or an Amiga reset: put the chips in their reset state and push
 // the 68k write masks and reset values to the FPGA.
@@ -190,6 +204,10 @@ struct fmv_model_state {
 	bool     l64_int;             // the INTR latch as the model holds it
 };
 void fmv_model_get_state(const fmv_model *m, fmv_model_state *s);
+
+// What the CL450 has been told about its output (fmv_picture.h).
+struct fmv_cl_display;
+void fmv_model_display(const fmv_model *m, fmv_cl_display *d);
 
 
 // One line on what the 68k has done to the board since the last call,
