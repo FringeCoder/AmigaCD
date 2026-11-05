@@ -630,9 +630,11 @@ static int minimig_ss_blocked()
 	// AmigaCD.sv). The 68000 (fx68k) and Zorro III fast RAM stay refused.
 	int cpu = minimig_config.cpu & 0x03;
 	// The ARM CPU's state lives on the ARM, where no save state reaches; so
-	// does the FMV module's, the MPEG decoders and the chip model in Main.
+	// does the FMV module's (the chip model and the MPEG decoders, in Main).
+	// The module is left out of the state, which is harmless while it is
+	// idle: refused only while it plays (fmv_playing).
 	return (minimig_fast_z3(minimig_config.cpu) && fastram >= 4) || (cpu == 0) || armcpu_wanted() ||
-	       fmv_wanted();
+	       fmv_playing();
 }
 
 // Ask the core for a save, from either menu.
@@ -838,7 +840,7 @@ int amigacd_ss_hotkey(int action)
 	{
 		// The same conditions that grey the Settings rows out. There they
 		// are visible before the press; here there is nothing to grey.
-		Info(fmv_wanted() ? "No save states with the FMV module on"
+		Info(fmv_playing() ? "No save states during FMV playback"
 		                  : "Save states need 020 and no Z3 RAM", 2500, 0, 0, 0, 1);
 		return 1;
 	}
@@ -8568,7 +8570,7 @@ void HandleUI(void)
 				/* 6 Save     */ "Capture the machine into the selected slot. Ctrl+Alt+F1 does it without opening the menu, which is the point of it.",
 				/* 7 Restore  */ "Put the selected slot back. Ctrl+Alt+F2 does it without the menu. Refused when there is no disc or HDF to name the save after.",
 				/* 8 CD speed */ "Fast is the rate this core has always used. CD32 (2x) is what the real machine does: four times the loading, four times the margin.",
-				/* 9 FMV      */ "The CD32 FMV cartridge, for Video CDs and the games with FMV intros. Takes effect at the next reset. Needs CD32FMV.rom; no save states while it is on.",
+				/* 9 FMV      */ "The CD32 FMV cartridge, for Video CDs and the games with FMV intros. Takes effect at the next reset. Needs CD32FMV.rom. Save states work, but not while a video plays.",
 				/*10 Clear NVR*/ "Erase the CD32 saved games for the disc in the drive. Not a save state. Asks first, and the machine needs a reset to see it.",
 				/*11 Video/A  */ "The Amiga's own video and audio: PAL or NTSC, stereo mix, the LED filter, Paula output, and screen centring.",
 				/*12 back     */ "Back to the main page.",

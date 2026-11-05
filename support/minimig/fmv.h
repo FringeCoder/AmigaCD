@@ -27,9 +27,14 @@ void fmv_poll(void);
 void fmv_shutdown(void);
 
 // Whether the board is to be on: the OSD row (or AMIGACD_FMV=1), a CD32,
-// and no ARM CPU. Save states are refused while it is (menu.cpp,
-// minimig_ss_blocked): the MPEG decoders' state lives on the ARM.
+// and no ARM CPU.
 int fmv_wanted(void);
+// Whether the board is playing: a stream decoding, or the picture on. Save
+// states are refused while it is (menu.cpp, minimig_ss_blocked), and only
+// then: the model and the decoders live on the ARM and are not in the
+// state, which is harmless while the board is idle. See fmv-plan.md,
+// phase 5, for what that leaves out.
+int fmv_playing(void);
 // Whether the ARM CPU is what keeps it off.
 int fmv_blocked_by_armcpu(void);
 // Whether CD32FMV.rom or fmv.rom is where the board would look for it.

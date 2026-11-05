@@ -846,8 +846,34 @@ from Real CD.
   branch with the module off. The `.mgl` key is `fmv_module`.
   `AMIGACD_FMV=1` in `MiSTer.ini` still turns it on (the test harness), and
   2-4 keep the diag modes.
-- **Save states are refused** while the module is wanted
-  (`minimig_ss_blocked`): the rows grey out and the hotkeys say why.
+- **Save states work with the module on, except during playback.** The
+  module is left out of the state: the CL450/L64111 model and both
+  decoders live on the ARM, and none of it is saved. That is harmless
+  while the board is idle, so a save or a restore is refused only while it
+  plays (`fmv_playing`): the CL450 out of IDLE, the L64111 started with
+  frames buffered, or the cartridge's picture on. The rows grey out then,
+  and the hotkeys say `No save states during FMV playback`. Cannon
+  Fodder's driver shuts the board down at the end of its intro (Reset(),
+  FlushBitstream(), the picture off; runs v21-v24), so saves work again
+  from there. (The first version of this phase refused them whenever the
+  module was on; the owner's call, 2026-11-05, was to ignore the module
+  and state the limitation instead.)
+
+  **Limitations**, by design:
+  - A save never holds a video in progress. To save during a title with
+    FMV, save before or after it.
+  - The board's own memory is not in the state either: the CL450's 512 KB
+    DRAM (board RAM in DDR3), the FPGA's register file, and what the model
+    knows (microcode loaded, the last SetWindow/SetBorder, the L64111's
+    registers). A restore leaves those as the running session has them. A
+    game whose driver keeps state on the board between videos could find
+    it different after a restore. Cannon Fodder resets the board before
+    each use.
+  - Restore with the module set as it was when the state was saved. The
+    board is configured at reset and the state carries the Amiga's view of
+    it, so a state saved with the module on and restored with it off (or
+    the other way round) leaves the Amiga's expansion list wrong for the
+    hardware. Neither case is detected.
 - **The ARM CPU**: the CPU row skips the ARM step while the module is on,
   the module's row greys while the ARM CPU is on, and Main does not start
   the board if a config brings both.

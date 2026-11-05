@@ -368,7 +368,9 @@ has.
 | ... on a CDTV, A500 or A1200 | `N/A (CD32 only)`, greyed | |
 | ... with the ARM CPU on (test core) | `N/A (ARM CPU)`, greyed; and the CPU row skips ARM while the module is on | ⏳ |
 | ROM present, the row toggled On | `FMV module on: reset the Amiga`; after the reset `FMV board alive` in the log | ⏳ from the row; ✅ with `AMIGACD_FMV=1` (v21-v24) |
-| Save state rows with the module on | Greyed; `Ctrl+Alt+F1` toasts `No save states with the FMV module on` | ⏳ |
+| Save state rows while the intro plays | Greyed; `Ctrl+Alt+F1` toasts `No save states during FMV playback` | ⏳ |
+| ... once the intro has ended (the game's own screens) | Enabled again; a save and a restore work | ⏳ |
+| ... a state saved with the module on, restored with it off | Not detected: a known limitation (fmv-plan.md, phase 5) | |
 | `.mgl` written with the module on | Carries `fmv_module` `1`; launching it brings the module up | ⏳ |
 | A config saved before this build | Loads, the module Off (`Pre FMV-module configuration file, migrating.` in the log) | ⏳ |
 | Cannon Fodder, the first reset | The intro streams to its end and the game loads | ✅ v21-v24 |

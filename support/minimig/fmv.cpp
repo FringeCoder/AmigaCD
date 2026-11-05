@@ -285,6 +285,27 @@ int fmv_blocked_by_armcpu(void)
 	return armcpu_wanted();
 }
 
+int fmv_playing(void)
+{
+	// Save states leave the board out: the CL450/L64111 model and both
+	// decoders live on the ARM, and nothing of them is in the state. That is
+	// safe only while the board is idle, so a save or restore is refused
+	// while it is not: the CL450 out of IDLE (decoding or showing a
+	// picture), the L64111 started with frames in its channel buffer, or the
+	// cartridge's picture on. Cannon Fodder's driver ends its intro with
+	// Reset(), FlushBitstream() and the picture off (runs v21-v24), so after
+	// the intro this reads 0 again.
+	if (!xport)
+		return 0;
+	fmv_model *m = fmv_xport_model(xport);
+	fmv_cl_display d;
+	fmv_model_display(m, &d);
+	fmv_model_state st;
+	fmv_model_get_state(m, &st);
+	return !d.idle || (st.l64_started && st.l64_cb_frames) ||
+	       (disp_valid && (disp_sent[0] & FMV_DISP_ON));
+}
+
 int fmv_wanted(void)
 {
 	// The OSD row, or AMIGACD_FMV=1 in MiSTer.ini, which the test harness
