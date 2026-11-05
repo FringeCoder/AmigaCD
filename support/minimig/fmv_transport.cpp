@@ -351,6 +351,12 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 		return 0;
 	}
 	const uint16_t *d = w + i + 1;
+	if (d[0] == 0x0000) {
+		// The core answers the window but was built without the taps
+		// behind it (AmigaCD_MiSTer: FMV_DIAG off, the default)
+		snprintf(out, len, "FMV diag: off in this core (build with FMV_DIAG=1 to see it)");
+		return 0;
+	}
 	if (d[0] != 0xF401 && d[0] != 0xF402) {
 		snprintf(out, len, "FMV diag: unknown layout version %04x", d[0]);
 		return 0;

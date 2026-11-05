@@ -479,6 +479,9 @@ static void test_diag_format()
 	check(strstr(line, "FPGA: INT2 1, L64111 latch 1, CL450 INT 0") != 0, "diag F402: the interrupt lines");
 	check(fmv_diag_format(w, 12, line, sizeof line) == 1 && !strstr(line, "FPGA: INT2"),
 	      "diag F401: no interrupt lines claimed");
+	uint16_t offw[12] = { 0x0000, 0xA5F4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+	check(fmv_diag_format(offw, 12, line, sizeof line) == 0 && strstr(line, "off in this core"),
+	      "diag: a core built without the taps says so");
 	uint16_t none[12] = { 0 };
 	check(fmv_diag_format(none, 12, line, sizeof line) == 0 && strstr(line, "no window"),
 	      "diag: a core without the window says so");

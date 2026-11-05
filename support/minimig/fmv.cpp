@@ -140,7 +140,16 @@ static void diag_print()
 		w[i] = (uint16_t)spi_w(0);
 	DisableIO();
 	char line[2400];
-	fmv_diag_format(w, 44, line, sizeof line);
+	static int off_said;
+	if (!fmv_diag_format(w, 44, line, sizeof line)) {
+		// No window (an older core) or one built without its taps: say so
+		// once, not every ten seconds
+		if (!off_said) {
+			off_said = 1;
+			printf("%s\n", line);
+		}
+		return;
+	}
 	uint32_t r[5];
 	fpga_sdr_status(r);
 	printf("%s; HPS: dramsts %08x fpgaportrst %08x protportdefault %08x brgmodrst %08x "
