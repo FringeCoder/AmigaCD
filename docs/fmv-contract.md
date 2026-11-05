@@ -1,7 +1,7 @@
 # FMV module: the contract between the core and Main
 
-**Status:** draft for phase 2 of [`fmv-plan.md`](fmv-plan.md), 2026-11-02.
-Version 4.
+**Status:** phases 2 and 3 of [`fmv-plan.md`](fmv-plan.md), 2026-11-05.
+Version 5.
 
 Both halves of the FMV module are built against this file: the core's front
 end (`rtl/fmv/` in `FringeCoder/AmigaCD_MiSTer`) and Main's model and transport
@@ -50,7 +50,7 @@ ARM physical **`0x27000000`**, 2 MB, which is Avalon (DDRAM_ADDR, 64-bit word)
 `0x27800000` (drive sounds) and `0x27FF4000` (share). It is clear of Z3 fast
 RAM (`0x30000000-0x3FFFFFFF`), the save state windows (`0x3C000000`), the
 A2065 (`0x1FF00000`) and the scaler and framebuffer at `0x20000000-0x22xxxxxx`.
-`0x27200000-0x277FFFFF` is reserved for phase 3's frame buffers.
+`0x27200000-0x277FFFFF` holds phase 3's frame buffers (v5, "The picture" below).
 
 | Offset | Size | Who writes | What |
 |---|---|---|---|
@@ -107,7 +107,8 @@ Indices:
 | `0xC5` | `IO_MAP_L64`: IO-word bits that show the L64111 interrupt | none |
 | `0xC6` | `IO_POL`: those bits' value while asserted | none |
 | `0xD0-0xDF` | `AUTOCFG`: 64 nibbles (below) | none |
-| `0xE0-0xFF` | reserved | none |
+| `0xE0-0xE6` | the display registers (v5, "The picture" below) | none |
+| `0xE7-0xFF` | reserved | none |
 
 `AUTOCFG` uses `0xD0-0xDF`: 16 registers of 4 nibbles. Nibble `n` (what the
 68k reads as the high nibble at autoconfig offset `2n`, `n` = 0..63) is bits
@@ -234,6 +235,61 @@ v3 resumed from the pointers instead. On hardware (2026-11-02, Cannon
 Fodder), a fresh core started at entry 0 while Main queued from whatever
 `UQ_RDPTR` held. `ALIVE` never landed, and the board never joined the chain.
 
+## The picture (v5, phase 3)
+
+The CL450 makes no syncs. It takes the Amiga's HSYNC and VSYNC, and outputs
+one display pixel per VCLK: the decoded picture inside an output window, and
+the border colour everywhere else (plan, phase 0 item 6; CL450 manual,
+`SetBorder()` and `SetWindow()`, pp. 11-30 to 11-44). The cartridge switches
+between that output and the Amiga's own per pixel, on the genlock key. The
+FPGA does the switching and the placing; Main does the decoding and works
+out the window from the macro commands.
+
+### Frame buffers, `0x27200000-0x273FFFFF`
+
+Four buffers of 512 KB. Buffer `b` (0-3) starts at ARM `0x27200000 +
+b * 0x80000`, Avalon `29'h04E40000 + b * 29'h10000`. Pixel `(x, y)` of the
+output window is the 16-bit word at byte `y * 1024 + 2 * x` of its buffer,
+RGB565 little-endian (bits 15:11 red, 10:5 green, 4:0 blue), so Avalon word
+`y * 128 + x / 4` holds pixels `4(x/4)` to `4(x/4)+3`, pixel `x` in bits
+`16(x&3)+15 : 16(x&3)`. At most 384 pixels by 512 lines.
+
+A buffer holds the output window only, already cropped (`SetWindow`'s
+`xOffset`, `yOffset`), so the FPGA never needs the picture size.
+
+### The display registers, `0xE0-0xE6`
+
+Flops in the FPGA, written by Main through the update queue like any other
+index. The 68k cannot reach them.
+
+| Index | Name | Bits |
+|---|---|---|
+| `0xE0` | `DISP_CTRL` | 0 `ON`: the cartridge's output is selected where the key is asserted. 1 `BLANK`: the window shows the border colour (`SetBlank(1)`, and before the first picture). 3:2 `BUF`: the buffer shown. 4 `KEY_ALL`: ignore the key and select the cartridge everywhere (for calibration). |
+| `0xE1` | `DISP_X` | window left edge, in display pixels after the falling edge of `_HSYNC`. A display pixel is two `clk_sys` cycles, a hires pixel. |
+| `0xE2` | `DISP_Y` | window top line, in lines after the falling edge of `_VSYNC` |
+| `0xE3` | `DISP_W` | window width in source pixels, a multiple of 4, at most 384. Each is shown for two display pixels (CL450 p. 11-44) |
+| `0xE4` | `DISP_H` | window height in lines, at most 512 |
+| `0xE5` | `BORDER_RG` | border red in 15:8, green in 7:0 |
+| `0xE6` | `BORDER_B` | border blue in 7:0 |
+
+- The FPGA copies all seven into the set it displays from on the falling
+  edge of `_VSYNC`. New `SetBorder()`/`SetWindow()` values take effect on
+  VSYNC in the chip too, and this way a change of `BUF` never tears.
+- **Main writes a buffer completely before naming it in `BUF`, and does not
+  write a buffer again until a whole frame after it last named another.**
+  That is four buffers: shown, just replaced (maybe still shown until the
+  next VSYNC), ready, and being decoded.
+- **The key** is Lisa's ZD in its default mode: asserted on a pixel whose
+  colour-table select is 0 (background, no sprite), and in the border unless
+  `BPLCON3` `BRDNTRAN` is set (plan, phase 0 item 5, an inference not yet
+  confirmed). ZD's other modes (`ZDBPEN`, `ZDCTEN`, `ZDCLKEN`) are not
+  modelled.
+- **Fetching:** at each `_HSYNC` the FPGA reads the next line's window row
+  (`DISP_W / 4` words) into the other half of a two-line buffer. If DDR3 is
+  late, the line shows what the buffer last held. The FPGA never waits on it.
+- With `status[64]` clear, or `ON` clear, the Amiga's picture goes through
+  unchanged and nothing is fetched.
+
 ## Option and exclusions
 
 - One OSD status bit, **FMV module Off/On**, allocated in the core's
@@ -253,6 +309,7 @@ Fodder), a fresh core started at entry 0 while Main queued from whatever
 
 | Version | Date | Change |
 |---|---|---|
+| 5 | 2026-11-05 | The picture: four RGB565 frame buffers at `0x27200000`, display registers `0xE0-0xE6` latched at VSYNC, the ZD key. Nothing in v4 changes. |
 | 4 | 2026-11-02 | A session starts from zero: off, the FPGA holds its counters at 0 and leaves the window alone; Main zeroes the pointers before setting `status[64]`. Replaces v3's resume-from-pointers, which failed on hardware. |
 | 1 | 2026-11-02 | First draft, phase 2: posted ring plus a shadow block |
 | 3 | 2026-11-02 | `UQ_RDPTR`, so Main cannot overrun the update queue; update-queue word order; back-pressure on `HOST_RDIDX`'s low half only; the guard compare made wrap-safe. Nothing was yet built on v2. |
