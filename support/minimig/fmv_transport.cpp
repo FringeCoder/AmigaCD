@@ -368,6 +368,40 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 		snprintf(out, len, "FMV diag: off in this core (build with FMV_DIAG=1 to see it)");
 		return 0;
 	}
+	if (d[0] == 0xF404) {
+		// 0xF404 (AmigaCD_MiSTer fmv.v): fmv_bus's perf window over the last
+		// quarter second, from bit 0 of word 2: accesses (17 bits), then
+		// clocks held, held for the event FIFO, for the ring, on ROM reads
+		// (the ROM cache and its fills), on RAM, 15 bits each in units of 256
+		// clk_sys. Shown per second. INT2, the L64111 latch and the CL450 INT
+		// are bits 15:13 of word 7. 0xF403's one-second count saturated (run
+		// v28), and ROM and RAM were one.
+		auto field = [&](int off, int width) -> unsigned {
+			unsigned v = 0;
+			for (int b = 0; b < width; b++) {
+				int bit = off + b;
+				v |= (unsigned)((d[2 + bit / 16] >> (bit % 16)) & 1) << b;
+			}
+			return v;
+		};
+		const double unit_us = 4 * 256.0 / 28.37516;  // per second, PAL clk_sys
+		unsigned acc = 4 * field(0, 17);
+		double held = field(17, 15) * unit_us, fifo = field(32, 15) * unit_us,
+		       ring = field(47, 15) * unit_us, rom = field(62, 15) * unit_us,
+		       ram = field(77, 15) * unit_us;
+		uint16_t f = d[1];
+		snprintf(out, len,
+		         "FMV diag: fmv_ddr %s, on %u, up_full %u, ev_empty %u; fmv_bus %s, ALIVE %u, "
+		         "status[64] %u; the 68k on the board, per second (last 1/4 s): %u accesses, "
+		         "held %.0f us (event FIFO %.0f, ring %.0f, ROM %.0f, RAM %.0f, the rest %.0f), "
+		         "%.2f us an access; FPGA: INT2 %u, L64111 latch %u, CL450 INT %u",
+		         ddr_st[f >> 12], (f >> 11) & 1, (f >> 10) & 1, (f >> 9) & 1,
+		         bus_st[(f >> 2) & 7], (f >> 1) & 1, f & 1,
+		         acc, held, fifo, ring, rom, ram, held - fifo - ring - rom - ram,
+		         acc ? held / acc : 0.0,
+		         (d[7] >> 15) & 1, (d[7] >> 14) & 1, (d[7] >> 13) & 1);
+		return 1;
+	}
 	if (d[0] == 0xF403) {
 		// 0xF403 (AmigaCD_MiSTer fmv.v): words 2-7 carry fmv_bus's perf
 		// window, the last second of the 68k's time on the board, from bit 0

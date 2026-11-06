@@ -518,7 +518,32 @@ static void test_diag_format()
 		check(strstr(line, "INT2 1, L64111 latch 0") != 0, "diag F403: the interrupt lines, word 7");
 	}
 
-	// Layout 0xF402: word 6 has INT2, the L64111 latch and the CL450 INT on
+	// Layout 0xF404: a quarter second, ROM and RAM apart. acc 40000 (17
+	// bits), held 20000, fifo 0, ring 100, rom 15000, ram 2000 (15 bits).
+	{
+		uint16_t w4[12] = { 0x0000, 0xA5F4, 0xF404, 0x0001 };
+		const unsigned fv[6] = { 40000, 20000, 0, 100, 15000, 2000 };
+		const int width[6] = { 17, 15, 15, 15, 15, 15 };
+		int off = 0;
+		for (int k = 0; k < 6; k++) {
+			for (int b = 0; b < width[k]; b++)
+				if ((fv[k] >> b) & 1) {
+					int bit = off + b;
+					w4[4 + bit / 16] |= (uint16_t)(1u << (bit % 16));
+				}
+			off += width[k];
+		}
+		w4[9] |= 0x4000;                              // the L64111 latch
+		check(fmv_diag_format(w4, 12, line, sizeof line) == 1, "diag F404: decoded");
+		check(strstr(line, "160000 accesses") != 0, "diag F404: accesses x4, per second");
+		check(strstr(line, "held 721758 us") != 0, "diag F404: held, 15 bits from bit 17");
+		check(strstr(line, "ring 3609,") != 0, "diag F404: ring, from bit 47");
+		check(strstr(line, "ROM 541319,") != 0, "diag F404: ROM, from bit 62");
+		check(strstr(line, "RAM 72176,") != 0, "diag F404: RAM, from bit 77");
+		check(strstr(line, "INT2 0, L64111 latch 1") != 0, "diag F404: the interrupt lines");
+	}
+
+		// Layout 0xF402: word 6 has INT2, the L64111 latch and the CL450 INT on
 	// top, UQ_WPTR's low 12 bits below
 	// d[0] is index 2: version, flags, polls, beats, dwell, uq_rd, word 6, events
 	uint16_t w2[12] = { 0x0000, 0xA5F4, 0xF402, w[3], 5, 0, 0xFFFF, 0,

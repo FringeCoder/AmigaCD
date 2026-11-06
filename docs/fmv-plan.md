@@ -10,7 +10,8 @@ Phase 4 (sound) runs on hardware (run v24: every frame played reached the
 FIFO), not yet heard. Phase 3 and 4 run on a closed-timing build. Phase 5
 (OSD row, the migration, save states outside playback) passes on hardware
 (run v25). **Run v26 found the intro playing at 2/3 of its speed**, which
-v21-v25 had missed; the stream is not yet at full rate.
+v21-v25 had missed; the stream is not yet at full rate. v28 traced it to
+the 68k waiting on ROM fetches from DDR3; a ROM cache is the fix in test.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -975,6 +976,28 @@ has arrived.
   16, with polls blocked at 537 and 502 against 3599. Two runs, and the
   rate problem under them, so it is not shown to be the cause.
 - The harness's reset failed once more (reset sent, no `FMV Amiga reset`).
+
+
+### Runs v27 and v28, 2026-11-06: the 68k waits on the cartridge ROM
+
+v27 (the rate line) confirmed v26's rate, 0.69 of real time, and put Main
+out of it: its polls are short and close together, drains seldom find the
+ring near full. v28 (a diag build with the 0xF403 perf window) split the
+68k's held time a second: the event FIFO 0, the ring under 1 %, and the
+ROM and RAM trips to DDR3 about 35 %. The access count saturated at its
+17-bit 131071, so the per-access figure I drew from v27 (14 us) was wrong:
+ROM reads make no events and were never in it.
+
+So the driver, which runs from the cartridge ROM, spends a third of its
+time on instruction fetches across the f2sdram bridge. The fix, in the core:
+a 4 KB direct-mapped line cache for the ROM in `fmv_bus` (32-byte lines,
+filled by a 4-beat burst in `fmv_ddr`, emptied when the module is off). RAM
+is not cached: the 68k and Main both write it. The perf word (diag
+0xF404) widens with it: a 1/4 s window, ROM and RAM time counted apart.
+
+**To see in the next run:** the rate line at 25.0 pictures/s and 38.3
+audio frames/s, FIFO underruns near 0 during play, and on a diag build the
+ROM share well under v28's.
 
 
 ## Risks, ranked
