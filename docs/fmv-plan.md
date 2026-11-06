@@ -11,7 +11,8 @@ FIFO), not yet heard. Phase 3 and 4 run on a closed-timing build. Phase 5
 (OSD row, the migration, save states outside playback) passes on hardware
 (run v25). **Run v26 found the intro playing at 2/3 of its speed**, which
 v21-v25 had missed; the stream is not yet at full rate. v28 traced it to
-the 68k waiting on ROM fetches from DDR3; a ROM cache is the fix in test.
+the 68k waiting on ROM fetches from DDR3; with a ROM cache (v29) it is 0.865,
+and the CD feed is the open suspect.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -998,6 +999,47 @@ is not cached: the 68k and Main both write it. The perf word (diag
 **To see in the next run:** the rate line at 25.0 pictures/s and 38.3
 audio frames/s, FIFO underruns near 0 during play, and on a diag build the
 ROM share well under v28's.
+
+
+### Run v29, 2026-11-06: the ROM cache, 0.865 of real time
+
+Core 7869966 (seed 4 of fit 42269491587, +0.029/+0.183 at the flow's one
+STA corner, -0.040 over all corners), Main afd226e, Cannon Fodder, HDMI,
+PAL, three runs.
+
+- **The cache works and is not enough.** 21.2-21.8 pictures/s against 25.0
+  and 31.7-33.7 audio frames/s against 38.3: 0.865 of real time, from
+  0.69. The intro ran to its end by itself in about 200 s (165 s real).
+  4303 pictures, 4 late; 6386 audio frames in, 0 bad. FIFO underruns about
+  7600/s during play, starves 9/s.
+- **The 68k is off the board 90 % of the time.** Held about 102 ms a second:
+  ROM 64 ms (from about 350 for ROM and RAM in v28), event FIFO 0, ring 0
+  in steady windows but bursty (86 ms in one early window), RAM 0. The
+  access count still saturates in the 1/4 s window (more than 524284 a
+  second). RAM 0 is not yet shown on hardware to be real rather than a dead
+  counter; the bench shows the counter counting.
+- **CPU Turbo changes nothing** (21.5-22.0 pictures/s). The CPU row reading
+  68020 with Turbo On and 68EC020 with it Off is by design (menu.cpp), so
+  Turbo did take effect: 68k speed is not the limit.
+- **The IO word reads** (about 6500/s, 99 % 0xc800: no interrupt pending,
+  CFLEVEL set) did not move with Turbo, so they are interrupt or timer
+  driven, not a spin loop.
+- **The decoders are starved.** The L64111 model plays in real time while
+  it holds frames and stalls when its buffer is empty, so audio at 86 % is
+  86 % of the data arriving. With the 68k mostly idle, the open suspect is
+  the CD feed. In the core one PBX sector is buffered and each ship
+  restarts the period from its own start, so a sector Main pushes late
+  costs that time for good. Main answers sec_req in the loop that drains
+  the event ring, which was at 4095 of 4096 on every rate line. CD speed
+  was ruled out in v26, when the ROM was the limit, so that no longer
+  stands.
+
+**Next:** from the v29 Akiko log, PAUSE during a data read (the driver
+stopping a drive that is ahead) against none (the drive behind), and the
+`sec_req timing` averages; from the diag log, where the 68k's PC sits
+during play; then CD Fast on seed 4. If the CD is the limit, the fix is a
+pacing that recovers a late sector (deadline from the scheduled start, not
+the actual one) and sec_req served ahead of a long ring drain.
 
 
 ## Risks, ranked
