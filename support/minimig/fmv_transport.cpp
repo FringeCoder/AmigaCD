@@ -157,6 +157,13 @@ static void drain_events(fmv_xport *x)
 {
 	uint32_t wptr = (uint32_t)rd64(x, FMV_WIN_EV_WPTR);
 	uint32_t n = wptr - x->ev_rd;
+	if (n) {
+		x->st.drains++;
+		if (n >= FMV_EV_NEAR_FULL)
+			x->st.near_full++;
+		if (n > x->st.backlog_max)
+			x->st.backlog_max = n;
+	}
 	if (n > FMV_EV_ENTRIES) {
 		// The FPGA holds the 68k while the ring is full, so this means Main
 		// lost track: skip to the oldest entry the ring still holds.
@@ -339,6 +346,8 @@ void fmv_xport_get_stats(const fmv_xport *x, fmv_xport_stats *s)
 }
 
 bool fmv_xport_stalled(const fmv_xport *x) { return x->stall_logged; }
+
+void fmv_xport_clear_max(fmv_xport *x) { x->st.backlog_max = 0; }
 
 int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 {

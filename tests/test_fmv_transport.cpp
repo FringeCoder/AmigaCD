@@ -254,6 +254,33 @@ static void test_seq_not_landed()
 	fmv_xport_free(x);
 }
 
+static void test_backlog_counted()
+{
+	// The 68k is held while the ring is full, so a drain that finds it near
+	// full says Main was the slow side (run v26).
+	wfpga f;
+	fmv_xport *x = fmv_xport_new(f.win, logcb, 0);
+	pump(x, f);
+	fmv_xport_stats st;
+	fmv_xport_get_stats(x, &st);
+	uint32_t d0 = st.drains;
+	for (int i = 0; i < 4050; i++)
+		f.write(FMV_OFF_CMEM, 0x0000);
+	pump(x, f);
+	fmv_xport_get_stats(x, &st);
+	eq("one drain more", st.drains, d0 + 1);
+	eq("it found the ring near full", st.near_full, 1);
+	check(st.backlog_max >= 4050, "the most found waiting is recorded");
+	fmv_xport_clear_max(x);
+	for (int i = 0; i < 10; i++)
+		f.write(FMV_OFF_CMEM, 0x0000);
+	pump(x, f);
+	fmv_xport_get_stats(x, &st);
+	eq("a short backlog is not near full", st.near_full, 1);
+	eq("the max restarts after a clear", st.backlog_max, 10);
+	fmv_xport_free(x);
+}
+
 static void test_queue_never_overrun()
 {
 	wfpga f;
@@ -506,6 +533,7 @@ static void test_guard_wraps()
 
 int main()
 {
+	test_backlog_counted();
 	test_start();
 	test_rom_names();
 	test_events_end_to_end();

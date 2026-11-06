@@ -61,7 +61,16 @@ struct fmv_xport_stats {
 	uint32_t updates;       // written to the queue in total
 	uint32_t uq_waits;      // passes that found the queue full
 	uint32_t pending;       // updates waiting in Main now
+	// How far behind Main was. The FPGA holds the 68k on a ring-bound access
+	// while the ring is full (contract, back-pressure), so drains that begin
+	// near full mean the 68k waited on Main: what limits a stream when Main
+	// is the slow side (run v26: the intro at 2/3 speed).
+	uint32_t drains;        // passes that found events waiting
+	uint32_t near_full;     // ... that found at least FMV_EV_NEAR_FULL waiting
+	uint32_t backlog_max;   // the most found waiting, since fmv_xport_clear_max()
 };
+enum { FMV_EV_NEAR_FULL = FMV_EV_ENTRIES - 64 };
+void fmv_xport_clear_max(fmv_xport *x);
 void fmv_xport_get_stats(const fmv_xport *x, fmv_xport_stats *s);
 
 fmv_model *fmv_xport_model(fmv_xport *x);

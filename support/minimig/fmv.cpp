@@ -46,8 +46,28 @@ static fmv_window win_sent;
 static fmv_audio *audio;
 static uint32_t   audio_full;        // polls with a sector waiting and the FIFO full
 static uint32_t   audio_cdda;        // ... and CD audio owning the FIFO
-static uint16_t   cdda_under0, cdda_starve0;   // the FIFO's counters at session start
+// The CDDA FIFO's own counters are 16 bits and wrap (run v26: underruns
+// fell from one line to the next). Read every 100 ms and summed here into
+// 32-bit totals for the session, they cannot wrap between two reads: the
+// FIFO counts at most 44100 underrun periods a second.
+static uint16_t   cdda_under_last, cdda_starve_last;
+static uint32_t   cdda_under_total, cdda_starve_total;
 static bool       cdda_base;
+static uint64_t   cdda_read_us;
+
+static void cdda_accumulate(uint64_t t)
+{
+	if (!cdda_base || t - cdda_read_us < 100000)
+		return;
+	cdda_read_us = t;
+	uint16_t u, sv;
+	if (!akiko_cd32_cdda_counters(&u, &sv))
+		return;
+	cdda_under_total  += (uint16_t)(u - cdda_under_last);
+	cdda_starve_total += (uint16_t)(sv - cdda_starve_last);
+	cdda_under_last = u;
+	cdda_starve_last = sv;
+}
 
 static void aud_frame(void *, const uint8_t *p, size_t n, uint32_t rate)
 {
@@ -174,7 +194,9 @@ static void picture_start()
 	if (!audio)
 		printf("FMV: the audio thread did not start; no sound\n");
 	audio_full = audio_cdda = 0;
-	cdda_base = akiko_cd32_cdda_counters(&cdda_under0, &cdda_starve0);
+	cdda_base = akiko_cd32_cdda_counters(&cdda_under_last, &cdda_starve_last);
+	cdda_under_total = cdda_starve_total = 0;
+	cdda_read_us = 0;
 	fmv_model_set_audio_hooks(fmv_xport_model(xport), aud_frame, aud_tick, aud_flush);
 }
 
@@ -194,6 +216,9 @@ static void picture_stop()
 	}
 }
 static uint64_t last_us;
+static uint32_t win_polls;           // fmv_poll passes in this 10 s window
+static uint64_t win_gap_max;         // the longest time between two of them, us
+static uint64_t win_busy_us;         // time spent inside them, us
 static int tried;           // one attempt per core load: a missing ROM is not retried every poll
 static int diag_shown;      // diag snapshots printed this session
 static uint64_t diag_last_us;
@@ -471,6 +496,45 @@ static void diag_only_poll()
 	}
 }
 
+// Once per activity line: the stream's rate against the wall clock, and
+// what Main's side looked like meanwhile. The model only schedules what has
+// arrived, so its late counts cannot show a stream fed too slowly; this can.
+// Run v26 found the intro at 2/3 speed with every other counter clean.
+static void rate_line(uint64_t t)
+{
+	static uint64_t t0;
+	static uint32_t shown0, frames0, events0, near0;
+	fmv_decoder_stats ds = {};
+	if (decoder) fmv_decoder_get_stats(decoder, &ds);
+	fmv_audio_stats as = {};
+	if (audio) fmv_audio_get_stats(audio, &as);
+	fmv_xport_stats xs;
+	fmv_xport_get_stats(xport, &xs);
+	fmv_model_state ms;
+	fmv_model_get_state(fmv_xport_model(xport), &ms);
+	if (t0 && t > t0) {
+		double sec = (double)(t - t0) / 1e6;
+		double pic = (ds.presented - shown0) / sec, aud = (as.ticks - frames0) / sec;
+		double pic_want = ms.cl_frame_period_us ? 1e6 / ms.cl_frame_period_us : 0;
+		double aud_want = ms.l64_sample_rate ? ms.l64_sample_rate / 1152.0 : 0;
+		printf("FMV rate: %.1f pictures/s (the sequence: %.1f), %.1f audio frames/s (the stream: %.1f); "
+		       "Main: %u polls, longest gap %llu ms, %.1f %% busy, %.0f events/s, "
+		       "%u drains near full, ring backlog max %u of %u\n",
+		       pic, pic_want, aud, aud_want, win_polls, (unsigned long long)(win_gap_max / 1000),
+		       100.0 * (double)win_busy_us / ((double)(t - t0)), (xs.events - events0) / sec,
+		       xs.near_full - near0, xs.backlog_max, (unsigned)FMV_EV_ENTRIES);
+	}
+	t0 = t;
+	shown0 = ds.presented;
+	frames0 = as.ticks;
+	events0 = xs.events;
+	near0 = xs.near_full;
+	fmv_xport_clear_max(xport);
+	win_polls = 0;
+	win_gap_max = 0;
+	win_busy_us = 0;
+}
+
 void fmv_poll(void)
 {
 	if (is_minimig() && cfg.amigacd_fmv >= 2) {
@@ -499,6 +563,12 @@ void fmv_poll(void)
 	uint64_t t = now_us();
 	uint64_t dt = t - last_us;
 	last_us = t;
+	// How often Main gets here, and how long a pass takes. The 68k waits on
+	// Main whenever the event ring is full (fmv_xport_stats.near_full), so
+	// these say whether Main is what paces a stream (run v26).
+	win_polls++;
+	if (dt > win_gap_max)
+		win_gap_max = dt;
 	// A long stall (an OSD file browser, a blocking load) is not replayed as
 	// one jump: the chips' schedules would fire a burst of interrupts.
 	if (dt > 100000)
@@ -508,6 +578,8 @@ void fmv_poll(void)
 		fmv_decoder_poll(decoder);
 	disp_update();
 	audio_poll();
+	cdda_accumulate(t);
+	win_busy_us += now_us() - t;
 
 	// A stalled queue: three snapshots of the core's side, a second apart,
 	// so the log says which counters move and which state it sits in.
@@ -527,6 +599,7 @@ void fmv_poll(void)
 		char a[768];
 		fmv_model_activity(fmv_xport_model(xport), a, sizeof a);
 		printf("%s\n", a);
+		rate_line(t);
 		if (decoder) {
 			fmv_decoder_stats ds;
 			fmv_decoder_get_stats(decoder, &ds);
@@ -542,11 +615,10 @@ void fmv_poll(void)
 			// began are the phase 4 gate's measure (both 0). Polls blocked
 			// "FIFO full" are back-pressure, Main offering a sector before
 			// the FIFO has room, and say little on their own.
-			uint16_t u = 0, sv = 0;
-			char fifo[64] = "FIFO counters n/a";
-			if (cdda_base && akiko_cd32_cdda_counters(&u, &sv))
-				snprintf(fifo, sizeof fifo, "FIFO underruns %u, starves %u",
-				         (unsigned)(uint16_t)(u - cdda_under0), (unsigned)(uint16_t)(sv - cdda_starve0));
+			char fifo[80] = "FIFO counters n/a";
+			if (cdda_base)
+				snprintf(fifo, sizeof fifo, "FIFO underruns %u, starves %u (session totals)",
+				         cdda_under_total, cdda_starve_total);
 			printf("FMV audio: %u frames in, %u decoded, %u bad, %u played (%u missing, %u late, "
 			       "%u muted, %u not 44.1 kHz), %u sectors to the CDDA FIFO, %s, polls blocked "
 			       "%u FIFO full / %u CD audio, %u samples dropped, %u flushes\n",

@@ -8,7 +8,9 @@ Phase 3: the picture works on hardware (Cannon Fodder, HDMI PAL, run v23,
 2026-11-05); analog out, NTSC, a Video CD and tearing in motion not yet seen.
 Phase 4 (sound) runs on hardware (run v24: every frame played reached the
 FIFO), not yet heard. Phase 3 and 4 run on a closed-timing build. Phase 5
-(OSD row, save-state and ARM CPU refusals, docs) built, not yet run.
+(OSD row, the migration, save states outside playback) passes on hardware
+(run v25). **Run v26 found the intro playing at 2/3 of its speed**, which
+v21-v25 had missed; the stream is not yet at full rate.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -925,6 +927,55 @@ HDMI, PAL, no `AMIGACD_FMV` in `MiSTer.ini`.
 Not tested in v25: the sound heard, tearing, A/V sync, the `.mgl` rows, the
 row off a CD32 or with no ROM, the ARM CPU exclusion, a mismatched
 restore, CD audio after FMV, a Video CD, analog, NTSC, Real CD.
+
+### Run v26, 2026-11-06: the intro plays at two thirds of its speed
+
+Core seed 5 of fit run 42068080918, Main ba9ed2b7, Cannon Fodder, HDMI, PAL,
+two full runs and an A/B with the CD speed.
+
+**A correction to v21-v25.** Each said the intro "streamed to its end", and
+v23 that "decoding keeps up". Nobody checked the pictures against the wall
+clock. The 166 s in v21's row is what 4142 pictures take at 25 fps, not
+what they took. Measured against `date` on the MiSTer: 575 pictures in
+31 s, 596 in 34 s, and in v23 3095 in 172 s, about 16.7 a second. The
+248 one-second `FMV stream` lines for 4142 pictures agree, and so does the
+sound: 25 audio frames a second against the stream's 38.3. Pictures 0.69 of
+real time, audio 0.67. The data goes in at about 100 KB/s to the CL450 and
+16.5 KB/s to the L64111, against the 148 and 24 the stream needs. The video
+buffer sits near empty, so the model is starved, not holding data back.
+The late counts could not show any of this: the model schedules only what
+has arrived.
+
+- **The sound** then has about a third of its time as silence. The FIFO's
+  starve count, about 12 a second, says the same. Its 16-bit underrun
+  count wraps, so it could not prove it. Phase 4's gate fails until the
+  rate is right.
+- **Not the drive.** The game asks for 1x for the stream and reads about 44
+  sectors in 0.6 s, then PAUSE, then PLAY again about 0.26 s later: 52
+  sectors a second, 0.69 of a 1x drive's 75. With the OSD's CD speed at
+  Fast the batches fell to 17 sectors in 0.07 s, PLAY every 0.33 s, and the
+  rate stayed exactly 52 sectors, 45 packets and 17-18 pictures a second.
+  So the driver takes data at this rate whatever the drive does.
+- **What is left:** the 68k's path into the board, or the driver pacing
+  itself on something the model gives it (an interrupt rate, the
+  InquireBufferFullness replies, the L64111's PTS interrupt). The first
+  would show as Main draining the event ring too slowly: the FPGA holds
+  the 68k while the ring is full, so the 68k then copies at Main's pace. A
+  pass of Main's loop that takes long is enough, and the Akiko sector reads
+  run in the same loop.
+- **Measured from this run on**: a `FMV rate:` line every 10 s, with pictures
+  and audio frames a second against the sequence's and the stream's
+  rates, Main's polls, the longest gap between two, the time in them,
+  events a second, drains that found the ring near full, and the most
+  found waiting. The FIFO's underruns and starves are now 32-bit session
+  totals, summed from reads 100 ms apart. If drains near full come with
+  long gaps, Main is the limit; if the ring never fills, the driver is
+  pacing itself, and the next step is what it waits on between packets.
+- The audio thread's priority: 13 and 8 late in the two runs against v25's
+  16, with polls blocked at 537 and 502 against 3599. Two runs, and the
+  rate problem under them, so it is not shown to be the cause.
+- The harness's reset failed once more (reset sent, no `FMV Amiga reset`).
+
 
 ## Risks, ranked
 
