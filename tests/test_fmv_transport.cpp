@@ -496,6 +496,28 @@ static void test_diag_format()
 	check(!fmv_diag_port_dead(wx, 22), "no HPS block: no verdict");
 	check(fmv_diag_format(wx, 11, big, sizeof big) == 1 && !strstr(big, "fmv_arb"),
 	      "diag x: a short read decodes without the arbiter block");
+	// Layout 0xF403: fmv_bus's perf window in words 2-7. Packed here as
+	// fmv.v packs it: acc 72000, held 100000, fifo 60000, ring 1000, mem 2000
+	// (holds in 256-clock units), INT2 on.
+	{
+		uint16_t w3[12] = { 0x0000, 0xA5F4, 0xF403, 0x0001 };
+		const unsigned fv[5] = { 72000, 100000, 60000, 1000, 2000 };
+		for (int k = 0; k < 5; k++)
+			for (int b = 0; b < 17; b++)
+				if ((fv[k] >> b) & 1) {
+					int bit = 17 * k + b;
+					w3[4 + bit / 16] |= (uint16_t)(1u << (bit % 16));
+				}
+		w3[9] |= 0x8000;                              // INT2
+		check(fmv_diag_format(w3, 12, line, sizeof line) == 1, "diag F403: decoded");
+		check(strstr(line, "72000 accesses") != 0, "diag F403: accesses, field 0");
+		check(strstr(line, "held 902198 us") != 0, "diag F403: held, field 1, in 9.02 us units");
+		check(strstr(line, "event FIFO 541319") != 0, "diag F403: FIFO, field 2");
+		check(strstr(line, "ring 9022,") != 0, "diag F403: ring, field 3");
+		check(strstr(line, "ROM/RAM 18044") != 0, "diag F403: ROM/RAM, field 4");
+		check(strstr(line, "INT2 1, L64111 latch 0") != 0, "diag F403: the interrupt lines, word 7");
+	}
+
 	// Layout 0xF402: word 6 has INT2, the L64111 latch and the CL450 INT on
 	// top, UQ_WPTR's low 12 bits below
 	// d[0] is index 2: version, flags, polls, beats, dwell, uq_rd, word 6, events

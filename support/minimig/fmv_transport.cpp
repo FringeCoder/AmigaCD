@@ -368,6 +368,39 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 		snprintf(out, len, "FMV diag: off in this core (build with FMV_DIAG=1 to see it)");
 		return 0;
 	}
+	if (d[0] == 0xF403) {
+		// 0xF403 (AmigaCD_MiSTer fmv.v): words 2-7 carry fmv_bus's perf
+		// window, the last second of the 68k's time on the board, from bit 0
+		// of word 2: accesses, then cycles held, held for the event FIFO,
+		// held for the ring, on ROM/RAM, 17 bits each, the holds in units of
+		// 256 clk_sys. INT2, the L64111 latch and the CL450 INT are bits
+		// 15:13 of word 7. Run v27: the intro at 2/3 speed, 72000 board
+		// accesses a second.
+		auto field = [&](int k) -> unsigned {
+			unsigned v = 0;
+			for (int b = 0; b < 17; b++) {
+				int bit = 17 * k + b;
+				v |= (unsigned)((d[2 + bit / 16] >> (bit % 16)) & 1) << b;
+			}
+			return v;
+		};
+		const double unit_us = 256.0 / 28.37516;      // PAL clk_sys
+		unsigned acc = field(0);
+		double held = field(1) * unit_us, fifo = field(2) * unit_us,
+		       ring = field(3) * unit_us, mem = field(4) * unit_us;
+		uint16_t f = d[1];
+		snprintf(out, len,
+		         "FMV diag: fmv_ddr %s, on %u, up_full %u, ev_empty %u; fmv_bus %s, ALIVE %u, "
+		         "status[64] %u; the 68k on the board, last second: %u accesses, held %.0f us "
+		         "(event FIFO %.0f, ring %.0f, ROM/RAM %.0f, the rest %.0f), %.2f us an access; "
+		         "FPGA: INT2 %u, L64111 latch %u, CL450 INT %u",
+		         ddr_st[f >> 12], (f >> 11) & 1, (f >> 10) & 1, (f >> 9) & 1,
+		         bus_st[(f >> 2) & 7], (f >> 1) & 1, f & 1,
+		         acc, held, fifo, ring, mem, held - fifo - ring - mem,
+		         acc ? held / acc : 0.0,
+		         (d[7] >> 15) & 1, (d[7] >> 14) & 1, (d[7] >> 13) & 1);
+		return 1;
+	}
 	if (d[0] != 0xF401 && d[0] != 0xF402) {
 		snprintf(out, len, "FMV diag: unknown layout version %04x", d[0]);
 		return 0;
