@@ -12,7 +12,8 @@ FIFO), not yet heard. Phase 3 and 4 run on a closed-timing build. Phase 5
 (run v25). **Run v26 found the intro playing at 2/3 of its speed**, which
 v21-v25 had missed; the stream is not yet at full rate. v28 traced it to
 the 68k waiting on ROM fetches from DDR3; with a ROM cache (v29) it is 0.865.
-v30 ruled the CD out; the suspect is the 68k's wait on HOST_newcmd.
+v30 ruled the CD out, v31 the command wait; the 68k fetched the driver
+over the chip bus, one cycle a fetch, now cached (core f22e156).
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -1081,6 +1082,43 @@ bounded below by this pass's EV_WPTR read and above by the previous one's,
 and as a share of the second. If the old path's share is about 13 % and
 the new one's is small with the rate at 25.0 / 38.3, this was it; if the
 share is small on both, the PC ring on the diag build is next.
+
+
+### Run v31, 2026-11-06: not the command wait; the 68k fetches over the bridge
+
+Main 4f12fca, core seed 4 and the v29 diag build (seed 5), reported by the
+tester:
+
+- **The command path changes nothing.** At the event: 21.2-22.1
+  pictures/s, wait 156-178 to 1109-1368 us a command (1.7-2.0 to
+  12.4-15.0 % of the second). The old path: 21.4-21.7, 197-208 to
+  1208-1333 us. HOST_newcmd reads did not fall (about 133000 per 10 s).
+  v30's suspect is out; the event path is kept (no cost seen).
+- **Where the 68k is (the PC ring, back with this Main):** 56 samples, 42
+  in the FMV ROM, 18 of them at 0x203b5a/0x203b5c: the driver's copy loop,
+  move.w (a1)+,(a3) / dbf d0, 11 words a pass, with an IO word check
+  (0x203b18) before each pass. The about 6500 IO reads a second are that
+  check, not interrupts or a timer (v29's reading corrected), and 99 %
+  pass at once. The HOST_newcmd spin (0x203cfe) is 2-3 of 56. 32 % of the
+  time over about 64000 words a second is about 5 us a word.
+- **Why (the core, f22e156):** the board sits behind the chip bus bridge,
+  an Amiga bus cycle per access, and the 68020 instruction cache took chip
+  RAM fetches only. So each pass paid three fetch cycles besides the
+  source read and the board write; a real 68EC020 runs the loop from its
+  cache. fmv_bus's ROM cache shortened the board's answer, not the bus
+  cycle around it: held fell from 35 % to 10 %, the rate only from 0.69
+  to 0.865. CPU Turbo cannot help a CPU waiting on the bus.
+- **Now:** fetches from the board's ROM are cached on either 68020, filled
+  by two 16-bit reads; registers, RAM and an unconfigured range are not.
+  tb_cpu_wrapper_icache (new, the first bench to fetch through the
+  wrapper) and six mutations.
+- Still open: RAM 0 and the saturated access count in the perf word; the
+  poll dips on diag builds only (v29 diag, v29 Turbo, v31 diag).
+
+**For v32:** the closed seed of the new panel, both CPU Turbo settings
+(the cache is on for both), the rate lines. 25.0 / 38.3 with underruns
+near 0 means this was it. If it moves but not all the way, the diag build
+of the same commit says what the loop costs now.
 
 
 ## Risks, ranked
