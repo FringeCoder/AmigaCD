@@ -153,6 +153,7 @@ static const ini_var_t ini_vars[] =
 	{ "AMIGACD_FMV_HOFS", (void*)(&(cfg.amigacd_fmv_hofs)), INT16, -512, 512 },
 	{ "AMIGACD_FMV_VOFS", (void*)(&(cfg.amigacd_fmv_vofs)), INT16, -128, 128 },
 	{ "AMIGACD_FMV_SHOW", (void*)(&(cfg.amigacd_fmv_show)), UINT8, 0, 2 },
+	{ "AMIGACD_FMV_SLOWCMD", (void*)(&(cfg.amigacd_fmv_slowcmd)), UINT8, 0, 1 },
 	{ "SANITY_CHECK", (void *)(&(cfg.sanity_check)), UINT8, 0, 1 },
 };
 

@@ -139,8 +139,50 @@ static void cl_command(fpga &f, uint16_t code, uint16_t a1 = 0, uint16_t a2 = 0,
 	f.write(CL + CL_HOST_RDATA, a3);
 	f.write(CL + CL_HOST_RDATA, a4);
 	f.write(CL + CL_HOST_NEWCMD, 1);
-	check(f.read(CL + CL_HOST_NEWCMD) & 1, "HOST_newcmd reads 1 until the command is taken");
+	// Taken at its event (the default since run v31): cleared by the drain
+	// that carried the write. test_command_timing covers the old path.
+	check(!(f.read(CL + CL_HOST_NEWCMD) & 1), "HOST_newcmd cleared at its event");
 	fmv_model_advance(f.model, 100);
+}
+
+// When a command is taken (run v30: the 68k spun ~120 reads on HOST_newcmd
+// per command while the old path waited for the next model advance).
+static void test_command_timing()
+{
+	fpga f;
+	attach(f);
+	cl_boot(f);
+	fmv_model_advance(f.model, 2500);              // the microapplication runs
+	fmv_model_state s;
+
+	// The old path: 20 us of model time, so not until the next advance
+	fmv_model_set_cmd_at_event(f.model, false);
+	f.write(CL + CL_HOST_RADDR, 0);
+	f.write(CL + CL_HOST_RDATA, CLC_SET_THRESHOLD);
+	f.write(CL + CL_HOST_RDATA, 0x0800);
+	f.write(CL + CL_HOST_NEWCMD, 1);
+	check(f.read(CL + CL_HOST_NEWCMD) & 1, "old path: HOST_newcmd reads 1 until an advance");
+	eq("old path: no command before the advance", fmv_model_commands(f.model), 0);
+	fmv_model_advance(f.model, 100);
+	check(!(f.read(CL + CL_HOST_NEWCMD) & 1), "old path: cleared by the advance");
+	eq("old path: one command", fmv_model_commands(f.model), 1);
+
+	// At the event: cleared before any time passes, with the arguments as
+	// written before it, whatever is written after
+	fmv_model_set_cmd_at_event(f.model, true);
+	f.write(CL + CL_HOST_RADDR, 0);
+	f.write(CL + CL_HOST_RDATA, CLC_SET_THRESHOLD);
+	f.write(CL + CL_HOST_RDATA, 0x0400);
+	f.write(CL + CL_HOST_NEWCMD, 1);
+	check(!(f.read(CL + CL_HOST_NEWCMD) & 1), "at the event: cleared with no advance");
+	eq("at the event: taken", fmv_model_commands(f.model), 2);
+	f.write(CL + CL_HOST_RADDR, 0);
+	f.write(CL + CL_HOST_RDATA, CLC_SET_WINDOW);   // the next command's, before its newcmd
+	check(logged(f, "command SetThreshold (0x0103) 0400"),
+	      "at the event: the arguments written before HOST_newcmd, in ring order");
+	fmv_model_get_state(f.model, &s);
+	eq("at the event: nothing taken twice", s.cl_commands, 2);
+	fmv_model_free(f.model);
 }
 
 // A synthetic MPEG-1 video elementary stream: a sequence header (352x288,
@@ -737,6 +779,7 @@ int main()
 	test_reset_state();
 	test_hmem_indirection();
 	test_boot_and_commands();
+	test_command_timing();
 	test_play_and_interrupts();
 	test_cmem_in_idle();
 	test_und_starts_the_stream();

@@ -62,6 +62,7 @@ struct wfpga : fmv_fpga_ref {
 	uint8_t *win;
 	uint32_t uq_rd = 0;
 	uint32_t applied = 0;
+	std::vector<uint8_t> order;   // register index of each update applied, in queue order
 	bool overran = false;     // an access was posted into a full ring
 
 	wfpga() : mem(FMV_WIN_SIZE, 0), win(mem.data()) {}
@@ -102,6 +103,7 @@ struct wfpga : fmv_fpga_ref {
 			fmv_update u = { (uint8_t)w0, (bool)((w0 >> 8) & 1), (bool)((w0 >> 9) & 1),
 			                 (uint16_t)w1, (uint16_t)(w1 >> 16) };
 			apply_update(u, (uint32_t)(w1 >> 32));
+			order.push_back(u.index);
 			uq_rd++;
 			applied++;
 		}
@@ -226,6 +228,78 @@ static void test_events_end_to_end()
 	fmv_xport_get_stats(x, &st);
 	eq("every event drained exactly once", st.events, f.ev_count);
 	eq("HOST_RDIDX published: low half", f.R[FMV_IDX_RDIDX_LO], f.ev_count & 0xFFFF);
+	fmv_xport_free(x);
+}
+
+struct clear_watch { wfpga *f; uint32_t at; bool seen; };
+static void watch_clear(void *ctx, uint32_t index)
+{
+	clear_watch *w = (clear_watch *)ctx;
+	w->f->service();                         // the core takes the queue as it goes
+	if (!w->seen && !(w->f->R[CL_HOST_NEWCMD >> 1] & 1)) {
+		w->seen = true;
+		w->at = index;
+	}
+}
+
+// HOST_newcmd's clear and its wait (run v30). At the event, the clear is
+// queued ahead of whatever the events after it in the same drain cause; on
+// the old path it waits for the model's advance, behind them. Either way
+// the wait is counted, the lower bound under the upper.
+static void test_command_clear(bool at_event)
+{
+	const char *tag = at_event ? "at the event" : "old path";
+	char what[160];
+	wfpga f;
+	fmv_xport *x = fmv_xport_new(f.win, logcb, 0);
+	fmv_xport_set_cmd_at_event(x, at_event);
+	pump(x, f);
+	f.write(FMV_OFF_CL450 + CL_HOST_RADDR, HMEM_INIT_FLAG);
+	f.write(FMV_OFF_CL450 + CL_HOST_RDATA, 0x5A5A);
+	f.write(FMV_OFF_CL450 + CL_CPU_CONTROL, 1);
+	pump(x, f, 3000);
+	pump(x, f, 100);
+
+	f.write(FMV_OFF_CL450 + CL_HOST_RADDR, 0);
+	f.write(FMV_OFF_CL450 + CL_HOST_RDATA, CLC_SET_THRESHOLD);
+	f.write(FMV_OFF_CL450 + CL_HOST_RDATA, 0x0800);
+	f.write(FMV_OFF_CL450 + CL_HOST_NEWCMD, 1);
+	// In the same drain, after it: the 68k's spin on HOST_newcmd, 1100
+	// reads, past the drain's every-1024-events HOST_RDIDX publish (and the
+	// FPGA answers the reads itself, so the spin's only witness is that).
+	uint32_t newcmd_at = f.ev_count - 1;
+	for (int k = 0; k < 1100; k++)
+		f.read(FMV_OFF_CL450 + CL_HOST_NEWCMD);
+	f.order.clear();
+	clear_watch w = { &f, 0, false };
+	fmv_xport_set_event_hook(x, watch_clear, &w);
+	pump(x, f, 100);
+	fmv_xport_set_event_hook(x, 0, 0);
+	// When the core saw it cleared: at the write's own event, ahead of the
+	// 1100 spin reads behind it, or not before the drain ended (the old path)
+	snprintf(what, sizeof what, "%s: the core sees the clear %s", tag,
+	         at_event ? "before any spin read is drained" : "only after the drain");
+	check(at_event ? (w.seen && w.at == newcmd_at) : !w.seen, what);
+	pump(x, f, 100);
+	eq("cleared, either way", f.R[CL_HOST_NEWCMD >> 1] & 1, 0);
+	int clr = -1, rdidx = -1;
+	for (int k = 0; k < (int)f.order.size(); k++) {
+		if (f.order[k] == (CL_HOST_NEWCMD >> 1) && clr < 0) clr = k;
+		if (f.order[k] == FMV_IDX_RDIDX_LO && rdidx < 0) rdidx = k;
+	}
+	snprintf(what, sizeof what, "%s: the clear and a mid-drain HOST_RDIDX queued", tag);
+	check(clr >= 0 && rdidx >= 0, what);
+	snprintf(what, sizeof what, "%s: the clear %s the mid-drain HOST_RDIDX", tag,
+	         at_event ? "ahead of" : "behind");
+	check(at_event ? clr < rdidx : clr > rdidx, what);
+	fmv_xport_stats st;
+	fmv_xport_get_stats(x, &st);
+	snprintf(what, sizeof what, "%s: one command's wait counted", tag);
+	eq(what, st.cmd_waits, 1);
+	snprintf(what, sizeof what, "%s: lower bound <= upper bound", tag);
+	check(st.cmd_wait_lo_us <= st.cmd_wait_hi_us, what);
+	snprintf(what, sizeof what, "%s: the longest is the one", tag);
+	eq(what, st.cmd_wait_max_us, st.cmd_wait_lo_us);
 	fmv_xport_free(x);
 }
 
@@ -486,6 +560,20 @@ static void test_diag_format()
 	wp[33] = 0x8000;
 	fmv_diag_format(wp, 44, big, sizeof big);
 	check(strstr(big, "halted 1") != 0, "diag pc: the halt flag");
+	// The same trailer behind the perf layouts: 0xF403 and 0xF404 returned
+	// before it, so run v29's diag log had no PC at all (run v30)
+	for (uint16_t ver : { (uint16_t)0xF403, (uint16_t)0xF404 }) {
+		uint16_t wv[44];
+		memcpy(wv, wp, sizeof wv);
+		wv[33] = 0x0000;
+		wv[2] = ver;
+		check(fmv_diag_format(wv, 44, big, sizeof big) == 1, "diag perf+pc: decoded");
+		check(strstr(big, "the 68k on the board") != 0, "diag perf+pc: the perf header");
+		check(strstr(big, "68k: PC 201234 (FMV ROM), halted 0, ring fc0040 fc0042 201234 201236") != 0,
+		      "diag perf+pc: the PC ring follows a perf layout");
+		check(strstr(big, "fmv_arb") != 0 && strstr(big, "INTENA") != 0,
+		      "diag perf+pc: the arbiters and the interrupt block too");
+	}
 	check(fmv_diag_port_dead(wy, 31), "dead port: 4 commands, 0 beats, BUSY held (2026-11-02)");
 	wy[19 + 7] = 0;                                    // BUSY not held: the beats rule alone
 	check(fmv_diag_port_dead(wy, 31), "dead port: 4 commands, 0 beats, BUSY low (the =4 run)");
@@ -584,6 +672,8 @@ int main()
 	test_start();
 	test_rom_names();
 	test_events_end_to_end();
+	test_command_clear(true);
+	test_command_clear(false);
 	test_seq_not_landed();
 	test_queue_never_overrun();
 	test_back_pressure_sees_main();

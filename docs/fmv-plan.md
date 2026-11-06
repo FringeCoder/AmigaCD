@@ -11,8 +11,8 @@ FIFO), not yet heard. Phase 3 and 4 run on a closed-timing build. Phase 5
 (OSD row, the migration, save states outside playback) passes on hardware
 (run v25). **Run v26 found the intro playing at 2/3 of its speed**, which
 v21-v25 had missed; the stream is not yet at full rate. v28 traced it to
-the 68k waiting on ROM fetches from DDR3; with a ROM cache (v29) it is 0.865,
-and the CD feed is the open suspect.
+the 68k waiting on ROM fetches from DDR3; with a ROM cache (v29) it is 0.865.
+v30 ruled the CD out; the suspect is the 68k's wait on HOST_newcmd.
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -662,6 +662,9 @@ pixels and 3 lines more, now built in (`FMV_CALIB_HOFS`/`VOFS` in
   video-on bit turns out to be another one). `=2` also ignores the ZD key, so
   the whole screen shows the cartridge's output: the window and the border
   colour around it. That is the view to measure the offsets in.
+- `AMIGACD_FMV_SLOWCMD=1`: take CL450 commands at the next model advance
+  after the drain, as before run v31, instead of at their HOST_newcmd event.
+  For an A/B of the HOST_newcmd wait only (run v30).
 
 Main prints `FMV picture window: WxH from (x,y) of the picture, at display
 pixel X, line Y` whenever the window changes, `FMV picture: on/off` whenever
@@ -1040,6 +1043,44 @@ stopping a drive that is ahead) against none (the drive behind), and the
 during play; then CD Fast on seed 4. If the CD is the limit, the fix is a
 pacing that recovers a late sector (deadline from the scheduled start, not
 the actual one) and sec_req served ahead of a long ring drain.
+
+
+### Run v30, 2026-11-06: the driver's buffer is full, the decoders starve
+
+Same core and Main as v29 (seed 4; Main afd226e), reported by the tester:
+
+- **The CD is out.** A PAUSE on every burst at 1x and at CD Fast: 64.7 and
+  64.3 sectors/s net, 113 sectors in 1.54 s at 1x against 18 in 0.058 s at
+  Fast, about 205 ms from PAUSE to the next PLAY either way. The driver
+  takes data at 64.5 sectors/s whatever the drive offers; its buffer fills
+  while the CL450's sits at 4000-4700 bytes against a threshold of 8192.
+  sec_req service 5/538/1866 us (counter, CHD, push) is no constraint. The
+  pacing fix v29 named would change nothing; it was not built.
+- **The suspect: the 68k waiting on HOST_newcmd.** About 111 commands a
+  second and about 120 HOST_newcmd reads for each (80 in v27, before the
+  cache made the loop faster), unchanged by Turbo: a fixed wait, polled.
+  A spin on a register the FPGA answers is not held time, so the perf word
+  read it as idle. In Main the model took a command 20 us of model time
+  after its event, and model time only moves in fmv_model_advance(), after
+  the whole drain: so each command waited for the rest of the drain, the
+  model's pass, and, for a write that missed the pass's EV_WPTR read, the
+  next pass (about 3000 a second). 111 commands at about 1.2 ms would be
+  the missing 13 %; that is the size it would need, not a measure.
+- **The trap in the Akiko log:** /tmp/akiko_dbg.log runs from board boot,
+  so a saved log holds every run of the day; read by uptime window.
+- **The diag log's PC was lost in Main**, not the core: the 0xF403 and
+  0xF404 decoders returned before the trailer with the arbiters, the HPS
+  port, INTENA/INTREQ and the 68k's PC ring. Fixed for v31; the diag build
+  of v29 (fit 42269496817 seed 5) carries the ring.
+
+**For v31 (Main only, the same core):** a CL450 command is now taken at its
+HOST_newcmd event, in ring order, and its clear is sent at once, mid-drain.
+`AMIGACD_FMV_SLOWCMD=1` restores the old path for an A/B. A second `FMV
+rate:` line gives commands a second and the HOST_newcmd wait per command,
+bounded below by this pass's EV_WPTR read and above by the previous one's,
+and as a share of the second. If the old path's share is about 13 % and
+the new one's is small with the rate at 25.0 / 38.3, this was it; if the
+share is small on both, the PC ring on the diag build is next.
 
 
 ## Risks, ranked

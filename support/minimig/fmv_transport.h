@@ -68,9 +68,23 @@ struct fmv_xport_stats {
 	uint32_t drains;        // passes that found events waiting
 	uint32_t near_full;     // ... that found at least FMV_EV_NEAR_FULL waiting
 	uint32_t backlog_max;   // the most found waiting, since fmv_xport_clear_max()
+	// How long the 68k waits on HOST_newcmd for each CL450 command, from its
+	// write to the clear leaving Main, bounded below and above by when this
+	// and the previous pass read EV_WPTR (fmv_transport.cpp note_commands).
+	// Sums in us; they wrap after 71 minutes, so take differences.
+	uint32_t cmd_waits;
+	uint32_t cmd_wait_lo_us, cmd_wait_hi_us;
+	uint32_t cmd_wait_max_us; // the longest lower bound, since fmv_xport_clear_max()
 };
 enum { FMV_EV_NEAR_FULL = FMV_EV_ENTRIES - 64 };
 void fmv_xport_clear_max(fmv_xport *x);
+// Accept CL450 commands at their HOST_newcmd event and send the clear at
+// once (true, the default), or at the next model advance (false: before run
+// v31, ini AMIGACD_FMV_SLOWCMD=1).
+void fmv_xport_set_cmd_at_event(fmv_xport *x, bool on);
+// Tests: called after each event a drain hands the model, with its index,
+// so a fake core can take the queue mid-drain as the real one does.
+void fmv_xport_set_event_hook(fmv_xport *x, void (*fn)(void *ctx, uint32_t index), void *ctx);
 void fmv_xport_get_stats(const fmv_xport *x, fmv_xport_stats *s);
 
 fmv_model *fmv_xport_model(fmv_xport *x);

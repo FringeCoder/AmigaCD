@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include <deque>
 
@@ -34,7 +35,45 @@ struct fmv_xport {
 	uint32_t stall_us;       // how long entries have waited untaken
 	std::deque<pending_update> pend;
 	fmv_xport_stats st;
+	// HOST_newcmd's wait (run v30): when this pass and the one before read
+	// EV_WPTR, and how many commands the model had accepted at the last look.
+	uint64_t drain_t, prev_drain_t;
+	uint32_t cmds_seen;
+	bool     cmd_at_event;
+	void   (*ev_hook)(void *ctx, uint32_t index);   // tests: after each event
+	void    *ev_hook_ctx;
 };
+
+static uint64_t mono_us()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+// A command the model accepted since the last look: how long the 68k has
+// waited on HOST_newcmd for it, bounded. Its write was in the ring when this
+// pass read EV_WPTR (else it would wait for the next pass) and was not when
+// the pass before read it (else that pass would have taken it), so the
+// wait from the write to now is at least now - drain_t and at most
+// now - prev_drain_t. The core takes the clear from the queue within about
+// a microsecond (fmv_ddr POLL), which neither bound counts.
+static void note_commands(fmv_xport *x)
+{
+	uint32_t c = fmv_model_commands(x->model);
+	if (c == x->cmds_seen)
+		return;
+	uint64_t t = mono_us();
+	uint32_t lo = (uint32_t)(t - x->drain_t);
+	uint32_t hi = x->prev_drain_t ? (uint32_t)(t - x->prev_drain_t) : lo;
+	for (; x->cmds_seen != c; x->cmds_seen++) {
+		x->st.cmd_waits++;
+		x->st.cmd_wait_lo_us += lo;
+		x->st.cmd_wait_hi_us += hi;
+		if (lo > x->st.cmd_wait_max_us)
+			x->st.cmd_wait_max_us = lo;
+	}
+}
 
 // ---- window access: 64-bit words, little-endian, as the FPGA sees them ----
 
@@ -156,6 +195,8 @@ static void publish_rdidx(fmv_xport *x)
 static void drain_events(fmv_xport *x)
 {
 	uint32_t wptr = (uint32_t)rd64(x, FMV_WIN_EV_WPTR);
+	x->prev_drain_t = x->drain_t;
+	x->drain_t = mono_us();
 	uint32_t n = wptr - x->ev_rd;
 	if (n) {
 		x->st.drains++;
@@ -194,6 +235,15 @@ static void drain_events(fmv_xport *x)
 		x->ev_rd++;
 		x->st.events++;
 		fmv_model_event(x->model, ev);
+		// A command accepted at its event: its HOST_newcmd clear goes out
+		// now, not after the rest of the drain, which the 68k would spend
+		// spinning on it (and adding a read event to the ring per spin).
+		if (x->cmd_at_event && fmv_model_commands(x->model) != x->cmds_seen) {
+			flush_updates(x);
+			note_commands(x);
+		}
+		if (x->ev_hook)
+			x->ev_hook(x->ev_hook_ctx, idx);
 		// Keep back-pressure honest during a long drain.
 		if (!(x->ev_rd & 1023)) {
 			publish_rdidx(x);
@@ -224,6 +274,11 @@ fmv_xport *fmv_xport_new(volatile uint8_t *win, fmv_log_fn log, void *log_ctx)
 	x->rdidx_pub = x->ev_rd - 1;     // publish once at the first poll
 	fmv_hooks h = { x, hook_update, hook_dram, hook_log, 0, 0, 0, 0, 0, 0, 0 };
 	x->model = fmv_model_new(h);     // pushes the masks and reset values
+	x->drain_t = x->prev_drain_t = 0;
+	x->cmds_seen = 0;
+	x->cmd_at_event = true;          // fmv_model_new's default too
+	x->ev_hook = 0;
+	x->ev_hook_ctx = 0;
 	return x;
 }
 
@@ -326,6 +381,7 @@ void fmv_xport_poll(fmv_xport *x, uint32_t elapsed_us)
 	fmv_model_advance(x->model, elapsed_us);
 	publish_rdidx(x);
 	flush_updates(x);
+	note_commands(x);     // those accepted by the advance (the old path)
 
 	// A core that never takes the queue is named, once: on hardware this is
 	// the difference between "the board is not in the chain" and a reason.
@@ -347,7 +403,19 @@ void fmv_xport_get_stats(const fmv_xport *x, fmv_xport_stats *s)
 
 bool fmv_xport_stalled(const fmv_xport *x) { return x->stall_logged; }
 
-void fmv_xport_clear_max(fmv_xport *x) { x->st.backlog_max = 0; }
+void fmv_xport_clear_max(fmv_xport *x) { x->st.backlog_max = 0; x->st.cmd_wait_max_us = 0; }
+
+void fmv_xport_set_event_hook(fmv_xport *x, void (*fn)(void *, uint32_t), void *ctx)
+{
+	x->ev_hook = fn;
+	x->ev_hook_ctx = ctx;
+}
+
+void fmv_xport_set_cmd_at_event(fmv_xport *x, bool on)
+{
+	x->cmd_at_event = on;
+	fmv_model_set_cmd_at_event(x->model, on);
+}
 
 int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 {
@@ -400,9 +468,7 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 		         acc, held, fifo, ring, rom, ram, held - fifo - ring - rom - ram,
 		         acc ? held / acc : 0.0,
 		         (d[7] >> 15) & 1, (d[7] >> 14) & 1, (d[7] >> 13) & 1);
-		return 1;
-	}
-	if (d[0] == 0xF403) {
+	} else if (d[0] == 0xF403) {
 		// 0xF403 (AmigaCD_MiSTer fmv.v): words 2-7 carry fmv_bus's perf
 		// window, the last second of the 68k's time on the board, from bit 0
 		// of word 2: accesses, then cycles held, held for the event FIFO,
@@ -433,30 +499,34 @@ int fmv_diag_format(const uint16_t *w, int n, char *out, size_t len)
 		         acc, held, fifo, ring, mem, held - fifo - ring - mem,
 		         acc ? held / acc : 0.0,
 		         (d[7] >> 15) & 1, (d[7] >> 14) & 1, (d[7] >> 13) & 1);
-		return 1;
-	}
-	if (d[0] != 0xF401 && d[0] != 0xF402) {
-		snprintf(out, len, "FMV diag: unknown layout version %04x", d[0]);
-		return 0;
-	}
-	// 0xF402: word 6 carries INT2, the L64111 latch and the CL450 INT in its
-	// top bits and UQ_WPTR's low 12 bits below them (AmigaCD_MiSTer fmv.v)
-	bool v2 = d[0] == 0xF402;
-	unsigned uqw = v2 ? (d[6] & 0x0FFFu) : d[6];
-	uint16_t f = d[1];
-	snprintf(out, len,
-	         "FMV diag: fmv_ddr %s for %u%s clocks, on %u, up_full %u, ev_empty %u, poll due %u, "
-	         "avl read %u write %u waitrequest %u; fmv_bus %s, ALIVE %u, status[64] %u; "
-	         "UQ_WPTR polls %u, read beats %u, uq_rd %u, UQ_WPTR read %u%s, events %u",
-	         ddr_st[f >> 12], d[4], d[4] == 0xFFFF ? "+" : "",
-	         (f >> 11) & 1, (f >> 10) & 1, (f >> 9) & 1, (f >> 8) & 1,
-	         (f >> 7) & 1, (f >> 6) & 1, (f >> 5) & 1,
-	         bus_st[(f >> 2) & 7], (f >> 1) & 1, f & 1,
-	         d[2], d[3], d[5], uqw, v2 ? " (low 12 bits)" : "", d[7]);
-	if (v2) {
-		size_t u = strlen(out);
-		snprintf(out + u, len - u, "; FPGA: INT2 %u, L64111 latch %u, CL450 INT %u",
-		         (d[6] >> 15) & 1, (d[6] >> 14) & 1, (d[6] >> 13) & 1);
+	} else {
+		// 0xF401/0xF402, and the trailer below for every layout: the
+		// arbiters, the HPS port, the interrupt block and the 68k's PC
+		// ring. 0xF403 and 0xF404 returned before reaching it, so run
+		// v29's diag log had no PC (fixed for run v31).
+		if (d[0] != 0xF401 && d[0] != 0xF402) {
+			snprintf(out, len, "FMV diag: unknown layout version %04x", d[0]);
+			return 0;
+		}
+		// 0xF402: word 6 carries INT2, the L64111 latch and the CL450 INT in its
+		// top bits and UQ_WPTR's low 12 bits below them (AmigaCD_MiSTer fmv.v)
+		bool v2 = d[0] == 0xF402;
+		unsigned uqw = v2 ? (d[6] & 0x0FFFu) : d[6];
+		uint16_t f = d[1];
+		snprintf(out, len,
+		         "FMV diag: fmv_ddr %s for %u%s clocks, on %u, up_full %u, ev_empty %u, poll due %u, "
+		         "avl read %u write %u waitrequest %u; fmv_bus %s, ALIVE %u, status[64] %u; "
+		         "UQ_WPTR polls %u, read beats %u, uq_rd %u, UQ_WPTR read %u%s, events %u",
+		         ddr_st[f >> 12], d[4], d[4] == 0xFFFF ? "+" : "",
+		         (f >> 11) & 1, (f >> 10) & 1, (f >> 9) & 1, (f >> 8) & 1,
+		         (f >> 7) & 1, (f >> 6) & 1, (f >> 5) & 1,
+		         bus_st[(f >> 2) & 7], (f >> 1) & 1, f & 1,
+		         d[2], d[3], d[5], uqw, v2 ? " (low 12 bits)" : "", d[7]);
+		if (v2) {
+			size_t u = strlen(out);
+			snprintf(out + u, len - u, "; FPGA: INT2 %u, L64111 latch %u, CL450 INT %u",
+			         (d[6] >> 15) & 1, (d[6] >> 14) & 1, (d[6] >> 13) & 1);
+		}
 	}
 
 	// The DDR3 arbiters behind it (AmigaCD.sv fmv_diag_x), after 0xA5F5

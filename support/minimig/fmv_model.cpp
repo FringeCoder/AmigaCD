@@ -50,6 +50,7 @@ struct fmv_model {
 	int      cl_state, cl_play_cmd;
 	int32_t  cl_setup_us;
 	int32_t  cl_cmd_us;        // >0: a new command is being read
+	bool     cmd_at_event;     // accept a command at its HOST_newcmd event (fmv_model_set_cmd_at_event)
 	cmd_t    cl_cmd;
 	bool     cl_reset_tail;    // Reset(): HMEM cleared after newcmd
 	int32_t  cl_reset_us;
@@ -753,8 +754,19 @@ static void cl_event(fmv_model *m, const fmv_event &e)
 		}
 		break;
 	case CL_HOST_NEWCMD:
-		if ((e.data & 1) && m->cl_running)
-			m->cl_cmd_us = 20;
+		if ((e.data & 1) && m->cl_running) {
+			if (m->cmd_at_event) {
+				// Accepted here, in ring order: every HMEM write before
+				// it has been applied, and none after. Waiting for the
+				// next fmv_model_advance() instead cost the 68k the rest of
+				// the drain and the model's pass for each of ~110 commands
+				// a second, spinning on HOST_newcmd (run v30).
+				m->cl_cmd_us = 0;
+				cl_accept_command(m);
+			} else {
+				m->cl_cmd_us = 20;
+			}
+		}
 		break;
 	case CL_CMEM_CONTROL:
 		if (e.data & 0x0001) {           // CRst [CL 8-9]
@@ -1186,9 +1198,13 @@ fmv_model *fmv_model_new(const fmv_hooks &hooks)
 	memset(m->M, 0, sizeof m->M);
 	m->h = hooks;
 	m->b = fmv_board_default;
+	m->cmd_at_event = true;
 	fmv_model_reset(m);
 	return m;
 }
+
+void fmv_model_set_cmd_at_event(fmv_model *m, bool on) { m->cmd_at_event = on; }
+uint32_t fmv_model_commands(const fmv_model *m) { return m->commands; }
 
 void fmv_model_free(fmv_model *m) { delete m; }
 

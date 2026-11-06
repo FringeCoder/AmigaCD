@@ -367,6 +367,10 @@ static void start()
 		return;
 	}
 	xport = fmv_xport_new(window, fmv_log, 0);
+	fmv_xport_set_cmd_at_event(xport, !cfg.amigacd_fmv_slowcmd);
+	printf("FMV: CL450 commands accepted %s\n", cfg.amigacd_fmv_slowcmd
+	       ? "at the next model advance (AMIGACD_FMV_SLOWCMD=1, the old path)"
+	       : "at their HOST_newcmd event");
 	int ok = fmv_xport_start(xport, rom, (size_t)len, crc32_compute(rom, len));
 	free(rom);
 	if (!ok) {
@@ -503,7 +507,7 @@ static void diag_only_poll()
 static void rate_line(uint64_t t)
 {
 	static uint64_t t0;
-	static uint32_t shown0, frames0, events0, near0;
+	static uint32_t shown0, frames0, events0, near0, cmds0, lo0, hi0;
 	fmv_decoder_stats ds = {};
 	if (decoder) fmv_decoder_get_stats(decoder, &ds);
 	fmv_audio_stats as = {};
@@ -523,12 +527,25 @@ static void rate_line(uint64_t t)
 		       pic, pic_want, aud, aud_want, win_polls, (unsigned long long)(win_gap_max / 1000),
 		       100.0 * (double)win_busy_us / ((double)(t - t0)), (xs.events - events0) / sec,
 		       xs.near_full - near0, xs.backlog_max, (unsigned)FMV_EV_ENTRIES);
+		// The 68k's wait on HOST_newcmd (run v30's suspect): per command,
+		// and as a share of the second, between the two bounds
+		// fmv_transport.cpp note_commands gives.
+		uint32_t nc = xs.cmd_waits - cmds0;
+		double lo = xs.cmd_wait_lo_us - lo0, hi = xs.cmd_wait_hi_us - hi0;
+		printf("FMV rate: CL450 commands %.1f/s (%s); HOST_newcmd wait %.0f-%.0f us a command, "
+		       "longest at least %u us; %.1f-%.1f %% of the second\n",
+		       nc / sec, cfg.amigacd_fmv_slowcmd ? "old path" : "at the event",
+		       nc ? lo / nc : 0.0, nc ? hi / nc : 0.0, xs.cmd_wait_max_us,
+		       100.0 * lo / (sec * 1e6), 100.0 * hi / (sec * 1e6));
 	}
 	t0 = t;
 	shown0 = ds.presented;
 	frames0 = as.ticks;
 	events0 = xs.events;
 	near0 = xs.near_full;
+	cmds0 = xs.cmd_waits;
+	lo0 = xs.cmd_wait_lo_us;
+	hi0 = xs.cmd_wait_hi_us;
 	fmv_xport_clear_max(xport);
 	win_polls = 0;
 	win_gap_max = 0;

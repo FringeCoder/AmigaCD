@@ -173,6 +173,13 @@ struct fmv_model;
 
 fmv_model *fmv_model_new(const fmv_hooks &hooks);
 void fmv_model_free(fmv_model *m);
+// When a CL450 command is accepted. On (the default): at its HOST_newcmd
+// event, so the clear goes out with the drain that found it. Off: 20 us of
+// model time later, at the next fmv_model_advance() (before run v31; ini
+// AMIGACD_FMV_SLOWCMD=1 for an A/B).
+void fmv_model_set_cmd_at_event(fmv_model *m, bool on);
+// Macro commands accepted so far.
+uint32_t fmv_model_commands(const fmv_model *m);
 void fmv_model_set_video_hooks(fmv_model *m, void *vctx,
                                void (*bytes)(void *, const uint8_t *, size_t),
                                void (*flush)(void *), void (*picture)(void *));
