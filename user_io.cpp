@@ -3988,7 +3988,7 @@ void user_io_poll()
 			else if ( sd_type[disk] == SD_TYPE_IIGS)
 			{
 				if (op == 2) iigs_write(disk, &sd_image[disk], lba, ack);
-				else if (op & 1) iigs_read(disk, &sd_image[disk], lba, ack);
+				else if (op & 1) iigs_read(disk, &sd_image[disk], lba, blks, ack);
 				else break;
 			}
 			else if ((blks == G64_BLOCK_COUNT_1541+1 || blks == G64_BLOCK_COUNT_1571+1) && sd_type[disk]==SD_TYPE_C64)
