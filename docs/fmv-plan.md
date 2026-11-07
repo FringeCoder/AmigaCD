@@ -13,7 +13,8 @@ FIFO), not yet heard. Phase 3 and 4 run on a closed-timing build. Phase 5
 v21-v25 had missed; the stream is not yet at full rate. v28 traced it to
 the 68k waiting on ROM fetches from DDR3; with a ROM cache (v29) it is 0.865.
 v30 ruled the CD out, v31 the command wait; the 68k fetched the driver
-over the chip bus, one cycle a fetch, now cached (core f22e156).
+over the chip bus, one cycle a fetch, now cached (core f22e156, whose
+fill read the wrong word and crashed in v32; fixed in e3819f9).
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -1119,6 +1120,31 @@ tester:
 (the cache is on for both), the rate lines. 25.0 / 38.3 with underruns
 near 0 means this was it. If it moves but not all the way, the diag build
 of the same commit says what the loop costs now.
+
+
+### Run v32, 2026-11-07: the ROM in the cache crashes the driver
+
+Core f22e156 (seed 10 of fit 42305392528 and diag seed 5 of 42305396803),
+Main 4f12fca, 68EC020. Both builds stop as the driver starts: two board
+accesses, then a deadend alert 8000000B (Line F) from task 00002A30, the
+PC looping in Kickstart. Nothing ran, so the rate question is open; seed
+4 of 7869966 stays the last working core (0.865).
+
+**The cause (found in the RTL, core e3819f9):** a cache fill reads the
+long word's high half first, and the wrapper switched to that address on
+the same edge as it lowered AS. The bridge registers the address a clock
+and passes AS through; fmv_bus takes its address on the first clock of
+AS. So a fill started at an odd word put that word in the line's high
+half, and the next fetch of the even word ran the wrong instruction.
+The bench answered from the live address and passed; it now answers the
+FMV range as the bridge and fmv_bus do, fails on f22e156 (the other word
+of the line one word off) and passes the fix. Other differences between
+the bench's bus and the real one are not modelled (the bridge's data
+latch, fmv_bus's hold on a miss).
+
+**For v33:** the closed seed of the new panel; the same rate lines as
+v32 would have given. If it still crashes, the PC ring at the crash and a
+fetch trace in the diag window are next.
 
 
 ## Risks, ranked
