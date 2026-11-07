@@ -203,6 +203,16 @@ int main(void)
 
 		check_int("a frame too short to have a checksum", 
 		      akiko_frame_unwritten_checksum(corrupt, 1), 0);
+
+		const uint8_t stale_led[] = { 0x95, 0x01, 0x75 };
+		check_int("a LED frame with an old lap's checksum is repaired",
+		      akiko_frame_unwritten_checksum(stale_led, 3), 0x69);
+		const uint8_t good_led[] = { 0x95, 0x01, 0x69 };
+		check_int("a whole LED frame is left alone",
+		      akiko_frame_unwritten_checksum(good_led, 3), 0);
+		const uint8_t stale_play[] = { 0x44, 0x05, 0x75 };
+		check_int("a stale byte on anything but a LED frame is not",
+		      akiko_frame_unwritten_checksum(stale_play, 3), 0);
 	}
 
 	if (failures) {
