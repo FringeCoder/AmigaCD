@@ -14,7 +14,9 @@ v21-v25 had missed; the stream is not yet at full rate. v28 traced it to
 the 68k waiting on ROM fetches from DDR3; with a ROM cache (v29) it is 0.865.
 v30 ruled the CD out, v31 the command wait; the 68k fetched the driver
 over the chip bus, one cycle a fetch, now cached (core f22e156, whose
-fill read the wrong word and crashed in v32; fixed in e3819f9).
+fill read the wrong word and crashed in v32; fixed in e3819f9). With
+three more fixes the intro runs at full rate, 25.0 pictures/s and 38.3
+audio frames/s with no underruns during play (run v38, 2026-11-07).
 
 The CD32 FMV cartridge plugs into the CD32's expansion slot. It adds a C-Cube
 CL450 MPEG-1 video decoder, an LSI L64111 MPEG audio decoder, 256 KB of ROM
@@ -1212,10 +1214,57 @@ hardware, but only during the scan and only for a few instructions.
 - Open: `CHECKSUM FAIL bytes=c5 01 75` once a run, after the intro ended
   (v34 logged `c5 01 95`). An LED frame whose checksum byte is the stale
   ring byte of a frame one lap earlier. Harmless so far, unexplained.
-- Open: the last 3 %. Main's poll has gaps of 45-76 ms in play at 30 %
-  busy. The diag build of 717cb12 (fit 42360669155) says whether the 68k
-  still waits on the board.
+- The last 3 %: see runs v36 to v38.
 - Not judged: sound and tearing, by ear and by eye.
+
+
+### Runs v36 to v38, 2026-11-07: full rate
+
+**v36, the diag build of 717cb12 (seed 13, not closed).** The 68k was held
+on the ring in bursts, 0 in most quarter-second windows and up to 228 ms in
+others, and Main's poll had gaps of 45-76 ms. The Akiko log gave the gaps a
+period: every 128 sectors, `prefetch refill` then `sec_req GAP` of 50-140
+ms. A refill read a whole window inside user_io_poll, with no sector push
+and no event drain, once in 1.77 s, about 4 % of the time.
+
+**v37, read-ahead (Main 63cf93c).** A sequential reader well into a window
+now has the next one filled two sectors per sector served; it is published
+only when whole, and a miss elsewhere abandons it. On 717cb12 seed 17:
+24.75 pictures/s, 37.9 audio frames/s, 0.99 of real time, Main's longest
+gap 9-17 ms, underruns about 500/s.
+
+**v38, the sector clock (core e5447ec).** The last 1 % was the disc itself.
+CD_TICK_1X was 382500, 28.6875 MHz / 75, a clock clk_sys never has: PAL read
+74.2 sectors a second and the log measured 74.06. The period now follows
+the video standard, 378335 at 28.375 MHz and 381818 at 28.636 MHz, through
+a new cd_ntsc input. tb_akiko_pbx_dma Test J runs every rate on both clocks.
+
+On seed 17 of e5447ec (not closed, setup -0.320), Main 63cf93c:
+
+- **25.0 pictures/s against 25.0, 38.3 audio frames/s against 38.3,** in
+  every steady window (24.9-25.0, 38.2-38.3).
+- **FIFO underruns and starves stop during play:** the session totals stay
+  at 23293 and 19 from audio frame 4056 to 5970. They rise only at the
+  start and after the intro ends, when nothing is feeding the FIFO.
+- 4142 pictures, 2 late, 6358 audio frames, 0 bad, 0 phantoms.
+
+So every limit found since v26 was a real one: ROM fetches (v28-v29), the
+driver's own fetches over the bridge (v31, v34), the refill (v36) and the
+sector clock (v38).
+
+The sector clock change reaches every CD32 title, not only the FMV ones:
+at PAL all of them now read at 75.0 sectors a second instead of 74.2. NTSC
+is proven by the bench only.
+
+**v39 repeats it on seed 24 of e5447ec** (setup -0.201, hold +0.231, rbf md5
+1eefd447): 25.0 / 38.3, underruns flat at 19860 and starves at 9 through
+play, 2 late, 0 phantoms. No seed of e5447ec has closed: 0 of 12 so far
+(the RTL repo's docs/seed-lottery.md, row 58), and the worst paths are not
+in Akiko. The closed core is still 717cb12 seed 17, at 0.99.
+
+Still open: a closed seed of e5447ec; `CHECKSUM FAIL bytes=x5 01 xx` once
+or twice a run; gate 2; a Video CD; analog out and NTSC on hardware; sound
+and tearing, by ear and by eye.
 
 
 ## Risks, ranked
