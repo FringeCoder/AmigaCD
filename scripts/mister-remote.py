@@ -13,6 +13,7 @@ a working hypothesis.
     ./scripts/mister-remote.py shot out.png            screenshot to a file
     ./scripts/mister-remote.py key F12                  tap one key
     ./scripts/mister-remote.py keys F12 DOWN DOWN ENTER sequence, 250 ms apart
+    ./scripts/mister-remote.py chord LEFTCTRL LEFTALT F1 hold all but the last, tap it
     ./scripts/mister-remote.py pad a                    controller button
     ./scripts/mister-remote.py osd "F12 DOWN*7 ENTER" out.png
                                                         keys, settle, screenshot
@@ -234,6 +235,7 @@ def main():
     sub.add_parser("ping")
     p = sub.add_parser("shot"); p.add_argument("out")
     p = sub.add_parser("key"); p.add_argument("name"); p.add_argument("action", nargs="?", default="tap")
+    p = sub.add_parser("chord"); p.add_argument("names", nargs="+")
     p = sub.add_parser("keys"); p.add_argument("names", nargs="+")
     p = sub.add_parser("pad"); p.add_argument("name"); p.add_argument("action", nargs="?", default="tap")
     p = sub.add_parser("osd", help="key sequence, then a screenshot")
@@ -264,6 +266,16 @@ def main():
         elif args.cmd == "keys":
             for k in expand_keys(" ".join(args.names)):
                 r.key(k); time.sleep(args.gap)
+            print("ok")
+        elif args.cmd == "chord":
+            # One connection for the whole chord: the daemon lets go of every
+            # key when a client disconnects, so separate `key x press` runs
+            # never hold anything down.
+            for k in args.names[:-1]:
+                r.key(k, "press"); time.sleep(0.1)
+            r.key(args.names[-1]); time.sleep(0.3)
+            for k in reversed(args.names[:-1]):
+                r.key(k, "release"); time.sleep(0.1)
             print("ok")
         elif args.cmd == "osd":
             for k in expand_keys(args.spec):

@@ -149,6 +149,11 @@ static const ini_var_t ini_vars[] =
 	{ "HDMI_OFF", (void*)(&(cfg.hdmi_off)), UINT16, 0, 1440 },
 	{ "KEYBOARD_AS_JOYSTICK", (void*)(cfg.keyboard_as_joystick), HEX32ARR, 0, 0xFFFFFFFF },
 	{ "SNAC_PSX", (void*)(&(cfg.snac_psx)), UINT8, 0, 1 },
+	{ "AMIGACD_FMV", (void*)(&(cfg.amigacd_fmv)), UINT8, 0, 4 },
+	{ "AMIGACD_FMV_HOFS", (void*)(&(cfg.amigacd_fmv_hofs)), INT16, -512, 512 },
+	{ "AMIGACD_FMV_VOFS", (void*)(&(cfg.amigacd_fmv_vofs)), INT16, -128, 128 },
+	{ "AMIGACD_FMV_SHOW", (void*)(&(cfg.amigacd_fmv_show)), UINT8, 0, 2 },
+	{ "AMIGACD_FMV_SLOWCMD", (void*)(&(cfg.amigacd_fmv_slowcmd)), UINT8, 0, 1 },
 	{ "SANITY_CHECK", (void *)(&(cfg.sanity_check)), UINT8, 0, 1 },
 };
 
@@ -440,8 +445,12 @@ static void ini_parse_var(char* buf)
 			{
 				if (cfg.debug == 2 && !debug_file)
 				{
-					debug_file = fopen("/tmp/debug.txt", "w");
-					setvbuf(debug_file, NULL, _IONBF, 0);
+					// "e": O_CLOEXEC, as /dev/null gets below. Main re-execs
+					// itself on every core load, and without it each exec
+					// kept the old log open: 23 fds on deleted copies after a
+					// day of DEBUG=2 rounds filled /tmp (2026-11-05, FMV run v24).
+					debug_file = fopen("/tmp/debug.txt", "we");
+					if (debug_file) setvbuf(debug_file, NULL, _IONBF, 0);
 				}
 				stdout = (cfg.debug == 2) ? debug_file : cfg.debug ? orig_stdout : dev_null;
 			}

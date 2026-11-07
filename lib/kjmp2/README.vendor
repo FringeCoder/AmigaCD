@@ -1,0 +1,22 @@
+kjmp2 1.1 -- MPEG-1/2 Audio Layer II decoder
+============================================
+
+Source:  https://keyj.emphy.de/files/projects/kjmp2.zip (author's site,
+         linked from https://keyj.emphy.de/kjmp2/), fetched 2026-11-01
+SHA-256: 281542dce731a46efe6ddb7ed703f788cb6369333b3a9ee89a3d94e9b212fd1f
+Author:  Martin J. Fiedler
+Licence: zlib (header of kjmp2.c and kjmp2.h). Compatible with GPL-3.
+
+The author describes it as a clean-room implementation from ISO 11172-3 and
+13818-3, integer-only, and "slow" (it implements the reference synthesis
+filter directly). Phase 1 of docs/fmv-plan.md measures whether that matters
+on the MiSTer's ARM (about 2 ms a frame: it does not).
+
+Since phase 4 it is in the Main binary as the CD32 FMV module's audio
+decoder (support/minimig/fmv_audio.cpp, on a thread on core 0), and
+tests/Makefile builds it for test_fmv_audio.
+
+Taken, unchanged except for line endings: kjmp2.c, kjmp2.h, kjmp2.txt. The
+zip has CRLF; git stores them with LF (.gitattributes), so compare with
+`diff --strip-trailing-cr`. Left out: the player programs,
+the Win32 executable, the Makefile.

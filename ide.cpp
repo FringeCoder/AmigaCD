@@ -17,6 +17,7 @@
 #include "support/minimig/minimig_hdd.h"
 #include "support/minimig/minimig_config.h"
 #include "support/minimig/minimig_a2065.h"
+#include "support/minimig/fmv.h"
 #include "spi.h"
 #include "user_io.h"
 #include "file_io.h"
@@ -134,6 +135,7 @@ static uint16_t ide_wait_req(ide_config *ide)
 		if (!(++spins & 15))
 		{
 			a2065_poll();
+			fmv_poll();
 			if ((ide_time_us() - start) >= IDE_WAIT_REQ_US) return 0;
 		}
 	}

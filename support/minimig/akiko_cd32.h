@@ -4,6 +4,17 @@
 void akiko_cd32_init(void);
 void akiko_cd32_poll(void);
 
+// The CD32 FMV module's sound into the CDDA FIFO (docs/fmv-plan.md phase 4).
+// 0 if the FIFO has room for a sector; 1 if CD audio is playing (it owns
+// the FIFO while it plays); 2 if the FIFO is full.
+int akiko_cd32_pcm_room(void);
+// One sector, 588 stereo samples, L R interleaved, host order.
+void akiko_cd32_pcm_push(const int16_t *lr);
+// The FIFO's own counters (rtl/cdda.v), 16-bit and wrapping: sample periods
+// spent starved after data had been flowing, and times it ran dry. False on
+// a core without them.
+bool akiko_cd32_cdda_counters(uint16_t *underruns, uint16_t *starves);
+
 // Phase 32.5.1 — per-game NVRAM. Called from ide_cdrom.cpp::cdrom_parse
 // whenever a CD image is mounted or unmounted on a Minimig CD slot. `path`
 // is the full filesystem path of the CHD/CUE/ISO; pass an empty string on

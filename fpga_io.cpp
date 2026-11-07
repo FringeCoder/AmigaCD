@@ -393,6 +393,42 @@ static void do_bridge(uint32_t enable)
 	}
 }
 
+// Debug (FMV diag, support/minimig/fmv.cpp): the state of the FPGA-to-SDRAM
+// ports as the HPS sees them. Read only. Order: SDR dramsts, fpgaportrst,
+// protportdefault, rstmgr brgmodrst, sysmgr fpgaintfgrp_module.
+void fpga_sdr_status(uint32_t *v)
+{
+	v[0] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5038));
+	v[1] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5080));
+	v[2] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x508C));
+	v[3] = readl(&reset_regs->brg_mod_reset);
+	v[4] = readl(&sysmgr_regs->fpgaintfgrp_module);
+}
+
+// Debug: the SDRAM controller's protection rules, n of them (20 on Cyclone
+// V). Each rule is staged by writing protrulerdwr (0x509C) with the read bit
+// (6) and its index, then read from protruleaddr/id/data (0x5090/94/98).
+// Staging changes no rule. r[3*i+0..2] = addr, id, data.
+void fpga_sdr_rules(uint32_t *r, int n)
+{
+	for (int i = 0; i < n; i++) {
+		writel((1u << 6) | (uint32_t)i, (void*)(SOCFPGA_SDR_ADDRESS + 0x509C));
+		r[3 * i + 0] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5090));
+		r[3 * i + 1] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5094));
+		r[3 * i + 2] = readl((void*)(SOCFPGA_SDR_ADDRESS + 0x5098));
+	}
+}
+
+// Debug: pulse the FPGA-to-SDRAM port reset, as do_bridge(0)/(1) does at a
+// core load, but with the core running. Only AMIGACD_FMV=3 calls it, to see
+// whether a wedged f2sdram port comes back.
+void fpga_sdr_port_pulse(void)
+{
+	writel(0, (void*)(SOCFPGA_SDR_ADDRESS + 0x5080));
+	usleep(10);
+	writel(0x00003FFF, (void*)(SOCFPGA_SDR_ADDRESS + 0x5080));
+}
+
 static int make_env(const char *name, const char *cfg)
 {
 	void* buf = shmem_map(0x1FFFF000, 0x1000);
@@ -540,6 +576,24 @@ int fpga_io_init()
 
 	fpga_gpo_write(0);
 	return 0;
+}
+
+// Debug (AMIGACD_FMV=4): hold the core reset, pulse the f2sdram port reset,
+// release the core reset. sys_top latches reset_req on gp_out[31:30] == 01
+// and clears it only on 10 following 00, so the release writes 00 first, as
+// fpga_io_init() and fpga_core_id() do at startup; fpga_core_reset(0) alone,
+// straight after 01, would leave the core held. Each state is held well over
+// two 50 MHz samples.
+void fpga_core_reset_with_port_pulse(void)
+{
+	uint32_t gpo = fpga_gpo_read() & ~0xC0000000;
+	fpga_gpo_write(gpo | 0x40000000);   // 01: reset on
+	usleep(1000);
+	fpga_sdr_port_pulse();
+	usleep(1000);
+	fpga_gpo_write(gpo);                // 00
+	usleep(10);
+	fpga_gpo_write(gpo | 0x80000000);   // 10: reset off
 }
 
 int fpga_core_id()

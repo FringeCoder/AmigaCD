@@ -3855,6 +3855,7 @@ void user_io_poll()
 
 		minimig_share_poll();
 		a2065_poll();
+		fmv_poll();
 	}
 
 	next_enet_poll();

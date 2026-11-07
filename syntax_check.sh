@@ -34,6 +34,7 @@ FLAGS=(
   -Wno-narrowing -Wno-format -Wno-format-security -Wno-int-to-pointer-cast
   -I./ -I./lib/libco -I./lib/miniz -I./lib/md5 -I./lib/lzma -I./lib/zstd/lib
   -I./lib/libchdr/include -I./lib/bluetooth -I./lib/serial_server/library
+  -I./lib/libmpeg2/include -I./lib/kjmp2
   -D_7ZIP_ST -DPACKAGE_VERSION='"1.3.3"' -DHAVE_LROUND -DHAVE_STDINT_H
   -DHAVE_STDLIB_H -DHAVE_SYS_PARAM_H -DENABLE_64_BIT_WORDS=0
   -D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE -DVDATE='"000000"'

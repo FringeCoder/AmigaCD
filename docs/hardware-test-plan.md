@@ -352,6 +352,41 @@ core.
 
 ---
 
+## 5. The CD32 FMV module
+
+Needs `CD32FMV.rom` (or `fmv.rom`) beside the Kickstart, in `games/Amiga`,
+or in the root folder, and a disc with MPEG on it: Cannon Fodder for its
+intro, a Video CD for the player. What each check is about is in
+[`fmv-plan.md`](fmv-plan.md); runs v21-v24 there are the record so far.
+`DEBUG=2` under `[AmigaCD]` in `MiSTer.ini` puts the `FMV ...` lines in
+`/tmp/debug.txt`. Each check is ✅ where a run has passed it, ⏳ where none
+has.
+
+| Check | Pass | Watch for |
+|---|---|---|
+| Settings page, CD32, no ROM on the card | `FMV module : N/A (no CD32FMV.rom)`, greyed | |
+| ... on a CDTV, A500 or A1200 | `N/A (CD32 only)`, greyed | |
+| ... with the ARM CPU on (test core) | `N/A (ARM CPU)`, greyed; and the CPU row skips ARM while the module is on | ⏳ |
+| ROM present, the row toggled On | `FMV module on: reset the Amiga`; after the reset `FMV board alive` in the log | ✅ v25, from the row with no ini override (the toast text not captured) |
+| Save state rows while the intro plays | Greyed; `Ctrl+Alt+F1` toasts `No save states during FMV playback` | ✅ v25 (Restore refused during playback not tried) |
+| ... once the intro has ended (the game's own screens) | Enabled again; a save and a restore work | ✅ v25, saved in the credits and restored |
+| ... a state saved with the module on, restored with it off | Not detected: a known limitation (fmv-plan.md, phase 5) | |
+| `.mgl` written with the module on | Carries `fmv_module` `1`; launching it brings the module up | ⏳ |
+| A config saved before this build | Loads, the module Off (`Pre FMV-module configuration file, migrating.` in the log) | ✅ v25 |
+| Cannon Fodder, the first reset | The intro streams to its end and the game loads | ✅ v21-v24 |
+| ... warm resets mid-stream | The intro starts again each time | ✅ v22-v24 |
+| ... the picture | Right colours, aspect and content, centred with no ini offsets | ✅ v23, v24, HDMI PAL |
+| ... in motion | No tearing | ⏳ needs watching, not stills |
+| ... the sound | Clean, right level and pitch, in step with the picture | ⏳ needs listening; v24/v25's counters only say it reached the FIFO |
+| ... `FMV audio:` and `FMV decoder:` lines | `missing` and `late` near 0, 0 dropped, FIFO underruns and starves 0 | ⏳ v25: 1 missing, 16 late; the audio thread's priority and the FIFO counters are newer |
+| Analog out, NTSC | Picture placed and keyed as on HDMI PAL | ⏳ |
+| A Video CD | The FMV ROM's player runs a track to its end (gate 2) | ⏳ |
+| ... 60 minutes of it | Lips in sync, under one frame of drift, CDDA underrun and starve counters 0 | ⏳ |
+| CD audio after FMV | A game's CD music plays after its FMV intro | ⏳ |
+| The module Off | The machine boots exactly as without it: no board, Zorro II RAM back | ⏳ v25: no board (no FMV lines in 45 s); the boot finishing and Z2 RAM not checked |
+
+---
+
 ## Still open, not from this batch
 
 These predate #52 and are unrelated to it: `timing-probe.sh diagnose`,

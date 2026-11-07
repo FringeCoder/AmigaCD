@@ -116,6 +116,11 @@ typedef struct {
 	uint16_t hdmi_off;
 	uint32_t keyboard_as_joystick[256];
 	uint8_t snac_psx;
+	uint8_t amigacd_fmv;   // CD32 FMV module, phase 2 bring-up (support/minimig/fmv.h)
+	int16_t amigacd_fmv_hofs;  // FMV picture: display pixels added to the built-in placement (fmv_picture.h)
+	int16_t amigacd_fmv_vofs;  // FMV picture: lines added to the built-in placement
+	uint8_t amigacd_fmv_show;  // FMV picture: 1 on whatever the IO word says, 2 also ignore the key
+	uint8_t amigacd_fmv_slowcmd;  // 1: CL450 commands accepted at the next model advance, as before run v31 (A/B)
 	uint8_t sanity_check;
 } cfg_t;
 

@@ -161,6 +161,56 @@ int main(void)
 		eq_int("bcd 0xff runs past 99", akiko_bcd_to_bin(0xff), 165);
 	}
 
+	// ------------------------------------------------------- raw frame header
+	{
+		static const uint8_t sync[12] = { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
+		                                  0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
+		uint8_t raw[2352];
+
+		// LBA 0 is 00:02:00 -- the header carries the pre-gap, like the TOC.
+		memset(raw, 0xa5, sizeof(raw));
+		akiko_raw_header(raw, 0, 0x02);
+		eq_int("header sync pattern", memcmp(raw, sync, 12), 0);
+		eq_int("header LBA 0 minute", raw[12], 0x00);
+		eq_int("header LBA 0 second", raw[13], 0x02);
+		eq_int("header LBA 0 frame", raw[14], 0x00);
+		eq_int("header mode 2", raw[15], 0x02);
+		// Byte 16 onward is the subheader and user data the caller already
+		// read into place. The header must not touch it.
+		int untouched = 1;
+		for (size_t i = 16; i < sizeof(raw); i++)
+			if (raw[i] != 0xa5) { untouched = 0; break; }
+		eq_int("header leaves bytes 16.. alone", untouched, 1);
+
+		// BCD in every field, and the frame/second/minute carries.
+		akiko_raw_header(raw, 74, 0x01);       // 150 + 74 = 224 = 00:02:74
+		eq_int("LBA 74 is 00:02:74 (frame)", raw[14], 0x74);
+		eq_int("LBA 74 second", raw[13], 0x02);
+		eq_int("mode 1", raw[15], 0x01);
+		akiko_raw_header(raw, 75, 0x01);       // 00:03:00
+		eq_int("LBA 75 carries into the second", raw[13], 0x03);
+		eq_int("LBA 75 frame back to 0", raw[14], 0x00);
+		akiko_raw_header(raw, 60u * 75u * 74u - 150u, 0x02);   // 74:00:00
+		eq_int("74:00:00 minute in BCD", raw[12], 0x74);
+		eq_int("74:00:00 second", raw[13], 0x00);
+		eq_int("74:00:00 frame", raw[14], 0x00);
+
+		// It is the inverse of akiko_msf_to_lba, which the TOC path uses.
+		int roundtrip = 1;
+		for (uint32_t lba = 0; lba < 80u * 60u * 75u - 150u; lba += 4999) {
+			akiko_raw_header(raw, lba, 0x02);
+			uint32_t back = akiko_msf_to_lba(akiko_bcd_to_bin(raw[12]),
+			                                 akiko_bcd_to_bin(raw[13]),
+			                                 akiko_bcd_to_bin(raw[14]));
+			if (back != lba) {
+				printf("FAIL header/msf round trip at LBA %u: got %u\n", lba, back);
+				roundtrip = 0;
+				break;
+			}
+		}
+		eq_int("header MSF round-trips through akiko_msf_to_lba", roundtrip, 1);
+	}
+
 	// ------------------------------------------------- PVD user-area offset
 	{
 		uint8_t raw[2352];

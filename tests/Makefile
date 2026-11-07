@@ -24,6 +24,9 @@ SRC = ../support/minimig/minimig_savestate.cpp \
       ../support/minimig/cd_savename.cpp \
       ../support/minimig/vadjust_info.cpp \
       ../support/minimig/mgl_path.cpp \
+      ../support/minimig/fmv_model.cpp \
+      ../support/minimig/fmv_transport.cpp \
+      ../support/minimig/fmv_picture.cpp \
       ../osd_rowguard.cpp
 
 TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_crypt \
@@ -32,7 +35,8 @@ TESTS = test_savestate_format test_amigacd_profile test_akiko_pace test_rom_cryp
         test_akiko_discfmt \
         test_mgl_rbf test_mgl_cfg test_cd_savename test_vadjust_info \
         test_osd_rowguard \
-        test_dms test_mgl_path test_minimig_status test_restore_watch
+        test_dms test_mgl_path test_minimig_status test_restore_watch \
+        test_fmv_model test_fmv_transport test_fmv_picture test_fmv_decoder test_fmv_audio
 
 # test_dms #includes support/minimig/dms.cpp rather than linking it -- its
 # encoders need the decoder's file-local window model and tables -- so dms.cpp
@@ -70,6 +74,33 @@ shell-tests:
 $(BUILDDIR)/%: %.cpp $(SRC)
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -o $@ $< $(SRC)
+
+# The FMV decoder test runs libmpeg2 (C, vendored in lib/libmpeg2) on a
+# thread, as Main does, so it alone links those and pthreads.
+CC       ?= gcc
+LM2       = ../lib/libmpeg2
+LM2_SRC   = $(addprefix $(LM2)/libmpeg2/,alloc.c cpu_accel.c cpu_state.c decode.c header.c \
+            idct.c motion_comp.c slice.c)
+LM2_CFLAGS = -std=gnu99 -O1 -g -I$(LM2) -I$(LM2)/include -w
+# Not sanitized: libmpeg2 0.5.1 left-shifts negative values (slice.c), which
+# UBSan reports and GCC defines; it is vendored code, not ours to change
+# (lib/libmpeg2/README.vendor). Our side of it, fmv_decoder.cpp, is.
+$(BUILDDIR)/lm2/%.o: $(LM2)/libmpeg2/%.c
+	@mkdir -p $(BUILDDIR)/lm2
+	$(CC) $(LM2_CFLAGS) -c -o $@ $<
+LM2_OBJ   = $(patsubst $(LM2)/libmpeg2/%.c,$(BUILDDIR)/lm2/%.o,$(LM2_SRC))
+$(BUILDDIR)/test_fmv_decoder: test_fmv_decoder.cpp ../support/minimig/fmv_decoder.cpp $(SRC) $(LM2_OBJ)
+	@mkdir -p $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) -I$(LM2)/include -o $@ $< ../support/minimig/fmv_decoder.cpp $(SRC) $(LM2_OBJ) -lpthread
+
+# The FMV audio test runs kjmp2 (C, vendored in lib/kjmp2) on a thread.
+KJ        = ../lib/kjmp2
+$(BUILDDIR)/kj/kjmp2.o: $(KJ)/kjmp2.c
+	@mkdir -p $(BUILDDIR)/kj
+	$(CC) -std=gnu99 -O1 -g -I$(KJ) -w -c -o $@ $<
+$(BUILDDIR)/test_fmv_audio: test_fmv_audio.cpp ../support/minimig/fmv_audio.cpp $(SRC) $(BUILDDIR)/kj/kjmp2.o
+	@mkdir -p $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) -I$(KJ) -o $@ $< ../support/minimig/fmv_audio.cpp $(SRC) $(BUILDDIR)/kj/kjmp2.o -lpthread
 
 -include $(addprefix $(BUILDDIR)/,$(addsuffix .d,$(TESTS)))
 

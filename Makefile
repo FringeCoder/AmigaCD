@@ -25,6 +25,8 @@ INCLUDE += -I./lib/zstd/lib
 INCLUDE += -I./lib/libchdr/include
 INCLUDE += -I./lib/bluetooth
 INCLUDE += -I./lib/serial_server/library
+INCLUDE += -I./lib/libmpeg2/include
+INCLUDE += -I./lib/kjmp2
 
 BUILDDIR = bin
 
@@ -36,6 +38,9 @@ C_SRC =   $(wildcard *.c) \
 					$(wildcard ./lib/zstd/lib/common/*.c) \
 					$(wildcard ./lib/zstd/lib/decompress/*.c) \
           $(wildcard ./lib/libchdr/*.c) \
+          $(addprefix lib/libmpeg2/libmpeg2/,alloc.c cpu_accel.c cpu_state.c decode.c \
+            header.c idct.c motion_comp.c slice.c) \
+          lib/kjmp2/kjmp2.c \
           lib/libco/arm.c
 
 CPP_SRC = $(wildcard *.cpp) \
@@ -76,6 +81,13 @@ endif
 .PHONY: clean
 clean:
 	$(Q)rm -rf bin
+
+# libmpeg2 (the FMV module's video decoder, support/minimig/fmv_decoder.cpp)
+# finds its hand-written config.h beside it, and predates several warnings;
+# they are not ours to fix (lib/libmpeg2/README.vendor).
+$(BUILDDIR)/lib/libmpeg2/%: DFLAGS += -I./lib/libmpeg2
+$(BUILDDIR)/lib/libmpeg2/%: CFLAGS += -Wno-unused-parameter -Wno-sign-compare \
+	-Wno-pointer-sign -Wno-unused-but-set-variable -Wno-implicit-fallthrough -Wno-missing-field-initializers
 
 $(BUILDDIR)/%.c.o: %.c
 	$(Q)$(info $<)
