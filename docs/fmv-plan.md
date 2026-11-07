@@ -1267,6 +1267,23 @@ or twice a run; gate 2; a Video CD; analog out and NTSC on hardware; sound
 and tearing, by ear and by eye.
 
 
+### Run v40, 2026-11-07: other titles and save states on seed 24
+
+Core e5447ec seed 24, Main 63cf93c, first boot after a core load, so the
+board is not configured. Flink reaches its title and SSF2T and Pierre le
+Chef their menus: 0 phantoms, 0 checksum failures.
+
+Save, then restore about 10 s after a cold core load: Flink and SSF2T come
+back and run on with correct colours. Cannon Fodder, saved after the intro
+with the board on, comes back and its credits run on, with no sound check.
+Pierre le Chef, across a real reboot: chip RAM matches the file at six
+addresses and the menu returns, but its colours are wrong, purple where the
+menu is pink. The same file gives the same picture on 717cb12 seed 17 and
+on the live core c8394ce3. With live Main and live core a save of its own
+restored warm as scrambled bitplanes, and the cold shot of that run failed,
+so Pierre's restore fault is older than this work, cause unknown.
+
+
 ## Risks, ranked
 
 1. **Genlock fidelity.** Nobody seems to know the rule, WinUAE included. A
