@@ -1147,6 +1147,77 @@ v32 would have given. If it still crashes, the PC ring at the crash and a
 fetch trace in the diag window are next.
 
 
+### Run v33, 2026-11-07: the disc is never read, and the crash is gone
+
+Core e3819f9 (seed 10 of fit 42354414218, diag seed 5 of 42354416360),
+Main 4f12fca. No Guru, so v32's fill fix held, but the title never starts:
+the CD32 boot screen stays up and the machine resets about every 16 s.
+
+**The reset is deliberate.** A PC trace (a throwaway build logging the ring
+to a file every 3 ms) ends in the ROM's own cdstrap, which polls for a disc
+at 0x20c518, gives up and calls ColdReboot at 0x20c19e or 0x20c24c. $0 and
+$100 stay clean, so no alert is involved. The last good core leaves cdstrap
+within half a second.
+
+**The disc is not recognised because the command channel floods.** Right
+after `CMD op=0x04 ... b8` and the scan-TOC trigger the good core logs op
+0x03 and op 0x02 and reads LBA 16. This core logs 90 PHANTOM and 8
+UNWRITTEN CHECKSUM lines, the same bytes on every boot and in every build,
+and never reads LBA 16.
+
+
+### Runs v34 and v35, 2026-11-07: 0.97 of real time
+
+Core 717cb12, Main 856dbc3 plus the fix below. v34 was seed 3 of fit
+42360667317 (not closed, setup -0.183); v35 is seed 17 of the same panel,
+closed at setup +0.060, hold +0.122, with a clean Main. v35's numbers:
+
+- **24.3 pictures/s against 25.0, 37.3 audio frames/s against 38.3.** The
+  steady windows run 23.9-24.6 and 36.9-37.7; v34 agrees. From 0.865 to
+  0.97 of real time. The intro runs to its end by itself: 4139 pictures, 4
+  late, 6358 audio frames in, 0 bad, 0 phantoms.
+- **Underruns fell by a factor of six and are not near 0.** About 1200/s
+  during play against about 7600/s in v29, starves 3/s against 9/s. Both
+  counters are session totals and underruns keep rising after the intro
+  ends, so read them only during play.
+- So run v31's theory was right: the driver's copy loop was paying for its
+  own instruction fetches across the bridge.
+
+**The flood, read from the ROM.** It is one command, not many. The sender
+at 0x201c18 takes the opcode from a staging byte at device+311, looks its
+length up in a table at 0x201cd4, ORs in a sequence number, writes the
+sequence back to the staging byte and copies the frame to the TX ring. The
+flood adds up to exactly 106 bytes, and table index 0x55 reads 0x69 = 105,
+from the code after the table, plus a checksum. 0x55 is the LED frame just
+sent, its sequence still in the staging byte. Its body matches too: 75 01,
+then the rest of the READ TOC frame with its 03 at offset 7. The bytes
+after that are the device structure.
+
+So the task's `moveb #3,fp@(311)` was overwritten before the send. The
+writer is the interrupt code: each TOC entry received reaches 0x202072,
+which blinks the LED through 0x2035dc, staging 05 00 or 05 01 in the same
+byte and calling the same sender. The sender locks with Disable, but the
+task's staging write comes before the lock. Main pushed the first TOC entry
+0.6 ms after the READ TOC. With the ROM cached the task reached its next
+send at that moment, on every boot; uncached it took 2 ms and got clear.
+
+**The fix is Main's:** the first entry waits a whole period, 20 ms, like
+the entries after it (`toc_push_last_ms`). A boot with the board
+unconfigured still reads the disc normally on this Main (LBA 16, then the
+title's own reads, no phantoms).
+
+The window is still there for every later entry, as it must be on real
+hardware, but only during the scan and only for a few instructions.
+
+- Open: `CHECKSUM FAIL bytes=c5 01 75` once a run, after the intro ended
+  (v34 logged `c5 01 95`). An LED frame whose checksum byte is the stale
+  ring byte of a frame one lap earlier. Harmless so far, unexplained.
+- Open: the last 3 %. Main's poll has gaps of 45-76 ms in play at 30 %
+  busy. The diag build of 717cb12 (fit 42360669155) says whether the 68k
+  still waits on the board.
+- Not judged: sound and tearing, by ear and by eye.
+
+
 ## Risks, ranked
 
 1. **Genlock fidelity.** Nobody seems to know the rule, WinUAE included. A

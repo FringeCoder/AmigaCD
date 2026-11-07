@@ -1597,7 +1597,16 @@ static void cmd_multi(const uint8_t *cmd)
 		cd_playing = 0;
 		cd_paused = 0;
 		toc_push_idx = (toc_point_count > 0) ? 0 : -1;
-		toc_push_last_ms = 0;
+		// The first entry waits a full period, as a drive's would. Each entry
+		// the ROM receives makes its interrupt code blink the LED through the
+		// same staging buffer the task sends commands from, with no lock
+		// until the send has begun. Pushed at once, the entry landed 0.6 ms
+		// after the READ TOC, between the task's next staging write and its
+		// send, once the FMV ROM ran from the 68020 cache: the task sent the
+		// LED's sequenced opcode 0x55 as its own, looked that up in its length
+		// table, and put 106 bytes in the ring. Every boot, deterministically
+		// (FringeCoder/AmigaCD docs/fmv-plan.md, run v34).
+		toc_push_last_ms = (uint32_t)GetTimer(0);
 		r[1] = 0x00;                              // scan-TOC: no play-started flag
 		akiko_diag("[akiko] MULTI scan-TOC trigger (points=%u)", toc_point_count);
 	} else {
