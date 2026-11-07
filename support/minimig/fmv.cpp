@@ -552,6 +552,41 @@ static void rate_line(uint64_t t)
 	win_busy_us = 0;
 }
 
+static void pc_trace(uint64_t t)
+{
+	// Debug build only: the 68k's PC ring from the diag window, about 300 times
+	// a second, to /tmp/pc.log, to see what runs just before the self-reset of
+	// run v33. Needs an FMV_DIAG core.
+	static FILE *f;
+	static uint64_t last, flushed;
+	if (t - last < 3000)
+		return;
+	last = t;
+	if (!f) {
+		f = fopen("/tmp/pc.log", "w");
+		if (!f)
+			return;
+	}
+	uint16_t w[44];
+	EnableIO();
+	spi8(UIO_DMA_READ);
+	spi32_w(0xFA00);
+	for (int i = 0; i < 44; i++)
+		w[i] = (uint16_t)spi_w(0);
+	DisableIO();
+	char line[2400];
+	if (!fmv_diag_format(w, 44, line, sizeof line))
+		return;
+	const char *a = strstr(line, "Amiga: INTENA");
+	if (a)
+		fprintf(f, "%llu %s
+", (unsigned long long)(t / 1000), a + 7);
+	if (t - flushed > 200000) {
+		flushed = t;
+		fflush(f);
+	}
+}
+
 void fmv_poll(void)
 {
 	if (is_minimig() && cfg.amigacd_fmv >= 2) {
@@ -584,6 +619,7 @@ void fmv_poll(void)
 	// Main whenever the event ring is full (fmv_xport_stats.near_full), so
 	// these say whether Main is what paces a stream (run v26).
 	win_polls++;
+	pc_trace(t);
 	if (dt > win_gap_max)
 		win_gap_max = dt;
 	// A long stall (an OSD file browser, a blocking load) is not replayed as
