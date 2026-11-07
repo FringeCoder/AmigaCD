@@ -26,17 +26,26 @@ CANCELLED, so fixing only the load turned garbling into an outright hang.
 Hence: the reboot here is a real `reboot`, not an Amiga reset and not a core
 reload. An in-session pass means very little on its own.
 
-    ./scripts/savestate-cold-test.py --slot 1
+Boot the title first, and leave it somewhere the machine cannot reach by itself
+in ten seconds, so that a restored picture means something. Then:
 
-What it cannot do: judge the picture. Nor read back CPU registers -- A6 =
-$00DFF000 is the documented sanity check for a correctly decoded state
-vector, but A6 lives in the vector itself, not in memory the live peek can
-reach, so checking it means decoding the .ss file rather than asking the
-machine. Worth adding; not pretended at here. It checks that the save is genuinely fresh,
-that the machine really went cold, that the restore was accepted, and that the
-register state after restore is self-consistent. Whether the display is right
-still needs eyes, and an in-game check still needs a real pad -- the companion
-pad moves the OSD but games ignore it.
+    ./scripts/savestate-cold-test.py
+    ./scripts/savestate-cold-test.py --core /media/fat/_Test/fmv/amigacd.rbf --shot out.png
+
+The title comes from the disc Main has open, or from --title. A save
+already in the slot is kept beside it and put back at the end, so the test leaves
+the card as it found it; --keep leaves the test's save instead.
+
+What it cannot do: judge the picture, though --shot takes one. Nor read back CPU
+registers -- A6 = $00DFF000 is the documented sanity check for a correctly decoded
+state vector, but A6 lives in the vector itself, not in memory the live peek can
+reach, so checking it means decoding the .ss file rather than asking the machine.
+Worth adding; not pretended at here. It checks that the save is genuinely fresh,
+that the machine really went cold, that the core reported the restore, and that
+chip RAM matches the file. Pierre le Chef passes all of that with the wrong
+colours on screen (docs/fmv-plan.md, run v40), so a pass here is not a good
+picture. An in-game check still needs a real pad -- the companion pad moves the
+OSD but games ignore it.
 """
 
 import argparse
@@ -52,6 +61,16 @@ PEEK = os.path.join(HERE, "amiga-peek.py")
 
 SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
 CORE = "/media/fat/_Test/amigacd.rbf"
+SS_DIR = "/media/fat/savestates/AmigaCD"
+CONFIG = "/media/fat/config/AmigaCD_CD32.cfg"
+CONFIG_DISC_OFFSET = 1052      # the disc path in the config, NUL terminated
+SAVE_KEYS = ("LEFTCTRL", "LEFTALT", "F1")
+RESTORE_KEYS = ("LEFTCTRL", "LEFTALT", "F2")
+RESTORE_AFTER = 10             # seconds from load_core: before any title has booted
+CHIP_OFFSET = 0x76C            # a chip RAM address sits this far into a .ss
+# Spread over chip RAM. $4 is ExecBase and must match; the others can be live data
+# in a running title, which is why most of them, not all, have to.
+CHIP_PROBES = (0x4, 0x1000, 0x20000, 0x80000, 0x100000, 0x1F0000)
 
 
 def host_default():
@@ -82,24 +101,66 @@ def ssh(host, cmd, timeout=60, tries=3):
     return ""
 
 
-def key(host, name, repeat=1, gap=0.35):
-    for _ in range(repeat):
-        subprocess.run([sys.executable, REMOTE, "--host", host, "key", name],
-                       capture_output=True, text=True, timeout=30)
-        time.sleep(gap)
+def chord(host, keys):
+    subprocess.run([sys.executable, REMOTE, "--host", host, "chord"] + list(keys),
+                   capture_output=True, text=True, timeout=30)
 
 
-def ss_path(host, slot):
-    """The save file for a slot, whatever the mounted title is called."""
-    out = ssh(host, "ls -1 /media/fat/saves/Minimig/*.ss 2>/dev/null")
-    files = [l for l in out.splitlines() if l.strip()]
-    if not files:
-        return None
-    # Slot suffix if the naming carries one, else the only file there.
-    for f in files:
-        if re.search(r"[_-]%d\.ss$" % slot, f):
-            return f
-    return files[0] if len(files) == 1 else None
+def title_of(host):
+    """The title the save file will be named after: the disc Main has open.
+
+    Not the disc in the config -- a disc picked from the OSD this session never
+    reaches it, and a save lands under the mounted title whatever the config says.
+    """
+    out = ssh(host, "ls -l /proc/[0-9]*/fd 2>/dev/null | grep -o '/media/fat/games/.*[.]chd' | head -1")
+    if not out:
+        out = ssh(host, "dd if=%s bs=1 skip=%d count=256 2>/dev/null | tr '\000' '\n' | head -1"
+                  % (CONFIG, CONFIG_DISC_OFFSET))
+    return os.path.splitext(out.split("/")[-1])[0] if out else None
+
+
+def load_core(host, core):
+    """Load the core and wait until a Main is running it.
+
+    A load that does not take says nothing, and every later step then reads
+    nothing, so stop here instead. From Git Bash, MSYS_NO_PATHCONV=1 keeps --core
+    from turning into a Windows path.
+    """
+    for _ in range(6):
+        ssh(host, "echo load_core %s > /dev/MiSTer_cmd" % core)
+        for _ in range(5):
+            time.sleep(2)
+            if core in ssh(host, "ps | grep MiSTer | grep -v grep"):
+                return True
+    return False
+
+
+def log_lines(host):
+    out = ssh(host, "wc -l < /tmp/ss_dbg.log 2>/dev/null")
+    return int(out) if out.isdigit() else 0
+
+
+def core_said(host, text, since_lines):
+    """Did ss_dbg.log gain this outcome after its first since_lines lines?"""
+    return ssh(host, "tail -n +%d /tmp/ss_dbg.log 2>/dev/null | grep -c '%s'"
+               % (since_lines + 1, text)) not in ("", "0")
+
+
+def chip_matches(host, path):
+    """Peek each probe and compare with the file. Returns matches and whether $4 did."""
+    same, exec_base = 0, False
+    for addr in CHIP_PROBES:
+        r = subprocess.run([sys.executable, PEEK, "--host", "root@" + host, "read", hex(addr)],
+                           capture_output=True, text=True, timeout=60)
+        m = re.search(r"^\$[0-9A-Fa-f]+:((?:\s+[0-9A-Fa-f]{8})+)", r.stdout, re.M)
+        live = "".join(m.group(1).split()).lower() if m else ""
+        saved = ssh(host, "dd if='%s' bs=1 skip=%d count=%d 2>/dev/null | od -An -tx1 | tr -d ' \\n'"
+                    % (path, addr + CHIP_OFFSET, len(live) // 2))
+        ok = bool(live) and live == saved
+        print("   $%06X %s" % (addr, "matches" if ok else "live %s, file %s" % (live, saved)))
+        same += ok
+        exec_base = exec_base or (ok and addr == 0x4)
+    return same, exec_base
 
 
 def stat_of(host, path):
@@ -145,44 +206,19 @@ def wait_for_fresh_save(host, path, before_mtime, timeout=30):
     return None, None, None
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default=host_default())
-    ap.add_argument("--slot", type=int, default=1)
-    ap.add_argument("--boot-wait", type=int, default=90,
-                    help="seconds to wait for the machine to come back cold")
-    args = ap.parse_args()
-    host = args.host
+def test(host, args, path, before_mtime):
     rc = 0
 
-    print("== 1. the machine is up and the core is loaded")
-    up = ssh(host, "uptime")
-    if not up:
-        sys.exit("cannot reach %s" % host)
-    print("   %s" % up)
-
-    path = ss_path(host, args.slot)
-    before_mtime, before_size = (None, None)
-    if path:
-        before_mtime, before_size = stat_of(host, path)
-        print("   existing save: %s (%s bytes)" % (path, before_size))
-    else:
-        print("   no existing save; the first one written will be taken as ours")
-
     print("== 2. save")
-    # F6 is the save-state key in this core's OSD mapping.
-    key(host, "F6")
+    chord(host, SAVE_KEYS)
     time.sleep(2)
-    if path is None:
-        path = ss_path(host, args.slot)
-        if path is None:
-            sys.exit("FAIL no .ss appeared after the save")
 
     mtime, size, crc = wait_for_fresh_save(host, path, before_mtime)
     if crc is None:
         print("FAIL the save never settled -- mtime did not move, or the size "
               "or CRC kept changing. Trap 1: the host poller had not finished "
-              "writing, so a restore now would test the PREVIOUS file.")
+              "writing, so a restore now would test the PREVIOUS file. A wrong "
+              "--slot or --title looks the same.")
         return 1
     print("   fresh: %s bytes, cksum %s" % (size, crc))
 
@@ -218,26 +254,99 @@ def main():
     else:
         print("   cksum %s, unchanged" % after_crc)
 
-    print("== 5. reload the core and restore")
-    ssh(host, "echo load_core %s > /dev/MiSTer_cmd" % CORE)
-    time.sleep(25)
-    key(host, "F9")          # restore
+    print("== 5. reload the core and restore, before the title can boot")
+    if not load_core(host, args.core):
+        print("FAIL Main never took %s" % args.core)
+        return 1
+    time.sleep(RESTORE_AFTER)
+    lines = log_lines(host)
+    chord(host, RESTORE_KEYS)
     time.sleep(6)
+    if core_said(host, "State restored", lines):
+        print("   the core says: State restored")
+    elif ssh(host, "ls /tmp/ss_dbg.log 2>/dev/null"):
+        print("FAIL the core did not report a restore")
+        rc = 1
+    else:
+        print("   no /tmp/ss_dbg.log from this Main, so the restore is unconfirmed")
 
-    print("== 6. the restored state is self-consistent")
-    r = subprocess.run([sys.executable, PEEK, "--host", host, "calibrate"],
+    print("== 6. chip RAM matches the file")
+    same, exec_base = chip_matches(host, path)
+    if not exec_base or same * 2 <= len(CHIP_PROBES):
+        print("FAIL %d of %d probes match, $4 %s"
+              % (same, len(CHIP_PROBES), "among them" if exec_base else "not among them"))
+        rc = 1
+
+    print("== 7. the live peek still calibrates")
+    r = subprocess.run([sys.executable, PEEK, "--host", "root@" + host, "calibrate"],
                        capture_output=True, text=True, timeout=120)
     print("   calibrate: %s" % (r.stdout.strip().splitlines()[-1]
                                 if r.stdout.strip() else "no output"))
     if r.returncode != 0:
         print("FAIL the live peek did not calibrate, so nothing read after a "
               "restore can be trusted")
-        return 1
+        rc = 1
+
+    if args.shot:
+        r = subprocess.run([sys.executable, REMOTE, "--host", host, "shot", args.shot],
+                           capture_output=True, text=True, timeout=60)
+        print("   shot: %s" % (r.stdout.strip() or r.stderr.strip()))
+    return rc
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default=host_default())
+    ap.add_argument("--slot", type=int, default=1,
+                    help="the slot the machine is on; this does not change it")
+    ap.add_argument("--core", default=CORE, help="the .rbf to load after the reboot")
+    ap.add_argument("--title", help="default: the disc Main has open")
+    ap.add_argument("--keep", action="store_true",
+                    help="leave the test's save, not the one that was there")
+    ap.add_argument("--shot", help="take a screenshot after the restore, into this file")
+    ap.add_argument("--boot-wait", type=int, default=90,
+                    help="seconds to wait for the machine to come back cold")
+    args = ap.parse_args()
+    host = args.host
+
+    print("== 1. the machine is up and the core is loaded")
+    up = ssh(host, "uptime")
+    if not up:
+        sys.exit("cannot reach %s" % host)
+    print("   %s" % up)
+
+    title = args.title or title_of(host)
+    if not title:
+        sys.exit("no disc mounted; name the title with --title")
+    path = "%s/%s_%d.ss" % (SS_DIR, title, args.slot)
+    png = os.path.splitext(path)[0] + ".png"
+    before_mtime, before_size = stat_of(host, path)
+    had_save = before_mtime is not None
+    if had_save:
+        ssh(host, "cp -p '%s' '%s.coldtest'; cp -p '%s' '%s.coldtest' 2>/dev/null"
+            % (path, path, png, png))
+        print("   existing save kept as %s.coldtest (%s bytes)" % (path, before_size))
+    else:
+        print("   no save in the slot yet: %s" % path)
+
+    try:
+        rc = test(host, args, path, before_mtime)
+    finally:
+        # Also on a failure: the slot is the user's, not this test's.
+        if args.keep:
+            print("   the test's save stays in the slot")
+        elif had_save:
+            ssh(host, "mv '%s.coldtest' '%s'; mv '%s.coldtest' '%s' 2>/dev/null; sync"
+                % (path, path, png, png))
+            print("   the earlier save is back in the slot")
+        else:
+            ssh(host, "rm -f '%s' '%s'; sync" % (path, png))
+            print("   the test's save removed")
 
     print()
     if rc == 0:
         print("cold save/restore: the save was fresh, the machine went cold, the "
-              "file survived, and the peek calibrates.")
+              "file survived, the core restored it, and chip RAM matches.")
         print("NOT checked: whether the picture is right, and anything in-game -- "
               "that still needs eyes and a real pad.")
     else:
