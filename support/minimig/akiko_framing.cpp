@@ -39,7 +39,11 @@ int akiko_frame_resync(const uint8_t *buf, int n)
 uint8_t akiko_frame_unwritten_checksum(const uint8_t *buf, int len)
 {
 	if (!buf || len < 2) return 0;
-	if (buf[len - 1] != 0x00) return 0;          // the byte is there; not this case
+	// After a lap of the command ring the missing byte reads as the old lap's,
+	// not zero. Only a LED frame is taken that way: nothing else is safe to run
+	// on a guess, and a LED frame's body is three bytes with nothing to corrupt.
+	const bool led = (len == 3) && ((buf[0] & 0x0f) == 0x05);
+	if (buf[len - 1] != 0x00 && !led) return 0;  // the byte is there; not this case
 
 	uint32_t body = 0;
 	for (int i = 0; i < len - 1; i++) body += buf[i];
@@ -47,5 +51,5 @@ uint8_t akiko_frame_unwritten_checksum(const uint8_t *buf, int len)
 
 	// needed == 0 means the body already sums to 0xff, so a trailing zero IS the
 	// correct checksum and the frame is valid as it stands.
-	return needed;
+	return needed == buf[len - 1] ? 0 : needed;
 }

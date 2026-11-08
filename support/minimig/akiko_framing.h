@@ -56,10 +56,16 @@ int akiko_frame_resync(const uint8_t *buf, int n);
 // CH_ERR_CHECKSUM to that is what ends every stalled Chuck Rock boot measured on
 // 2026-10-03.
 //
+// A LED frame is repaired whatever its trailing byte holds. Once the command ring
+// has gone round, the unwritten byte reads as the previous lap's: Pierre le Chef
+// sends "95 01 75" before each level load, the error reply ends the read, and the
+// level never finishes loading.
+//
 // Returns the value that byte must hold for the frame to sum correctly, or 0
-// when the frame is already valid, when the trailing byte is not zero, or when
-// the needed value is itself zero (in which case the frame is valid as it
-// stands and never gets here). `len` counts the command bytes AND the checksum.
+// when the frame is already valid, when the trailing byte is not zero and this
+// is not a LED frame, or when the needed value is itself zero (in which case the
+// frame is valid as it stands and never gets here). `len` counts the command
+// bytes AND the checksum.
 uint8_t akiko_frame_unwritten_checksum(const uint8_t *buf, int len);
 
 #endif // AKIKO_FRAMING_H
