@@ -571,6 +571,12 @@ static uint8_t  toc_buffer[AKIKO_TOC_MAX_POINTS * 13];
 static uint8_t  toc_point_count     = 0;
 static int16_t  toc_push_idx        = -1;   // -1 = idle; else next slot in 3x sequence
 static uint32_t toc_push_last_ms    = 0;    // wall-clock ms of last push (Phase 33-B)
+// Experiment: a real drive reports the disc at once but cannot return its TOC
+// until it has spun up. Copperline models this as about 8.8 s from power-on
+// (toc_spin_up_cck); we answered READ TOC within 4 s of reset. When
+// /tmp/akiko_spinup_ms exists, TOC entries are held until that long after
+// akiko_cd32_init. 0 = no hold.
+static uint32_t cd_spinup_ready_ms  = 0;
 
 // Phase 32.5.1: per-game NVRAM. cd_save_path_active is the full path of the
 // per-CD save file currently mirrored in FPGA BRAM (`""` when no CD is
@@ -3459,6 +3465,17 @@ void akiko_cd32_init(void)
 	toc_point_count  = 0;
 	toc_push_idx     = -1;
 	toc_push_last_ms = 0;
+	cd_spinup_ready_ms = 0;
+	{
+		FILE *f = fopen("/tmp/akiko_spinup_ms", "r");
+		unsigned long ms = 0;
+		if (f) {
+			if (fscanf(f, "%lu", &ms) == 1 && ms > 0 && ms <= 60000)
+				cd_spinup_ready_ms = (uint32_t)GetTimer(ms);
+			fclose(f);
+		}
+		akiko_diag("[akiko] spin-up: TOC held %lu ms after init", cd_spinup_ready_ms ? ms : 0ul);
+	}
 
 	// Cross-core data corruption guard: the 128-sector PBX prefetch buffer
 	// is plain static memory, so its contents survive load_core. Without
@@ -3906,7 +3923,11 @@ void akiko_cd32_poll(void)
 	// at offset 30. WinUAE pushes one TOC entry per video frame
 	// (akiko.cpp:1438-1440). Throttle accumulates only when the engine is
 	// idle — pushing into a busy buffer would silently drop the entry.
-	if (cd_initialized == 2 && toc_push_idx >= 0 && rx_idle) {
+	if (cd_spinup_ready_ms && toc_push_idx >= 0 && CheckTimer(cd_spinup_ready_ms)) {
+		akiko_diag("[akiko] spin-up: done, TOC flows");
+		cd_spinup_ready_ms = 0;
+	}
+	if (cd_initialized == 2 && toc_push_idx >= 0 && rx_idle && !cd_spinup_ready_ms) {
 		// Phase 33-B (2026-05-04): wall-clock 50 Hz pacing — matches
 		// WinUAE's framesync-driven cdrom_return_toc_entry()
 		// (akiko.cpp:1438-1440, ~50 Hz PAL). Prior /1200 poll-count
