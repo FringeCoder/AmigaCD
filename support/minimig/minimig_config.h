@@ -103,6 +103,10 @@ typedef struct
 
 // Bit 0 of hardfile[0].reserved. See above.
 #define AMIGACD_HF0_CD32PLUS 0x01
+// Bit 1 of hardfile[0].reserved: this config's CD announce hold has been through
+// the 2026-11-08 migration, so a 0 stored with it is the user's "Off" and not
+// the default this core handed out from 2026-10-08. See amigacd_migrate_cd_hold.
+#define AMIGACD_HF0_HOLD_V2  0x02
 
 typedef struct
 {
@@ -281,7 +285,35 @@ typedef struct
 //
 // The row stays, because a hold is still the only lever if some title ever needs
 // one, and /tmp/akiko_boot_delay still overrides without a rebuild.
-#define AMIGACD_CD_DELAY_DEFAULT 0
+//
+// 4 since 2026-11-08, because 0 breaks Theme Park.
+//
+// With the disc announced at t=0 the ROM reaches the disc's startup-sequence
+// seconds earlier than a real drive allows (Copperline holds the TOC until about
+// 8.8 s after power-on; we answered READ TOC at about 3.6 s). SetPatch's resident
+// patches then land near the top of chip RAM, around $1E0900, and with ramlib
+// and the CD filesystem's directory cache they leave the top 66 KB in holes of
+// 30728 bytes and smaller. Theme Park's main program fills its 1 MB arena and
+// then asks for 37200 bytes of chip RAM for its bank text, gets 0, does not
+// check, and copies the text over the exception vectors: a black screen after
+// the intro. At a 4 s hold SetPatch lands low ($2A838) and the top stays whole.
+//
+// Measured with the disc in the config and a cold core load:
+//
+//   hold    Theme Park    Banshee
+//   0 s     1/3           runs
+//   2 s     0/2           -
+//   3 s     0/1           -
+//   4 s     3/3           3/3
+//   5 s     -             1/1
+//   6 s     1/1           0/1   "not enough memory available"
+//
+// So the window that suits both is 4-5 s, which is narrow, and the value is a
+// measurement, not a model of the drive. A real CD32 needs no window: it reports
+// the disc at once and holds its TOC instead. A spin-up model of that kind was
+// tried (/tmp/akiko_spinup_ms on branch exp/toc-spinup) and did not give both
+// titles on its own; see docs and the memory notes of 2026-11-08.
+#define AMIGACD_CD_DELAY_DEFAULT 4
 #define AMIGACD_CD_DELAY_MAX     15
 // The old default, which existing configs on every card still carry. See the
 // migration in minimig_cfg_load.
