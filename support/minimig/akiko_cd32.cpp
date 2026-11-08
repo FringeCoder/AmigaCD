@@ -1134,13 +1134,33 @@ static void akiko_build_toc(void)
 
 	// Use track 1's data/audio attribute for the 0xA0/0xA1/0xA2 entries.
 	uint8_t first_ctrl = (drv->track[0].attr & 0x40) ? 0x04 : 0x00;
-	toc_pack_entry(0xA0, first_ctrl, 1);
-	toc_pack_entry(0xA1, first_ctrl, real_tracks);
-	toc_pack_entry(0xA2, first_ctrl, drv->track[real_tracks].start);
+	// Experiment: /tmp/akiko_toc_cl sends Copperline's form -- tracks first,
+	// then A0/A1/A2 with control 0. Bit 1 of the file's number = order only,
+	// bit 2 = control only; no number or 3 = both.
+	unsigned toc_cl = 0;
+	{
+		FILE *f = fopen("/tmp/akiko_toc_cl", "r");
+		if (f) {
+			if (fscanf(f, "%u", &toc_cl) != 1) toc_cl = 3;
+			fclose(f);
+			akiko_diag("[akiko] TOC form: copperline mode %u", toc_cl);
+		}
+	}
+	uint8_t a_ctrl = (toc_cl & 2) ? 0x00 : first_ctrl;
+	if (!(toc_cl & 1)) {
+		toc_pack_entry(0xA0, a_ctrl, 1);
+		toc_pack_entry(0xA1, a_ctrl, real_tracks);
+		toc_pack_entry(0xA2, a_ctrl, drv->track[real_tracks].start);
+	}
 
 	for (int i = 0; i < real_tracks; i++) {
 		uint8_t ctrl = (drv->track[i].attr & 0x40) ? 0x04 : 0x00;
 		toc_pack_entry(drv->track[i].number, ctrl, drv->track[i].start);
+	}
+	if (toc_cl & 1) {
+		toc_pack_entry(0xA0, a_ctrl, 1);
+		toc_pack_entry(0xA1, a_ctrl, real_tracks);
+		toc_pack_entry(0xA2, a_ctrl, drv->track[real_tracks].start);
 	}
 
 	// Phase 19: do NOT auto-arm the drip. WinUAE's akiko_handler only emits
@@ -1205,7 +1225,16 @@ static void cmd_info(const uint8_t *cmd)
 	memcpy(&r[2], AKIKO_FIRMWARE, 18);       // exactly 18 chars, no NUL
 	akiko_send_response(r, 20);
 	cd_initialized = 2;
-	cd_media_push_pending = true;
+	// Experiment: Copperline's drive sends no media-status frame after INFO.
+	{
+		FILE *f = fopen("/tmp/akiko_no_postinfo", "r");
+		if (f) {
+			fclose(f);
+			akiko_diag("[akiko] post-INFO media push suppressed (/tmp/akiko_no_postinfo)");
+		} else {
+			cd_media_push_pending = true;
+		}
+	}
 	akiko_dbg("INFO -> initialized=2\n");
 	// Build TOC eagerly (cheap), but DON'T start streaming. WinUAE's BIOS
 	// asks for TOC via MULTI in PLAY mode with seekpos<0 — see cmd_multi.
