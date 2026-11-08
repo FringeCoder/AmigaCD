@@ -895,6 +895,32 @@ unsigned char minimig_cpu030_clock_step(unsigned char cpu, int minus)
 	return (cpu & 0x3f) | clk[at];
 }
 
+// The CD announce hold, corrected on every load path: a config file, and a .mgl
+// applied over it. Changing AMIGACD_CD_DELAY_DEFAULT only reaches a card with NO
+// config, and every machine that has booted this core carries a stored hold --
+// the asymmetry that has now bitten four times (chip RAM, the floppy count, and
+// this setting twice before).
+//
+// Three values were handed out and never chosen: 8 until 2026-10-03, 14 until
+// 2026-10-08, and 0 since. All three move to the default. 0 is also what the
+// OSD row calls "Off", so a plain value test would take that choice away for
+// good: every load would turn it back into the default. AMIGACD_HF0_HOLD_V2
+// records that this migration has run; once it is set, whatever the user stores,
+// 0 included, is theirs. The bit is set in memory here, so the next save of the
+// config or a .mgl carries it.
+static void amigacd_migrate_cd_hold(void)
+{
+	if (minimig_config.hardfile[0].reserved & AMIGACD_HF0_HOLD_V2) return;
+	const unsigned d = minimig_config.cd_mount_delay;
+	if (d == 0 || d == AMIGACD_CD_DELAY_LEGACY || d == AMIGACD_CD_DELAY_LEGACY2)
+	{
+		printf("AmigaCD: CD announce hold %us -> %us (the 2026-11-08 default; "
+		       "see minimig_config.h)\n", d, AMIGACD_CD_DELAY_DEFAULT);
+		minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
+	}
+	minimig_config.hardfile[0].reserved |= AMIGACD_HF0_HOLD_V2;
+}
+
 // Apply the launching .mgl's <amigacd_config>, if there is one, over the config
 // just loaded. Once per process: only the boot load is a launch from the file;
 // the Configs page and the System row load other files on purpose.
@@ -933,6 +959,10 @@ static void minimig_mgl_config_apply()
 	// A .mgl written by an older build can carry a removed setting just as a
 	// config file can, and it is applied after the file's own fold.
 	minimig_fold_removed();
+	// A .mgl written before the hold moved carries the old default just as a
+	// config file does. Its hd0_reserved byte replaced the file's, so the
+	// migration is decided by the .mgl's own marker.
+	amigacd_migrate_cd_hold();
 	printf("MGL config: %d settings applied from %s (%d unknown, %d bad)\n",
 	       applied, m->xml_path, unknown, bad);
 }
@@ -1719,6 +1749,8 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		minimig_config.cdtv_drive.cfg = 0;
 		minimig_config.cdtv_drive.filename[0] = 0;
 		minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
+		// A fresh config holds the current default, so the migration is done.
+		minimig_config.hardfile[0].reserved |= AMIGACD_HF0_HOLD_V2;
 		minimig_config.cd_speed       = AMIGACD_CD_SPEED_DEFAULT;
 		minimig_config.cd_audio_buffer = AMIGACD_CD_AUDIO_BUFFER_DEFAULT;
 		minimig_config.fmv_module = 0;
@@ -1756,31 +1788,9 @@ int minimig_cfg_load(int num, const char *sys_suffix)
 		// OSD offers no row for it. Re-assert it from the system the config
 		// itself names, leaving FastRAM and HRTmon untouched. SlowRAM is
 		// part of the profile for an A500 and the user's elsewhere.
-		// The announce hold, for the same reason in the same shape. Changing
-		// AMIGACD_CD_DELAY_DEFAULT only reaches a card with NO config: every
-		// machine that has booted this core carries a stored hold, and leaving
-		// it there ships the fix to nobody. That is the third time this
-		// asymmetry has bitten -- chip RAM and the floppy count below are the
-		// other two.
-		//
-		// Both values this core has handed out are cleared: 8, which lost the
-		// boot read, and 14, which replaced it. Neither was ever chosen by
-		// anyone, and a CD32 needs no hold at all -- see minimig_config.h for
-		// the measurements and the reference run.
-		//
-		// This DOES overwrite a deliberate 8 or 14. Nothing in the file tells a
-		// chosen value from a handed-out one, and shipping a known-bad default
-		// to everyone is worse than overriding the few who picked it: they can
-		// set 0..15 again, and /tmp/akiko_boot_delay overrides without a
-		// rebuild. Any OTHER stored value is the user's and is left alone.
-		if (minimig_config.cd_mount_delay == AMIGACD_CD_DELAY_LEGACY
-		    || minimig_config.cd_mount_delay == AMIGACD_CD_DELAY_LEGACY2)
-		{
-			printf("AmigaCD: clearing the CD announce hold %us -> %us "
-			       "(a CD32 needs none; see minimig_config.h)\n",
-			       minimig_config.cd_mount_delay, AMIGACD_CD_DELAY_DEFAULT);
-			minimig_config.cd_mount_delay = AMIGACD_CD_DELAY_DEFAULT;
-		}
+		// The announce hold, for the same reason in the same shape: see
+		// amigacd_migrate_cd_hold. A no-op when the .mgl above already ran it.
+		amigacd_migrate_cd_hold();
 
 		int sys = amigacd_system();
 		uint8_t fixed = amigacd_profile_memory(minimig_config.memory, sys);
