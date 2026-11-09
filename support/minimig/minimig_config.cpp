@@ -2426,6 +2426,10 @@ void minimig_ConfigChipset(mm_configTYPE *config)
 {
 	unsigned char chipset = config->cdtv_drive.cfg ? (config->chipset | CONFIG_CDTV) : (config->chipset & ~CONFIG_CDTV);
 	spi_uio_cmd8(UIO_MM2_CHIP, chipset & 0x3f);
+
+	// amigacd_system() reads the global, so only the live config decides it.
+	if (is_amigacd() && config == &minimig_config)
+		user_io_status_set(AMIGACD_CD32_STATUS_OPT, amigacd_system() == AMIGACD_SYS_CD32 ? 1 : 0);
 }
 
 void minimig_ConfigFloppy(unsigned char drives, unsigned char speed)

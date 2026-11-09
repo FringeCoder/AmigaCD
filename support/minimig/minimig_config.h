@@ -469,6 +469,15 @@ int  amigacd_is_cdtv(void);
 // The AMIGACD_SYS_* values these two speak in live in minimig_profile.h, which
 // is included above so callers need only this header.
 int  amigacd_system(void);
+
+// status[65]: the machine is a stock CD32. A real CD32 has no Zorro slots, so
+// the core leaves the Toccata and A2065 boards out of the autoconfig chain
+// while this is set. Their ConfigDev records otherwise land in low chip RAM
+// and shift ExecBase and everything above it by 0x48 bytes against a real
+// CD32 (and Copperline). Sent with the chipset, so it is in place before the
+// reset that runs autoconfig. CD32+ keeps the boards: it is the machine for
+// Workbench use, where the network card is wanted.
+#define AMIGACD_CD32_STATUS_OPT "[65]"
 // slot: 0 = cd32_drive, 1 = cdtv_drive
 int minimig_cd_drive_open(int slot, const char *filename);
 drive_t* minimig_cd_drive_get(int slot);
