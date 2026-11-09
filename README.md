@@ -107,6 +107,16 @@ noise rather than silence.
 covers both auto-boot-on-insert and hot swap, so changing discs mid-session no
 longer needs the OSD.
 
+**A stock CD32 has no expansion boards.** Main raises `status[65]` for that
+machine and the core leaves the Toccata and A2065 cards out of autoconfig, as a
+real CD32 has no Zorro slots (FringeCoder/AmigaCD#155, FringeCoder/AmigaCD_MiSTer#71). The cards' records had moved
+low chip RAM by 0x48 bytes against the real machine. On the superstation since
+2026-11-09 (core seed 9 of `42b0118`, setup -0.149 ns, so not timing-closed;
+Main `20a13ed9`): Super Stardust boots on 3 of 5 cold starts, where it failed
+every time before. The rest is a race in the boot ROM: CD0 has to start in the
+~230 ms between the two phases of the boot animation for its buffers to land
+above the animation's. Theme Park and Banshee still boot.
+
 Not yet exercised on hardware: the Real CD reset paths, and everything CDTV.
 See "Still to do" in [`docs/integration-plan.md`](docs/integration-plan.md).
 
