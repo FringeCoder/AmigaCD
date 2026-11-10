@@ -3868,6 +3868,7 @@ void user_io_poll()
 	}
 
 	next_enet_poll();
+	iigs_uthernet2_poll();
 
 	// The NeXT keeps a battery backed clock that the guest reads at
 	// boot; the one-shot update at core load is not enough if the core

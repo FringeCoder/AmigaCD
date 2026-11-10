@@ -13,6 +13,7 @@
 #include "support/a2/a2_nib_codec.h"
 // Apple IIgs disk integration
 #include "support/a2/iigs_disk.h"
+#include "support/a2/iigs_uthernet2.h"
 
 // Mac
 #include "support/mac/mac.h"
