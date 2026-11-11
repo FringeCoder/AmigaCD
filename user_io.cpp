@@ -2683,6 +2683,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 
 	sd_image_cangrow[index] = (pre != 0);
 	sd_type[index] = SD_TYPE_DEFAULT ;
+	st_fdd_unmount(index);
 	if (len)
 	{
 		if (!ret)
@@ -2772,6 +2773,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 					}
 				}
 
+				if (ret) ret = st_fdd_mount_hook(index, name, &sd_image[index], &writable);
 				if (ret && is_c128())
 				{
 					printf("Disk image type: %d\n", img_type);
@@ -2789,6 +2791,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	{
 		FileClose(&sd_image[index]);
 		c64_closeGCR(index);
+		st_fdd_unmount(index);
 	}
 
 	buffer_lba[index] = -1;
@@ -2828,6 +2831,7 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	spi8(UIO_SET_SDINFO);
 
 	__off64_t size = sd_image[index].size;
+	if (ret) size = (__off64_t)st_fdd_size(index, (uint64_t)size);
 	if (!ret && pre)
 	{
 		sd_image[index].type = 2;
@@ -3995,6 +3999,10 @@ void user_io_poll()
 				if (op == 2) iigs_write(disk, &sd_image[disk], lba, ack);
 				else if (op & 1) iigs_read(disk, &sd_image[disk], lba, blks, ack);
 				else break;
+			}
+			else if (int stop = st_fdd_sd_service(disk, op, lba, sz, ack))
+			{
+				if (stop < 0) break;
 			}
 			else if ((blks == G64_BLOCK_COUNT_1541+1 || blks == G64_BLOCK_COUNT_1571+1) && sd_type[disk]==SD_TYPE_C64)
 			{
