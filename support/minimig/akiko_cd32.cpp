@@ -250,6 +250,29 @@ static uint32_t cd_pause_decline_ms = 0;
 static bool     cd_pause_warned     = false;
 static uint32_t cd_boot_ready_ms    = 0;   // 0 = no hold pending
 static uint32_t cd_boot_settle_ms   = 0;
+// Whether the ROM's first INFO since the core load has been seen. See
+// akiko_boot_hold_after_info().
+static bool     cd_boot_info_seen   = false;
+
+// The shortest gap between the ROM's first INFO and the disc appearing, when a
+// hold is in force at all.
+//
+// The hold is timed from the core load, but the ROM's first INFO is not: across
+// 14 cold Super Stardust rounds it came 3.54 s or 3.67 s after the load, in two
+// clusters, for reasons on the ROM's side. With the 4 s default the disc
+// therefore appeared 0.46 s or 0.33 s after INFO. That is early enough for the
+// ROM to take the disc on its first boot cycle, which issues the first READ
+// about 2.15 s after INFO. On that cycle CD0 and the boot animation race for
+// chip RAM, and the LOADER's 1.81 MB contiguous block depends on which
+// allocates first: every 0.46 s round booted, every 0.33 s round failed (8 of
+// 8, classified by whether the LOADER read its data at LBA 8501).
+//
+// A disc that appears 0.83-0.96 s after INFO is taken on the ROM's next cycle
+// instead (first READ about 4.7 s after INFO), and Super Stardust booted on all
+// 6 rounds of both INFO clusters. Banshee sets the far edge: it fails at a 6 s
+// hold, about 2.4 s after INFO. 1.0 s sits inside both, and anchoring it to INFO
+// removes the 130 ms the ROM itself wanders by.
+#define AKIKO_BOOT_AFTER_INFO_MS 1000
 static uint8_t  cd_paused           = 0;
 static uint8_t  cd_playing          = 0;       // unused in M3, set by 0x04 (audio)
 static uint8_t  cd_led_state        = 0;
@@ -1189,10 +1212,33 @@ static bool akiko_push_toc_entry(void)
 // Per-opcode command handlers
 // -----------------------------------------------------------------------------
 
+// Extend a pending boot hold so the disc appears no earlier than
+// AKIKO_BOOT_AFTER_INFO_MS after the ROM's first INFO. Only the first INFO
+// since the core load counts, and only while the hold is still running: a hold
+// of 0 stays an immediate announce, and an INFO after the disc has appeared (a
+// CPU reset, say) must not take it away again.
+static void akiko_boot_hold_after_info(void)
+{
+	if (cd_boot_info_seen) return;
+	cd_boot_info_seen = true;
+	if (!cd_boot_ready_ms || CheckTimer(cd_boot_ready_ms)) return;
+
+	const uint32_t floor_ms = (uint32_t)GetTimer(AKIKO_BOOT_AFTER_INFO_MS);
+	// Wrap-safe "floor is later than the current deadline".
+	if ((int32_t)(floor_ms - cd_boot_ready_ms) > 0) {
+		akiko_diag("[akiko] boot settle: first INFO, hold extended by %d ms "
+		           "to %u ms after it",
+		           (int)(int32_t)(floor_ms - cd_boot_ready_ms),
+		           (unsigned)AKIKO_BOOT_AFTER_INFO_MS);
+		cd_boot_ready_ms = floor_ms;
+	}
+}
+
 // 0x07 — INFO/STATUS. akiko.cpp:940-954.
 // Response = 20 bytes: { cmd, door, FIRMWAREVERSION[18] }.
 static void cmd_info(const uint8_t *cmd)
 {
+	akiko_boot_hold_after_info();
 	uint8_t r[20];
 	r[0] = cmd[0];
 	r[1] = cd_door;
@@ -3412,6 +3458,7 @@ void akiko_cd32_init(void)
 {
 	cd_boot_settle_ms = akiko_boot_settle_ms();
 	cd_boot_ready_ms  = cd_boot_settle_ms ? (uint32_t)GetTimer(cd_boot_settle_ms) : 0;
+	cd_boot_info_seen = false;
 	akiko_diag("[akiko] boot settle: holding first media announce %u ms",
 	           cd_boot_settle_ms);
 	// Which machine this round actually ran as, recorded once per core load.
