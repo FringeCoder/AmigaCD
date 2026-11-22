@@ -9,7 +9,8 @@ against. Re-verify line numbers after moving off these.
 | `kblood/Minimig-AGA-cd32-cdtv-native-akiko` | `amigacd-core` | `a27f4e8` "AmigaCD: identify as a separate core" | 2026-07-29 |
 | ^ **but we build `feature/misterfloppy`** — see "Which core branch to build" | | | 2026-08-03 |
 | ^ previous pin, superseded 2026-08-01 | `amiga-console` | `c5eb180` | 2026-06-13 |
-| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `e6e62b2` "Merge PR #23, megacd-cdg-psx-fixes" -- module files unchanged, see below | 2026-10-16 |
+| `Anime0t4ku/Main_MiSTer_Physical_Disc` | `master` | `7dc46c72` "Merge PR #25, nonblocking phys read" -- **the module taken whole; its Mega CD caller not; see "Sync 2026-11-22"** | 2026-11-22 |
+| ^ previous pin, superseded 2026-11-22 | | `e6e62b2` "Merge PR #23, megacd-cdg-psx-fixes" -- module files unchanged, see below | 2026-10-16 |
 | ^ previous pin, superseded 2026-10-16 | | `554dbbc` "Merge PR #20, megacd-cdg" | 2026-10-11 |
 | ^ previous pin, superseded 2026-10-11 | | `dc0c4c9` "Merge PR #18, boot-launch" | 2026-10-09 |
 | ^ previous pin, superseded 2026-10-09 | | `e6c7abd1` "Merge PR #17, stock LibCrypt" | 2026-10-01 |
@@ -19,7 +20,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `0827165` "Minimig: CD read speed Max Speed, data read stops CD audio" -- **the IDE fixes taken; Max Speed and the CD32 audio stop not (ours stops the pump already); see "Sync 2026-10-30"** | 2026-10-30 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `fb7d444` "Fix video_mode_adjust call, remove obsolete code." -- **13 of 34 taken (three adapted); the core-dispatch refactor, the new core families, upstream's SNAC and the Chinon Akiko not; see "Sync 2026-11-22"** | 2026-11-22 |
+| ^ previous pin, superseded 2026-11-22 | | `0827165` "Minimig: CD read speed Max Speed, data read stops CD audio" -- **the IDE fixes taken; Max Speed and the CD32 audio stop not (ours stops the pump already); see "Sync 2026-10-30"** | 2026-10-30 |
 | ^ previous pin, superseded 2026-10-30 | | `b4aac02` "input: force feedback requested by the core (#1393)" -- **both taken, the Action Replay adapted to status[63]; see "Sync 2026-10-29"** | 2026-10-29 |
 | ^ previous pin, superseded 2026-10-29 | | `bfb5cd0` "Minimig: CD read speed for the CD32 and CDTV drive" -- **seven of thirteen taken (two adapted); the CD read speed setting NOT taken, its status bits are our save state's; see "Sync 2026-10-28"** | 2026-10-28 |
 | ^ previous merge base, superseded 2026-10-28 | | `8328d9f` "Minimig: CD32 with up to 99 tracks, WAV tracks in cue (#1386)" -- taken, and the Akiko TOC bound follows it; SGI Indy not taken; see "Sync 2026-10-26" | 2026-10-26 |
@@ -34,7 +36,8 @@ against. Re-verify line numbers after moving off these.
 | ^ previous merge base, superseded 2026-09-18 | | `4145f1d` "Rotate analog OSD to match core direction (#1316)" | 2026-09-17 |
 | ^ previous merge base, superseded 2026-09-17 | | `0039110` "Apple-II: WOZ support, save states, screenshots (#1312)" | 2026-09-12 |
 | ^ previous merge base | | `0a8fb44` "minimig: resolve the quick-start ROMs through HomeDir() (#1292)" | 2026-08-24 |
-| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `e47c345` "Akiko (Max Speed, Chuck Rock), Agnus, CPU, joystick, SDRAM" -- **five taken (three adapted), the TX/RX line count already here, Max Speed not; see "Sync 2026-10-30"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-30 |
+| `MiSTer-devel/Minimig-AGA_MiSTer` | `MiSTer` | `e559717` "TG68K MMU: micro-TLB with four entries per kind of access (#300)" -- **five taken (three adapted), the read-request LUT already here; the SNAC, the Chinon Akiko and the RTG Zorro III board not; see "Sync 2026-11-22"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-1122` | 2026-11-22 |
+| ^ previous pin, superseded 2026-11-22 | | `e47c345` "Akiko (Max Speed, Chuck Rock), Agnus, CPU, joystick, SDRAM" -- **five taken (three adapted), the TX/RX line count already here, Max Speed not; see "Sync 2026-10-30"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-30 |
 | ^ previous pin, superseded 2026-10-30 | | `bf5d061` "The Action Replay cartridge (AR5, DeMoN v2 layout) as an option to HRTmon (#291)" -- **taken, adapted to status[63]; its Verilator system sim not; see "Sync 2026-10-29"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-29 |
 | ^ previous pin, superseded 2026-10-29 | | `06db70b` "CD read speed; fix CPU (Pierre le Chef) and Denise (Alien 3)" -- **all taken, three adapted (`ce1f386` as the core half of our own CD rate), see "Sync 2026-10-28"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-70pn9b` | 2026-10-28 |
 | ^ previous pin, superseded 2026-10-28 | | `ba5adba` "Improve the timings (SDRAM pins, CPU data path) - #289" -- **all but `cf24493` taken, see "Sync 2026-10-26"** -- FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-1026` | 2026-10-26 |
@@ -112,6 +115,106 @@ the SNAC third tenant, and our OSD rows already exist.
 `long` on an LP64 host and `long long` on 32-bit ARM, so upstream's form resolves
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
+
+## Sync 2026-11-22: input and other cores in, the core-dispatch refactor and the Chinon Akiko out
+
+Main_MiSTer `0827165..fb7d444`, Minimig-AGA `e47c345..e559717`, the
+physical-disc fork `e6e62b2..7dc46c72`.
+
+Checked on the userspace branch: the ARM build, `make -C tests` and
+`syntax_check.sh` (116 parsed). On the core branch: `syntax_check.sh` (115
+parsed, 0 syntax errors) and a Quartus analysis of both TG68K VHDL files.
+**No fit and no hardware run yet.**
+
+### Main_MiSTer: taken
+
+| Upstream | Change | Here |
+|---|---|---|
+| `a8ed7e9` | input, menu: joymap v4 controller mapping (#1405) | Taken, clean, with its menu changes. |
+| `e0a234f` | joymapping: Stick 2 ignored in Menu button prompts (#1408) | Taken, clean. |
+| `410b2ef` | input: GameControllerDB right stick and Misc1 (#1409) | Taken, clean. |
+| `84b52d4` | INI: more than 4 ini files, with an INI folder (#1426) | Taken, clean. |
+| `afb917f` | menu: an MRA's media loads into a disk entry the core hides (#1402) | Taken, **adapted**: `mgl_struct` keeps our `xml_path` next to upstream's `from_mra`. |
+| `7912f76` | mra/mgl: mount root path attribute and submenus (#1406) | Taken, clean. |
+| `04f91c6` | Atari ST: STX, SCP and IPF floppy images (#1419) | Taken, **adapted**: only its `st_fdd_*` lines in `user_io.cpp`. The mount, unmount and size hooks of the cores we do not carry (Mac, Sun, HP 9000, RS/6000, SGI, NeXT, Apple III, Falcon, PC-88) are left out. |
+| `8329c5a` | Atari ST: STX tracks with a custom sync and no sectors (#1420) | Taken, clean. |
+| `8482082` | Atari ST: "Border" option (#1421) | Taken, clean. |
+| `353d485` | Apple IIgs: Uthernet II Ethernet card (#1416) | Taken, **adapted**: only its own poll and include. Its poll costs one `strcasecmp` per main loop on other cores. |
+| `cc47bad` | Apple IIgs/IIe: whole SD requests in `iigs_read` (#1410) | Taken, clean. |
+| `90bcbad` | Tk2000 dsk nibblizer (#1417) | Taken, clean. |
+| `0fd69ca` | 3DO: format a save with no NVRAM volume (#1415) | Taken, clean. |
+
+### Main_MiSTer: not taken
+
+- `6ebb80b` "Minimig: add 68020 option" -- **already here in our form**. Upstream
+  brings back the unthrottled 68020 as a CPU step, with the 40MHz/50MHz/Max
+  clock bits. This fork never dropped it: it is "CPU Turbo: On". Upstream also
+  lets bits 7:6 set the 68020's clock. Our CPU Clock row is greyed for
+  everything but the 68030, and that stays until someone shows a reason.
+- `ea69b48` "Minimig: SNAC joystick on the user port" -- upstream's own SNAC.
+  It adds a `minimig_config` field and a User Port mode. Ours has
+  `minimig_ConfigSnac()` and a different on-disk layout (see `5b3ae64` above), so
+  this is the same permanent divergence. The core half, Minimig-AGA `0d6bd62`,
+  is not taken either.
+- **#1401, the real Chinon drive in Akiko** (`fad6661`, `6b310ec`, `90e2670`,
+  `c7715f3`, `aa8b988`, `de9415b`, `3b417e7`, merged as `232286e`), together with
+  the core's `48a35dd` and `9709669`. It rewrites about 600 lines of
+  `akiko_cd32.cpp`: the TOC streamed at 600 packets/s, media status 0x83 only at
+  power-on and disc change, SUBQ with the Red Book time and Q CRC, cooked
+  tracks with EDC/ECC, real seek and spin-up times at Original speed, prefetch
+  read-ahead, and a four-sector queue in the core (the James Pond 3 CDXL
+  audio). Ours has diverged from that file by about 3000 lines: the core paces
+  the sectors, our CD speed setting, and the announce hold and command-channel
+  fixes behind Chuck Rock, Theme Park and Super Stardust. A textual merge is not
+  possible, and doing it in a sync would put every one of those boots at risk.
+  **A port is its own piece of work.** It should go one behaviour at a time,
+  with Copperline as the reference, and the four-sector queue is the most
+  likely first win.
+- The new core families: `75e204a` VideoBrain, `3e6037a` AT&T 3B1 Ethernet,
+  `3bba2bc` IBM RS/6000, `fed03e5` DEC AlphaStation 200. Same reasoning as on
+  2026-10-01: no reader here.
+- **The core-dispatch refactor**: `af60c2e`, `e106d44`, `83a6f93`, `21b7d20`,
+  `50f0bd3`, `f47acd3`, `fb7d444`. Upstream moves each core's checks, SD service
+  and poll out of `user_io.cpp` into its `support/` code, behind function
+  pointers. `e106d44` moves Minimig's part into a new
+  `support/minimig/minimig.cpp`. The series presumes upstream's current copies
+  of every core this fork left out (Mac, NeXT, Marty, PC-FX, PC-88, SGI, Sun,
+  HP 9000, Falcon, Apple III): `af60c2e` alone conflicts in 21 files. Our
+  Minimig code in `user_io.cpp` (save states, the ARM CPU, the CDTV slot, FMV)
+  is the part it moves. `fb7d444`'s `video_mode_adjust` fix repairs a regression
+  that `e106d44` introduced, so we do not need it.
+
+  **This is the decision that will make later syncs worse.** Every upstream
+  change to `user_io.cpp` now lands on code structured differently from ours.
+  There are two ways out. One is to take every non-Minimig core wholesale, then
+  the refactor, then move our Minimig code into `minimig.cpp`: a few days, all
+  of it on the save-state and boot paths. The other is to stay as we are and
+  port by hand from now on. Not decided here.
+
+### Minimig-AGA (FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-1122`)
+
+| Upstream | Change | Core |
+|---|---|---|
+| `b0349e7` | userio: mouse movement overflow protection (#298) | Taken, clean. |
+| `7821c15` | Update sys (left/right trigger analog, force feedback in `hps_io`, LFB ports, `yc_out`) | Taken, clean. The new `hps_io` FFB inputs are left unconnected, as in upstream's `Minimig.sv`. |
+| `c88a6f9` | No opposite joystick directions, HPS joysticks only (#297) | Taken, **adapted**: the filter goes on `JOY0`/`JOY1` in `AmigaCD.sv`, before our SNAC pad is ORed in. Upstream puts it in its own SNAC mux in `Minimig.sv`, which we do not have. |
+| `7d5d3c2` | Fix some warnings | Taken **in part**: the unused `MiSTerFloppyIBM.v` is out of `misterfloppy.qip`. The `yc_out` multicycle it deletes was already gone from `AmigaCD.sdc`. |
+| `e559717` | TG68K MMU: a micro-TLB with four entries per kind of access (#300) | Taken, **adapted**: the kernel hunks went in by hand. **Added: a save-state register write also writes the page hint.** A stale hint only costs a miss, but this way the guesses start from the restored registers. |
+| `74483cd` | cpu_cache_new: the read request in one LUT after the hits | **Already here**: our `rq_read`/`rq_fill1`/`rd_hit` already do it, for the same timing path. |
+| `3ea7f0e` | RTG: the framebuffer as a Zorro III autoconfig board (#295) | **Not taken, its own PR.** It moves RTG to an autoconfigured base, which needs `cpu_wrapper`, `fastchip`, `memory_router` and `chipdma_arb`. Those are the files that carry our ARM proxy, CDTV gate and DMA arbitration. It also adds a base register that a save state has to carry. The driver it ships still falls back to the fixed addresses, so our core keeps working with the new `MiSTer_RTG.lha`. |
+| `0d6bd62`, `48a35dd`, `9709669` | SNAC; the Chinon Akiko | Not taken, see the Main_MiSTer list above. |
+
+### `Anime0t4ku/Main_MiSTer_Physical_Disc` -> `7dc46c72`
+
+Our `physical_disc.{cpp,h}` were byte-identical to `e6e62b2`, so we took both
+files whole. The fix that matters is `929560d`: the prefetch no longer reads
+into the 2 s audio pregap at the end of a data track, where some drives retry
+for seconds and stall every read behind them. A CD32 disc with CD audio tracks
+has exactly that layout. The fork's `megacdd.cpp` caller of the new
+`physical_disc_sector_ready()` is not taken: we do not carry its Mega CD
+integration.
+
+`kblood/Main_MiSTer-cd32-cdtv` (`52625a4`) has not moved.
 
 ## Sync 2026-10-30: the IDE loop, and the 68EC020's instruction cache
 
