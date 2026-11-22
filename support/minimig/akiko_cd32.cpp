@@ -3034,6 +3034,48 @@ static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 	return 0;
 }
 
+// How late the Main is with each sector, against the rate the core paces
+// at (akiko_pace.h, akiko_cadence_t). One line every 600 sectors, and the
+// longest gap between two polls of this bridge over the same stretch, which
+// is what any lateness has to come from.
+static akiko_cadence_t cd_cadence = { -1, 0, 0, {0}, 0, 0 };
+static int64_t cd_poll_last_us = 0;
+static int64_t cd_poll_gap_max_us = 0;
+
+static void akiko_cadence_note(uint32_t lba, int64_t now_us)
+{
+	const int64_t period = akiko_rate_period_us(
+		(int)user_io_status_get(AKIKO_RATE_STATUS));
+	akiko_cadence_add(&cd_cadence, (int32_t)lba, now_us, period);
+	if (cd_cadence.n < 600) return;
+	const akiko_cadence_t &c = cd_cadence;
+	akiko_diag("[akiko] cadence P=%lldus n=%u late 0 %u, <=0.5ms %u, <=1ms %u, "
+	           "<=2ms %u, <=5ms %u, more %u; late %lldus total, max %lldus, "
+	           "poll gap max %lldus, last lba=%u",
+	           (long long)period, c.n, c.bins[0], c.bins[1], c.bins[2],
+	           c.bins[3], c.bins[4], c.bins[5], (long long)c.late_us,
+	           (long long)c.max_us, (long long)cd_poll_gap_max_us, lba);
+	const int32_t keep_lba = c.last_lba;
+	const int64_t keep_us  = c.ship_us;
+	akiko_cadence_reset(&cd_cadence);
+	cd_cadence.last_lba = keep_lba;
+	cd_cadence.ship_us  = keep_us;
+	cd_poll_gap_max_us  = 0;
+}
+
+static void akiko_poll_gap_note(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	const int64_t now = (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+	// Only while a read is armed: an idle bridge's gaps are nobody's problem.
+	if (cd_poll_last_us && cd_data_lba_base != -1) {
+		const int64_t gap = now - cd_poll_last_us;
+		if (gap > cd_poll_gap_max_us) cd_poll_gap_max_us = gap;
+	}
+	cd_poll_last_us = now;
+}
+
 // Service one akiko_sec_req. Reads the engine's current sector_counter,
 // fetches LBA = base + counter from the CD image, and pushes the raw 2352-byte
 // frame back. On any error (no disc, no data read armed, image read failure)
@@ -3284,6 +3326,7 @@ static bool akiko_handle_sec_req(void)
 
 	akiko_push_sector(buf);
 	clock_gettime(CLOCK_MONOTONIC, &ts3);
+	akiko_cadence_note(lba, (int64_t)ts3.tv_sec * 1000000LL + ts3.tv_nsec / 1000);
 
 	// Signed math throughout — when tv_nsec wraps across a second, the diff
 	// is genuinely negative until the tv_sec component compensates. Casting
@@ -3580,6 +3623,7 @@ static inline bool cd32_active(void)
 
 void akiko_cd32_poll(void)
 {
+	akiko_poll_gap_note();
 	cdda_mon_poll();
 
 	// Hold the disc genuinely ABSENT until the boot settle expires, not merely
