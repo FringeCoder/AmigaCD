@@ -189,7 +189,13 @@ parsed, 0 syntax errors) and a Quartus analysis of both TG68K VHDL files.
   There are two ways out. One is to take every non-Minimig core wholesale, then
   the refactor, then move our Minimig code into `minimig.cpp`: a few days, all
   of it on the save-state and boot paths. The other is to stay as we are and
-  port by hand from now on. Not decided here.
+  port by hand from now on.
+
+  **Decided 2026-11-24: not adopted.** This Main is loaded only for the Amiga
+  core (a core-specific section in `MiSTer.ini`), so other cores never run it
+  and keeping them current buys nothing. Upstream Minimig changes are ported
+  by hand; after the refactor they sit in `support/minimig/minimig.cpp`, which
+  makes each one a contained diff. Other-core commits are skipped from now on.
 
 ### Minimig-AGA (FringeCoder/AmigaCD_MiSTer `claude/resync-upstream-1122`)
 
