@@ -20,7 +20,7 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `fb7d444` "Fix video_mode_adjust call, remove obsolete code." -- **13 of 34 taken (three adapted); the core-dispatch refactor, the new core families, upstream's SNAC and the Chinon Akiko not; see "Sync 2026-11-22"** | 2026-11-22 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `fb7d444` "Fix video_mode_adjust call, remove obsolete code." -- **13 of 34 taken (three adapted); the core-dispatch refactor, upstream's SNAC and the Chinon Akiko not; see "Sync 2026-11-22". Every other core taken up to `fed03e5` on 2026-11-24, see "Other cores 2026-11-24"** | 2026-11-22 |
 | ^ previous pin, superseded 2026-11-22 | | `0827165` "Minimig: CD read speed Max Speed, data read stops CD audio" -- **the IDE fixes taken; Max Speed and the CD32 audio stop not (ours stops the pump already); see "Sync 2026-10-30"** | 2026-10-30 |
 | ^ previous pin, superseded 2026-10-30 | | `b4aac02` "input: force feedback requested by the core (#1393)" -- **both taken, the Action Replay adapted to status[63]; see "Sync 2026-10-29"** | 2026-10-29 |
 | ^ previous pin, superseded 2026-10-29 | | `bfb5cd0` "Minimig: CD read speed for the CD32 and CDTV drive" -- **seven of thirteen taken (two adapted); the CD read speed setting NOT taken, its status bits are our save state's; see "Sync 2026-10-28"** | 2026-10-28 |
@@ -116,6 +116,65 @@ the SNAC third tenant, and our OSD rows already exist.
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
 
+## Other cores 2026-11-24: every non-Minimig core taken from upstream
+
+The first half of settling the core-dispatch refactor (see "Sync 2026-11-22",
+"not taken"). The refactor presumes upstream's current copy of every core, and
+this fork had left most of them at whatever state they were in when it
+diverged: about 10.5k lines of other-core support missing, and around 50 stale
+files in directories we do carry (Mac 18, NeXT 13). This brings them level, so
+the refactor itself can follow as its own PR with only Minimig left to move.
+
+Taken with `-x`, oldest first, up to `fed03e5`:
+
+| Upstream | Change |
+|---|---|
+| `f6a3caa` | Mac: Ethernet with the SCSI optimisations, Quadra 800 Ethernet (#1321) |
+| `7875437`, `7f34486`, `3116e7f` | NeXT: plain epoch TIMESTAMP, SCSI target responses / CD audio / MO ECC from Main, `rtc_is_utc()` |
+| `5a3a086` | NeXT: `is_next()` also matches NeXT-Color (#1329) |
+| `6e14ab2` | Apple III: disk and block storage (#1334) |
+| `ce432dc` | FM Towns Marty (#1333) |
+| `6ddadac` | Mac: fast SCSI (#1336) |
+| `93033fe` | Atari Falcon SCSI (#1338) |
+| `ebcdb4e`, `d5f3844` | Sun family; SS20 CD audio (#1344, #1345) |
+| `79787d3` | Mac PPC 7300 (#1350) |
+| `13f1de9` | PC-8801: a floppy image grows when the core moves a track (#1358) |
+| `88d2d10` | PC-FX (#1365) |
+| `144cee3` | HP 9000 family (#1368) |
+| `eddc655` | SGI Indy: Ethernet and SCSI write buffer (#1385) |
+| `a9da97c` | Bandai Pippin (#1389) |
+| `1270309` | PC-8801: one disk of a multi-disk D88 (#1378) |
+| `75e204a` | VideoBrain: new tape and printer images (#1418) |
+| `3e6037a` | AT&T 3B1 Ethernet bridge (#1413) |
+| `3bba2bc` | IBM RS/6000 (#1388) |
+| `fed03e5` | DEC AlphaStation 200 (#1423) |
+| `663104d` | `is_pcxt()` also matches PCXT-EGA (#1259) |
+
+How the conflicts went. All of them were in the shared dispatch files, none in a
+core's own `support/` directory:
+
+- `user_io.cpp`: the mount and unmount hooks are the union of both sides, with
+  Mac, NeXT, Apple III and Falcon ahead of our Atari ST hook. The SD-service
+  chain is now in upstream's order (mac, next, sun, hp9k, ibmrs6k, sgi,
+  decalpha, marty, pcfx, a3, pc88, st_fdd, falcon). The image size goes
+  through `pc88_size()` and then `st_fdd_size()`. `mac_poll()`, `sun_poll()`
+  and `sun_enet_poll()` sit next to `iigs_uthernet2_poll()`.
+- `menu.cpp`: the save-file condition keeps our `is_pcat286()` and gains
+  upstream's Marty and PC-FX CD slots.
+- `user_io.h`: `is_falcon()` in; `is_sharpmz()` out, as upstream did.
+- `support.h`: the union of the includes.
+
+Checked against `fed03e5`: every `support/` directory except `minimig`,
+`physical_disc` and `arcade` is byte-identical to upstream. `arcade` keeps our
+`xml_path`. What still differs in the shared files is ours on purpose (the
+Minimig paths, save states, the physical disc, the FMV poll) or one of the
+items "Sync 2026-11-22" declines (upstream's SNAC, the Chinon `ide_cdrom`
+changes).
+
+Checked: a clean ARM build, `make -C tests` and `syntax_check.sh` (159 parsed).
+No hardware run: none of these cores are in this fork's test set, and the
+Minimig paths are untouched apart from the order of the calls around them.
+
 ## Sync 2026-11-22: input and other cores in, the core-dispatch refactor and the Chinon Akiko out
 
 Main_MiSTer `0827165..fb7d444`, Minimig-AGA `e47c345..e559717`, the
@@ -172,7 +231,8 @@ parsed, 0 syntax errors) and a Quartus analysis of both TG68K VHDL files.
   likely first win.
 - The new core families: `75e204a` VideoBrain, `3e6037a` AT&T 3B1 Ethernet,
   `3bba2bc` IBM RS/6000, `fed03e5` DEC AlphaStation 200. Same reasoning as on
-  2026-10-01: no reader here.
+  2026-10-01: no reader here. **Superseded 2026-11-24**: taken with every other
+  non-Minimig core, see "Other cores 2026-11-24".
 - **The core-dispatch refactor**: `af60c2e`, `e106d44`, `83a6f93`, `21b7d20`,
   `50f0bd3`, `f47acd3`, `fb7d444`. Upstream moves each core's checks, SD service
   and poll out of `user_io.cpp` into its `support/` code, behind function
