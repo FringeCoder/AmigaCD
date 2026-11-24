@@ -124,4 +124,45 @@ bool akiko_sec_should_serve(int32_t data_lba_base, int paused);
 // which is the caller's cue to say so rather than to keep quiet.
 bool akiko_pause_stuck(uint32_t since_ms, uint32_t now_ms, uint32_t limit_ms);
 
+// Sector cadence, as the core sees it.
+//
+// The core holds one sector. It asks for the next one once the last has
+// shipped, and starts a ship no earlier than a period after the one before
+// (akiko.v restarts the period at each ship). So sector N+1 is late when its
+// push completes after ship N's start plus a period, and the guest then sees
+// that sector, and every one after it, late by the difference. This models
+// the ship times from the push times,
+//
+//   ship[N] = max(push[N], ship[N-1] + P)
+//
+// and histograms push[N] - (ship[N-1] + P) where it is positive. It is an
+// upper bound on what the Main costs the guest: a guest that holds no free
+// PBX slot also delays the request, and counts here too. The question it
+// answers is whether the core needs a queue of sectors (upstream Minimig-AGA
+// 9709669) to absorb the Main's lateness.
+//
+// The time between push completions is no measure of this. It varies by the
+// poll loop's jitter while every ship stays on time.
+//
+// A push that does not follow the previous LBA (a seek, a new READ) starts a
+// new run. So does a gap longer than AKIKO_CADENCE_IDLE_US: that is the guest
+// not asking, which no queue would change.
+#define AKIKO_CADENCE_BINS     6
+#define AKIKO_CADENCE_IDLE_US  200000
+typedef struct {
+	int32_t  last_lba;      // -1: no run
+	int64_t  ship_us;       // modelled start of the last ship
+	uint32_t n;             // sectors that followed a previous one
+	uint32_t bins[AKIKO_CADENCE_BINS];   // late by 0, <=0.5 ms, <=1 ms, <=2 ms, <=5 ms, more
+	int64_t  late_us;       // total lateness
+	int64_t  max_us;        // worst single lateness
+} akiko_cadence_t;
+
+// Period in microseconds for an AKIKO_RATE_* code.
+int64_t akiko_rate_period_us(int rate_code);
+void    akiko_cadence_reset(akiko_cadence_t *c);
+// One push of `lba`, completed at `now_us`, paced at `period_us`.
+void    akiko_cadence_add(akiko_cadence_t *c, int32_t lba, int64_t now_us,
+                          int64_t period_us);
+
 #endif

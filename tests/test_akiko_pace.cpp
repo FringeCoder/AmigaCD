@@ -175,6 +175,50 @@ int main(void)
 		          akiko_seek_us(0, 25622, 0), AKIKO_SEEK_FULL_US);
 	}
 
+	// ------------------------------------------------- sector cadence
+	{
+		check_i64("1x period", akiko_rate_period_us(AKIKO_RATE_1X), 13333);
+		check_i64("2x period", akiko_rate_period_us(AKIKO_RATE_2X), 6667);
+		check_i64("4x period", akiko_rate_period_us(AKIKO_RATE_4X), 3333);
+		check_i64("8x period", akiko_rate_period_us(AKIKO_RATE_8X), 1667);
+
+		akiko_cadence_t c;
+		akiko_cadence_reset(&c);
+		const int64_t P = 6667;
+		int64_t t = 1000000;
+		akiko_cadence_add(&c, 100, t, P);                 // ship 0 at t
+		check_i64("first push is not counted", c.n, 0);
+		akiko_cadence_add(&c, 101, t + 2000, P);          // early: ships at t+P
+		akiko_cadence_add(&c, 102, t + P + 6000, P);      // before t+2P
+		check_i64("pushes ahead of their ship are on time", c.bins[0], 2);
+		check_i64("jitter between pushes is not lateness", c.late_us, 0);
+		// Next ship is due at t+3P. Push 300 us after it.
+		akiko_cadence_add(&c, 103, t + 3 * P + 300, P);
+		check_i64("300 us late", c.bins[1], 1);
+		// That ship moved: the next is due 300 us later too, so a push at
+		// t+4P+300 is on time, not late again.
+		akiko_cadence_add(&c, 104, t + 4 * P + 300, P);
+		check_i64("a late ship moves the grid", c.bins[0], 3);
+		t = t + 4 * P + 300;                              // ship 104
+		akiko_cadence_add(&c, 105, t += P + 800, P);
+		akiko_cadence_add(&c, 106, t += P + 1500, P);
+		akiko_cadence_add(&c, 107, t += P + 4000, P);
+		akiko_cadence_add(&c, 108, t += P + 9000, P);
+		check_i64("bin 2", c.bins[2], 1);
+		check_i64("bin 3", c.bins[3], 1);
+		check_i64("bin 4", c.bins[4], 1);
+		check_i64("bin 5", c.bins[5], 1);
+		check_i64("lateness summed", c.late_us, 300 + 800 + 1500 + 4000 + 9000);
+		check_i64("worst lateness", c.max_us, 9000);
+		const uint32_t n = c.n;
+		akiko_cadence_add(&c, 500, t += P, P);            // a seek
+		check_i64("a seek starts a run", c.n, n);
+		akiko_cadence_add(&c, 501, t += AKIKO_CADENCE_IDLE_US + 1, P);
+		check_i64("an idle guest starts a run", c.n, n);
+		akiko_cadence_add(&c, 502, t += P, P);
+		check_i64("and the run resumes after it", c.n, n + 1);
+	}
+
 	if (failures) { printf("%d FAILURES\n", failures); return 1; }
 	printf("ALL TESTS PASSED\n");
 	return 0;

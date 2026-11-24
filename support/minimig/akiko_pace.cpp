@@ -71,3 +71,49 @@ int64_t akiko_seek_us(int32_t from_lba, int32_t to_lba, uint32_t span_lba)
 	if (us > AKIKO_SEEK_FULL_US) us = AKIKO_SEEK_FULL_US;   // dist beyond the span
 	return us;
 }
+
+int64_t akiko_rate_period_us(int rate_code)
+{
+	switch (rate_code) {
+	case AKIKO_RATE_1X: return 13333;
+	case AKIKO_RATE_2X: return 6667;
+	case AKIKO_RATE_4X: return 3333;
+	default:            return 1667;    // AKIKO_RATE_8X
+	}
+}
+
+void akiko_cadence_reset(akiko_cadence_t *c)
+{
+	*c = akiko_cadence_t();
+	c->last_lba = -1;
+}
+
+void akiko_cadence_add(akiko_cadence_t *c, int32_t lba, int64_t now_us,
+                       int64_t period_us)
+{
+	const bool follows = c->last_lba >= 0 && lba == c->last_lba + 1
+	                  && period_us > 0
+	                  && now_us >= c->ship_us
+	                  && now_us - c->ship_us <= AKIKO_CADENCE_IDLE_US;
+	c->last_lba = lba;
+	if (!follows) {
+		c->ship_us = now_us;            // the first of a run goes at once
+		return;
+	}
+
+	const int64_t due  = c->ship_us + period_us;
+	const int64_t late = (now_us > due) ? now_us - due : 0;
+	c->ship_us = (now_us > due) ? now_us : due;
+
+	int bin;
+	if      (late == 0)     bin = 0;
+	else if (late <=  500)  bin = 1;
+	else if (late <= 1000)  bin = 2;
+	else if (late <= 2000)  bin = 3;
+	else if (late <= 5000)  bin = 4;
+	else                    bin = 5;
+	c->bins[bin]++;
+	c->n++;
+	c->late_us += late;
+	if (late > c->max_us) c->max_us = late;
+}
