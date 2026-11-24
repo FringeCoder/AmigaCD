@@ -65,7 +65,6 @@ struct mgl_struct
 	int  state;
 	int  done;
 	char xml_path[1024];
-	int  from_mra;
 	int  opt_count;
 	mgl_option_struct opt[MGL_MAX_OPTIONS];
 };

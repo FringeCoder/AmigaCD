@@ -10,10 +10,8 @@
 
 // Apple 2 support
 #include "support/a2/dsk2nib_lib.h"
-#include "support/a2/a2_nib_codec.h"
 // Apple IIgs disk integration
 #include "support/a2/iigs_disk.h"
-#include "support/a2/iigs_uthernet2.h"
 
 // Mac
 #include "support/mac/mac.h"
@@ -23,7 +21,6 @@
 
 // ST (Atari) support
 #include "support/st/st_tos.h"
-#include "support/st/st_fdd.h"
 
 // X86  support
 #include "support/x86/x86.h"

@@ -2302,19 +2302,6 @@ static void *close_pipe_async(void *arg)
 	return NULL;
 }
 
-static bool mra_pending_target(const char *p)
-{
-	mgl_struct *mgl = mgl_get();
-	if (mgl->done || !mgl->from_mra || p[0] != 'S') return false;
-
-	int idx = 1;
-	if (p[idx] == 'S') idx++;
-	if (p[idx] == 'C') idx++;
-
-	int num = (p[idx] >= '0' && p[idx] <= '9') ? p[idx] - '0' : 0;
-	return num == mgl->item[mgl->current].index;
-}
-
 static int is_map_nav_hold_feedback(const char *feedback)
 {
 	return feedback && (!strcmp(feedback, "Skip/Unmap") || !strcmp(feedback, "Previous") || !strcmp(feedback, "Cancel") ||
@@ -3364,7 +3351,7 @@ void HandleUI(void)
 
 					last_space = 0;
 
-					if ((!h || mra_pending_target(p)) && inpage)
+					if (!h && inpage)
 					{
 						if (p[0] == 'P')
 						{
@@ -3761,7 +3748,7 @@ void HandleUI(void)
 						}
 					}
 
-					if (!inpage || (h && !mra_pending_target(p)) || p[0] < 'A') continue;
+					if (!inpage || h || p[0] < 'A') continue;
 
 					// supplement files
 					if (p[0] == 'f')
@@ -6390,8 +6377,8 @@ void HandleUI(void)
 				fs_Options = SCANO_DIR;
 				fs_MenuSelect = MENU_ST_FDD_FILE_SELECTED;
 				fs_MenuCancel = MENU_ST_MAIN1;
-				strcpy(fs_pFileExt, "ST STXSCPIPF");
-				if (select) SelectFile(Selected_F[menusub], "ST STXSCPIPF", fs_Options, fs_MenuSelect, fs_MenuCancel, menusub);
+				strcpy(fs_pFileExt, "ST");
+				if (select) SelectFile(Selected_F[menusub], "ST", fs_Options, fs_MenuSelect, fs_MenuCancel, menusub);
 				else if (recent_init(menusub)) menustate = MENU_RECENT1;
 			}
 		}
@@ -6503,7 +6490,7 @@ void HandleUI(void)
 		break;
 
 	case MENU_ST_SYSTEM1:
-		menumask = 0x3fffb;
+		menumask = 0x1fffb;
 		OsdSetTitle("Config", 0);
 		helptext_idx = 0;
 
@@ -6564,31 +6551,27 @@ void HandleUI(void)
 			else                                        strcat(s, "Full");
 			MenuWrite(m++, s, menusub == 11);
 
-			strcpy(s, " Border:     ");
-			strcat(s, (tos_get_extctrl() & 0x2000) ? "No" : "Yes");
-			MenuWrite(m++, s, menusub == 12);
-
 			strcpy(s, " Scale:      ");
 			strcat(s, config_scale[(tos_get_extctrl() >> 11) & 3]);
-			MenuWrite(m++, s, menusub == 13);
+			MenuWrite(m++, s, menusub == 12);
 
 			strcpy(s, " Scanlines:  ");
 			strcat(s, tos_scanlines[(tos_system_ctrl() >> 20) & 3]);
-			MenuWrite(m++, s, menusub == 14);
+			MenuWrite(m++, s, menusub == 13);
 			MenuWrite(m++);
 
 			strcpy(s, " Dongle:     ");
 			if (tos_system_ctrl() & TOS_CONTROL_DONGLE) strcat(s, "Cubase");
 			else                                        strcat(s, "None");
-			MenuWrite(m++, s, menusub == 15);
+			MenuWrite(m++, s, menusub == 14);
 			MenuWrite(m++);
 
 			strcpy(s, " YM-Audio:   ");
 			strcat(s, tos_stereo[(tos_system_ctrl() & TOS_CONTROL_STEREO) ? 1 : 0]);
-			MenuWrite(m++, s, menusub == 16);
+			MenuWrite(m++, s, menusub == 15);
 			MenuWrite(m++);
 
-			MenuWrite(m++, STD_BACK, menusub == 17);
+			MenuWrite(m++, STD_BACK, menusub == 16);
 
 			if (!adjvisible) break;
 			firstmenu += adjvisible;
@@ -6712,11 +6695,6 @@ void HandleUI(void)
 				break;
 
 			case 12:
-				tos_set_extctrl(tos_get_extctrl() ^ 0x2000);
-				menustate = MENU_ST_SYSTEM1;
-				break;
-
-			case 13:
 				{
 					int mode = ((tos_get_extctrl() >> 11) + (minus ? -1 : 1)) & 3;
 					tos_set_extctrl((tos_get_extctrl() & ~0x1800) | (mode << 11));
@@ -6724,7 +6702,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 14:
+			case 13:
 				{
 					// next scanline state
 					int scan = ((tos_system_ctrl() >> 20) + (minus ? -1 : 1)) & 3;
@@ -6733,18 +6711,18 @@ void HandleUI(void)
 				}
 				break;
 
-			case 15:
+			case 14:
 				tos_update_sysctrl(tos_system_ctrl() ^ TOS_CONTROL_DONGLE);
 				menustate = MENU_ST_SYSTEM1;
 				break;
 
-			case 16:
+			case 15:
 				tos_update_sysctrl(tos_system_ctrl() ^ TOS_CONTROL_STEREO);
 				menustate = MENU_ST_SYSTEM1;
 				break;
 
 
-			case 17:
+			case 16:
 				menustate = MENU_ST_MAIN1;
 				menusub = 5;
 				if (need_reset)

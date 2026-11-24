@@ -2699,7 +2699,6 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 
 	sd_image_cangrow[index] = (pre != 0);
 	sd_type[index] = SD_TYPE_DEFAULT ;
-	st_fdd_unmount(index);
 	if (len)
 	{
 		if (!ret)
@@ -2746,10 +2745,6 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 					const bool oric_a2_slot = oric_core && index < 2 && (ext_idx == 1 || ext_idx == 2);
 					const bool dsk_ext = !strcasecmp(name + len - 4, ".dsk");
 					const bool do_ext = len > 3 && !strcasecmp(name + len - 3, ".do");
-					// .po only on the floppy slots: the Apple-II core also mounts .po as a hard disk.
-					const bool po_ext = index < 2 && len > 3 && !strcasecmp(name + len - 3, ".po");
-					// A .dsk/.do/.po that is really a 35-track NIB is passed through as-is.
-					const bool nib_sized = sd_image[index].size == A2NIB_IMAGE_SIZE;
 					if (!strcasecmp(name + len - 4, ".d64")
 						|| !strcasecmp(name + len - 4, ".g64")
 						|| !strcasecmp(name + len - 4, ".d71")
@@ -2764,11 +2759,10 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 					{
 						img_type = G64_SUPPORT_HD | G64_SUPPORT_DS;
 					}
-					else if (!nib_sized && (((dsk_ext || do_ext || po_ext) && a2_core) || ((dsk_ext || do_ext) && oric_a2_slot)))
+					else if ((dsk_ext && (a2_core || oric_a2_slot)) || (do_ext && oric_a2_slot))
 					{
-						printf("FOUND A2 %s type (nibblized on the fly)\n", po_ext ? "PO" : "DSK/DO");
+						printf("FOUND A2 DSK/DO type\n");
 						sd_type[index] = SD_TYPE_A2;
-						a2_set_image(index, po_ext);
 					}
 				}
 
@@ -2789,7 +2783,6 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 					}
 				}
 
-				if (ret) ret = st_fdd_mount_hook(index, name, &sd_image[index], &writable);
 				if (ret && is_c128())
 				{
 					printf("Disk image type: %d\n", img_type);
@@ -2807,7 +2800,6 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	{
 		FileClose(&sd_image[index]);
 		c64_closeGCR(index);
-		st_fdd_unmount(index);
 	}
 
 	buffer_lba[index] = -1;
@@ -2847,7 +2839,6 @@ int user_io_file_mount(const char *name, unsigned char index, char pre, int pre_
 	spi8(UIO_SET_SDINFO);
 
 	__off64_t size = sd_image[index].size;
-	if (ret) size = (__off64_t)st_fdd_size(index, (uint64_t)size);
 	if (!ret && pre)
 	{
 		sd_image[index].type = 2;
@@ -3884,7 +3875,6 @@ void user_io_poll()
 	}
 
 	next_enet_poll();
-	iigs_uthernet2_poll();
 
 	// The NeXT keeps a battery backed clock that the guest reads at
 	// boot; the one-shot update at core load is not enough if the core
@@ -4007,19 +3997,15 @@ void user_io_poll()
 			if ( sd_type[disk] == SD_TYPE_A2)
 			{
 				//if (op) printf("A2 %x %llu on %d\n", op,lba, disk);
-				if (op == 2) a2_writeDSK(&sd_image[disk], lba, ack, disk);
-				else if (op & 1) a2_readDSK(&sd_image[disk], lba, ack, disk);
+				if (op == 2) a2_writeDSK(&sd_image[disk], lba, ack);
+				else if (op & 1) a2_readDSK(&sd_image[disk], lba, ack);
 				else break;
 			}
 			else if ( sd_type[disk] == SD_TYPE_IIGS)
 			{
 				if (op == 2) iigs_write(disk, &sd_image[disk], lba, ack);
-				else if (op & 1) iigs_read(disk, &sd_image[disk], lba, blks, ack);
+				else if (op & 1) iigs_read(disk, &sd_image[disk], lba, ack);
 				else break;
-			}
-			else if (int stop = st_fdd_sd_service(disk, op, lba, sz, ack))
-			{
-				if (stop < 0) break;
 			}
 			else if ((blks == G64_BLOCK_COUNT_1541+1 || blks == G64_BLOCK_COUNT_1571+1) && sd_type[disk]==SD_TYPE_C64)
 			{
