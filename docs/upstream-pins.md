@@ -20,7 +20,7 @@ against. Re-verify line numbers after moving off these.
 | ^ previous pin, superseded 2026-08-24 | | `748eb1d` "cd-da fixes" | 2026-08-03 |
 | ^ `ab2f602` was recorded here on 2026-08-07 but never extracted — see below | | | |
 | ^ its fork base (upstream `Main_MiSTer`) | | `7317947` | 2026-07-13 |
-| `MiSTer-devel/Main_MiSTer` | `master` | `fb7d444` "Fix video_mode_adjust call, remove obsolete code." -- **13 of 34 taken (three adapted); the core-dispatch refactor, the new core families, upstream's SNAC and the Chinon Akiko not; see "Sync 2026-11-22"** | 2026-11-22 |
+| `MiSTer-devel/Main_MiSTer` | `master` | `fb7d444` "Fix video_mode_adjust call, remove obsolete code." -- **5 of 34 taken, all clean: input, INI and MGL only. Other cores, the core-dispatch refactor, upstream's SNAC and the Chinon Akiko not; see "Sync 2026-11-22"** | 2026-11-22 |
 | ^ previous pin, superseded 2026-11-22 | | `0827165` "Minimig: CD read speed Max Speed, data read stops CD audio" -- **the IDE fixes taken; Max Speed and the CD32 audio stop not (ours stops the pump already); see "Sync 2026-10-30"** | 2026-10-30 |
 | ^ previous pin, superseded 2026-10-30 | | `b4aac02` "input: force feedback requested by the core (#1393)" -- **both taken, the Action Replay adapted to status[63]; see "Sync 2026-10-29"** | 2026-10-29 |
 | ^ previous pin, superseded 2026-10-29 | | `bfb5cd0` "Minimig: CD read speed for the CD32 and CDTV drive" -- **seven of thirteen taken (two adapted); the CD read speed setting NOT taken, its status bits are our save state's; see "Sync 2026-10-28"** | 2026-10-28 |
@@ -116,13 +116,13 @@ the SNAC third tenant, and our OSD rows already exist.
 only on the target and makes the file unparseable by `syntax_check.sh`. It needs
 re-applying at every sync that touches this file.
 
-## Sync 2026-11-22: input and other cores in, the core-dispatch refactor and the Chinon Akiko out
+## Sync 2026-11-22: input, INI and MGL in; other cores, the core-dispatch refactor and the Chinon Akiko out
 
 Main_MiSTer `0827165..fb7d444`, Minimig-AGA `e47c345..e559717`, the
 physical-disc fork `e6e62b2..7dc46c72`.
 
 Checked on the userspace branch: the ARM build, `make -C tests` and
-`syntax_check.sh` (116 parsed). On the core branch: `syntax_check.sh` (115
+`syntax_check.sh` (109 parsed). On the core branch: `syntax_check.sh` (115
 parsed, 0 syntax errors) and a Quartus analysis of both TG68K VHDL files.
 **No fit and no hardware run yet.**
 
@@ -134,17 +134,17 @@ parsed, 0 syntax errors) and a Quartus analysis of both TG68K VHDL files.
 | `e0a234f` | joymapping: Stick 2 ignored in Menu button prompts (#1408) | Taken, clean. |
 | `410b2ef` | input: GameControllerDB right stick and Misc1 (#1409) | Taken, clean. |
 | `84b52d4` | INI: more than 4 ini files, with an INI folder (#1426) | Taken, clean. |
-| `afb917f` | menu: an MRA's media loads into a disk entry the core hides (#1402) | Taken, **adapted**: `mgl_struct` keeps our `xml_path` next to upstream's `from_mra`. |
 | `7912f76` | mra/mgl: mount root path attribute and submenus (#1406) | Taken, clean. |
-| `04f91c6` | Atari ST: STX, SCP and IPF floppy images (#1419) | Taken, **adapted**: only its `st_fdd_*` lines in `user_io.cpp`. The mount, unmount and size hooks of the cores we do not carry (Mac, Sun, HP 9000, RS/6000, SGI, NeXT, Apple III, Falcon, PC-88) are left out. |
-| `8329c5a` | Atari ST: STX tracks with a custom sync and no sectors (#1420) | Taken, clean. |
-| `8482082` | Atari ST: "Border" option (#1421) | Taken, clean. |
-| `353d485` | Apple IIgs: Uthernet II Ethernet card (#1416) | Taken, **adapted**: only its own poll and include. Its poll costs one `strcasecmp` per main loop on other cores. |
-| `cc47bad` | Apple IIgs/IIe: whole SD requests in `iigs_read` (#1410) | Taken, clean. |
-| `90bcbad` | Tk2000 dsk nibblizer (#1417) | Taken, clean. |
-| `0fd69ca` | 3DO: format a save with no NVRAM volume (#1415) | Taken, clean. |
 
 ### Main_MiSTer: not taken
+
+- **Every other core's commit**, dropped 2026-11-24 after first being taken:
+  `cc47bad` and `353d485` (Apple IIgs), `90bcbad` (Tk2000), `0fd69ca` (3DO),
+  `04f91c6`, `8329c5a` and `8482082` (Atari ST), and `afb917f` (MRA media in
+  a hidden disk entry; arcade only, MGLs unchanged). This Main is loaded only
+  for the Amiga core, through a core-specific section in `MiSTer.ini`, so
+  other cores never run it. **Rule from now on: take only Minimig commits and
+  shared code the Amiga core runs (input, menu, INI, MGL, video).**
 
 - `6ebb80b` "Minimig: add 68020 option" -- **already here in our form**. Upstream
   brings back the unthrottled 68020 as a CPU step, with the 40MHz/50MHz/Max
