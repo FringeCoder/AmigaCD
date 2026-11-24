@@ -116,6 +116,7 @@ static int check_iso_file(fileTYPE *f, uint8_t *mode2, uint16_t *sectorSize)
 
 static const char * load_iso_file(drive_t *drv, const char* filename)
 {
+	akiko_prefetch_release(drv);   // the read-ahead worker reads drv->track
 	fileTYPE f;
 	memset(drv->track, 0, sizeof(drv->track));
 	drv->track_cnt = 0;
@@ -307,6 +308,7 @@ static int add_track(drive_t *drv, track_t *curr, uint32_t &shift, const int32_t
 
 static const char* load_chd_file(drive_t *drv, const char *chdfile)
 {
+	akiko_prefetch_release(drv);   // the read-ahead worker reads drv->track
 
 	//Borrow the cd.h "toc_t" and mister_chd* parse function. Then translate the toc_t to drive_t+track_t.
 	//TODO: abstract all the bin/cue+chd+iso parsing and reading into a shared class
@@ -453,6 +455,7 @@ static void phys_mount_failed(drive_t *drv)
 // the value on as a display name), 0 on failure.
 static const char* load_physical_disc(drive_t *drv)
 {
+	akiko_prefetch_release(drv);   // the read-ahead worker reads drv->track
 	toc_t tmpTOC = { };
 
 	// Install the udev rule that stops persistent-storage probing on sr*,
@@ -555,6 +558,7 @@ static const char* load_physical_disc(drive_t *drv)
 
 static const char* load_cue_file(drive_t *drv, const char *cuefile)
 {
+	akiko_prefetch_release(drv);   // the read-ahead worker reads drv->track
 	memset(drv->track, 0, sizeof(drv->track));
 	drv->track_cnt = 0;
 
@@ -1387,7 +1391,7 @@ void cdrom_read(ide_config *ide)
 //                        ECC. CD32 doesn't validate ECC so this works for
 //                        booting; games that rely on raw sector contents
 //                        (rare on CD32) won't.
-int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
+int cdrom_read_raw_sector_hb(drive_t *drive, uint32_t lba, uint8_t *buf, uint8_t *hunkbuf, int *hunknum)
 {
 	if (!drive || !buf) return -1;
 
@@ -1461,7 +1465,7 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 		{
 			if (mister_chd_read_sector(drive->chd_f, chd_lba, 0, 0,
 			                           BYTES_PER_RAW_REDBOOK_FRAME, buf,
-			                           drive->chd_hunkbuf, &drive->chd_hunknum)
+			                           hunkbuf, hunknum)
 			    != CHDERR_NONE) return -1;
 			return 0;
 		}
@@ -1476,7 +1480,7 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 			memset(buf, 0, BYTES_PER_RAW_REDBOOK_FRAME);
 			if (mister_chd_read_sector(drive->chd_f, chd_lba, 16, 0,
 			                           2336, buf,
-			                           drive->chd_hunkbuf, &drive->chd_hunknum)
+			                           hunkbuf, hunknum)
 			    != CHDERR_NONE) return -1;
 			akiko_raw_header(buf, lba, 0x02);
 			return 0;
@@ -1491,7 +1495,7 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 			akiko_raw_header(buf, lba, 0x01);
 			if (mister_chd_read_sector(drive->chd_f, chd_lba, 16, 0,
 			                           BYTES_PER_COOKED_REDBOOK_FRAME, buf,
-			                           drive->chd_hunkbuf, &drive->chd_hunknum)
+			                           hunkbuf, hunknum)
 			    != CHDERR_NONE) return -1;
 			return 0;
 		}
@@ -1530,6 +1534,14 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 	}
 
 	return -1;
+}
+
+// The one-hunk cache in the drive belongs to the main thread. Another thread
+// passes its own to cdrom_read_raw_sector_hb, see ide_cdrom.h.
+int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
+{
+	if (!drive) return -1;
+	return cdrom_read_raw_sector_hb(drive, lba, buf, drive->chd_hunkbuf, &drive->chd_hunknum);
 }
 
 bool cdrom_read_track_raw(track_t *track, uint32_t lba, uint8_t *buf, int buflen)
@@ -2102,6 +2114,8 @@ void cdrom_reply(ide_config *ide, uint8_t error, uint8_t asc_code, uint8_t ascq_
 
 void cdrom_close_chd(drive_t *drv)
 {
+	// The Akiko read-ahead worker may be decoding from this CHD right now.
+	akiko_prefetch_release(drv);
 
 	if (drv->phys)
 	{

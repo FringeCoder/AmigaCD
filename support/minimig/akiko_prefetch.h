@@ -38,6 +38,29 @@
 //    random reader such as Sim City lives on whole windows, and a seek has its
 //    own mechanical wait in front of it.
 //
+// Worker mode
+// -----------
+// Even with the read-ahead, every read-ahead step ran inside user_io_poll, and
+// a step that crosses into a new CHD hunk (8 sectors) decodes it: 4.0 ms at the
+// median, 5.7 ms at worst, measured on James Pond 3. At 2x a sector is due
+// every 6.67 ms, so one decode plus the ~1.8 ms push sometimes made a sector
+// late. With `async` set, akiko_prefetch_get never reads ahead itself; it only
+// says where the read-ahead should go (`ahead`, `cursor`), and a worker thread
+// does the reading through akiko_prefetch_claim / akiko_prefetch_complete:
+//
+//  - claim marks the next pending slot READING and hands out its LBA and the
+//    window's generation. The worker reads the sector into its own buffer
+//    with no lock held.
+//  - complete copies it into the slot, unless the window was refilled or
+//    rebased meanwhile (its generation moved), in which case it is dropped.
+//  - A request for a READING slot waits for that read through `wait`, which
+//    must let the worker complete it (a condition wait on the caller's lock).
+//  - A catch-up or a sequential miss reads only the requested sector on the
+//    caller's thread and leaves the rest of the window to the worker.
+//
+// None of this takes a lock. The caller holds one lock around every call into
+// this file, and `wait` drops it while it sleeps.
+//
 // Kept free of MiSTer headers so it can be unit-tested with the host compiler;
 // the sector source is a callback.
 
@@ -52,6 +75,7 @@
 #define AKIKO_SLOT_BAD     0   // read failed; re-read on access
 #define AKIKO_SLOT_OK      1
 #define AKIKO_SLOT_PENDING 2   // not read yet
+#define AKIKO_SLOT_READING 3   // claimed by the worker, read in flight
 
 // Reads one raw 2352-byte sector. Returns 0 on success.
 typedef int (*akiko_prefetch_read_fn)(void *ctx, uint32_t lba, uint8_t *dst);
@@ -59,6 +83,7 @@ typedef int (*akiko_prefetch_read_fn)(void *ctx, uint32_t lba, uint8_t *dst);
 typedef struct {
 	int32_t  base_lba;     // first LBA covered, -1 = empty
 	uint32_t lru_tick;     // higher = more recently used
+	uint32_t gen;          // bumped whenever the window is refilled or rebased
 	uint8_t  valid[AKIKO_PREFETCH_SECTORS];
 	uint8_t  buf[AKIKO_PREFETCH_SECTORS * AKIKO_PREFETCH_SECTOR_BYTES];
 } prefetch_window_t;
@@ -79,6 +104,11 @@ typedef struct {
 
 	uint32_t hits, misses, failed_sectors;
 
+	// Worker mode, see above. async = 0 reads ahead inline, as before.
+	int      async;
+	void   (*wait)(void *ctx);   // sleep until a claimed read completes
+	void    *wait_ctx;
+
 	// Per call, for the log and the tests.
 	int      last_event;     // AKIKO_PF_*
 	int      last_win;
@@ -96,5 +126,12 @@ int akiko_prefetch_get(akiko_prefetch_t *pf, uint32_t lba, uint8_t *out,
 
 // The window holding lba, or -1. A window being filled counts.
 int akiko_prefetch_find(const akiko_prefetch_t *pf, uint32_t lba);
+
+// Worker mode. claim returns 1 and marks one slot READING when the read-ahead
+// has a pending slot left, else 0 (and the read-ahead is finished). complete
+// files the result; ok = 0 marks the slot bad, to be re-read on access.
+int  akiko_prefetch_claim(akiko_prefetch_t *pf, int *wi, int *idx, uint32_t *lba, uint32_t *gen);
+void akiko_prefetch_complete(akiko_prefetch_t *pf, int wi, int idx, uint32_t gen,
+                             const uint8_t *data, int ok);
 
 #endif

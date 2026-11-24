@@ -5,6 +5,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <pthread.h>
 #include "../../file_io.h"
 #include "../../cd.h"
 #include "mister_chd.h"
@@ -172,7 +173,15 @@ chd_error mister_chd_read_sector(chd_file *chd_f, int lba, uint32_t d_offset, ui
 	//mister_chd_log("READ LBA: %d, dest_offset: %d sector offset: %d length %d chd_f %p\n", lba, d_offset, s_offset, length, chd_f);
 	if (tmphnum != *hunknum)
 	{
+		// chd_read keeps its file position and codec state in chd_f, so two
+		// threads must not decode at once. The Akiko read-ahead worker does
+		// (support/minimig/akiko_cd32.cpp), with its own hunk buffer; every
+		// other reader is on the main thread. The lock is only taken on a hunk
+		// change, so a read from a hunk already in hunkbuf costs nothing.
+		static pthread_mutex_t chd_read_lock = PTHREAD_MUTEX_INITIALIZER;
+		pthread_mutex_lock(&chd_read_lock);
 		chd_error err = chd_read(chd_f, tmphnum, hunkbuf);
+		pthread_mutex_unlock(&chd_read_lock);
 		if (err != CHDERR_NONE)
 		{
 			mister_chd_log("ERROR %s\n", chd_error_string(err));

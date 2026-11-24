@@ -222,6 +222,167 @@ static void test_invalidate_forgets(void)
 	check("invalidate: next read is a seek", pf.last_event, AKIKO_PF_FULL);
 }
 
+
+// ---- Worker mode -----------------------------------------------------------
+//
+// A simulated worker: claims are queued, and run either a few at a time
+// between requests (a worker keeping pace) or when the reader waits on one.
+
+struct claim_t { int wi, idx; uint32_t lba, gen; };
+static claim_t inflight[AKIKO_PREFETCH_SECTORS * AKIKO_PREFETCH_WINDOWS];
+static int n_inflight;
+static int waits;
+
+static int worker_claim(void)
+{
+	claim_t c;
+	if (!akiko_prefetch_claim(&pf, &c.wi, &c.idx, &c.lba, &c.gen)) return 0;
+	inflight[n_inflight++] = c;
+	return 1;
+}
+
+static void worker_finish_all(void)
+{
+	uint8_t sec[AKIKO_PREFETCH_SECTOR_BYTES];
+	for (int i = 0; i < n_inflight; i++) {
+		int ok = fake_read(&disc, inflight[i].lba, sec) == 0;
+		akiko_prefetch_complete(&pf, inflight[i].wi, inflight[i].idx, inflight[i].gen, sec, ok);
+	}
+	n_inflight = 0;
+}
+
+static int worker_run(int n)
+{
+	int done = 0;
+	while (done < n && worker_claim()) done++;
+	worker_finish_all();
+	return done;
+}
+
+static void sim_wait(void *)
+{
+	waits++;
+	worker_finish_all();
+}
+
+static void fresh_async(void)
+{
+	fresh();
+	pf.async = 1;
+	pf.wait = sim_wait;
+	pf.wait_ctx = 0;
+	n_inflight = 0;
+	waits = 0;
+}
+
+static void test_async_get_never_reads_ahead(void)
+{
+	fresh_async();
+	akiko_prefetch_get(&pf, 0, out, fake_read, &disc);      // a seek: whole window
+	check("async: seek fills a window", disc.reads, AKIKO_PREFETCH_SECTORS);
+	akiko_prefetch_get(&pf, 1, out, fake_read, &disc);
+	check("async: a hit reads nothing", disc.reads, AKIKO_PREFETCH_SECTORS);
+	check("async: read-ahead aimed at the next window", pf.win[pf.ahead].base_lba, AKIKO_PREFETCH_SECTORS);
+	check("async: the worker has the next window to read", worker_run(1000), AKIKO_PREFETCH_SECTORS);
+	check("async: and it is all valid", pf.win[akiko_prefetch_find(&pf, 200)].valid[200 - 128], AKIKO_SLOT_OK);
+}
+
+static void test_async_sequential_never_waits(void)
+{
+	fresh_async();
+	int errors = 0, wrong = 0, worst = 0;
+	for (uint32_t lba = 300; lba < 300 + 2000; lba++) {
+		if (akiko_prefetch_get(&pf, lba, out, fake_read, &disc) != 0) errors++;
+		else if (!holds(lba)) wrong++;
+		if (lba > 301 && pf.last_sync > worst) worst = pf.last_sync;
+		worker_run(AKIKO_PREFETCH_AHEAD_STEP);
+	}
+	check("async sequential: no errors", errors, 0);
+	check("async sequential: data", wrong, 0);
+	check("async sequential: never reads on the caller", worst, 0);
+	check("async sequential: never waited", waits, 0);
+}
+
+static void test_async_waits_for_inflight_slot(void)
+{
+	fresh_async();
+	akiko_prefetch_get(&pf, 0, out, fake_read, &disc);
+	akiko_prefetch_get(&pf, 1, out, fake_read, &disc);
+	worker_claim();                                      // slot 0 of window 128, in flight
+	uint32_t before = disc.reads;
+	check("async inflight: hit", akiko_prefetch_get(&pf, 128, out, fake_read, &disc), 0);
+	check("async inflight: waited once", waits, 1);
+	check("async inflight: data", holds(128), 1);
+	check("async inflight: read once, by the worker", disc.reads - before, 1);
+}
+
+static void test_async_stale_completion_dropped(void)
+{
+	fresh_async();
+	akiko_prefetch_get(&pf, 0, out, fake_read, &disc);
+	akiko_prefetch_get(&pf, 1, out, fake_read, &disc);
+	worker_claim();
+	akiko_prefetch_invalidate(&pf);
+	worker_finish_all();
+	check("async stale: invalidated window stays empty", akiko_prefetch_find(&pf, 128), -1);
+
+	// Seeks that evict and refill the very window the worker is reading.
+	fresh_async();
+	akiko_prefetch_get(&pf, 0, out, fake_read, &disc);
+	akiko_prefetch_get(&pf, 1, out, fake_read, &disc);
+	worker_claim();                                      // LBA 128, old generation
+	claim_t c = inflight[0];
+	n_inflight = 0;
+	const uint32_t seeks[4] = {600, 1000, 1400, 2000};   // the last one evicts window 128
+	for (int i = 0; i < 4; i++) akiko_prefetch_get(&pf, seeks[i], out, fake_read, &disc);
+	check("async stale: window 128 evicted", akiko_prefetch_find(&pf, 128), -1);
+	check("async stale: its slot now holds 1920", pf.win[c.wi].base_lba, 1920);
+	uint8_t junk[AKIKO_PREFETCH_SECTOR_BYTES];
+	memset(junk, 0xEE, sizeof(junk));
+	akiko_prefetch_complete(&pf, c.wi, c.idx, c.gen, junk, 1);
+	check("async stale: served", akiko_prefetch_get(&pf, 1920, out, fake_read, &disc), 0);
+	check("async stale: a late completion cannot overwrite it", holds(1920), 1);
+}
+
+static void test_async_reader_passes_worker(void)
+{
+	fresh_async();
+	akiko_prefetch_get(&pf, 0, out, fake_read, &disc);
+	for (uint32_t lba = 1; lba < 128; lba++) akiko_prefetch_get(&pf, lba, out, fake_read, &disc);
+	// The worker never ran: the reader is into a window nothing has read yet.
+	check("async passes: hit", akiko_prefetch_get(&pf, 128, out, fake_read, &disc), 0);
+	check("async passes: data", holds(128), 1);
+	check("async passes: catch-up", pf.last_event, AKIKO_PF_CATCHUP);
+	check("async passes: one sector on the caller", pf.last_sync, 1);
+	check("async passes: worker carries on after it", pf.cursor, 1);
+	check("async passes: then fills the rest", worker_run(1000), AKIKO_PREFETCH_SECTORS - 1);
+}
+
+static void test_async_seq_miss_reads_one(void)
+{
+	fresh_async();
+	akiko_prefetch_get(&pf, 0, out, fake_read, &disc);
+	for (uint32_t lba = 1; lba < 128; lba++) akiko_prefetch_get(&pf, lba, out, fake_read, &disc);
+	akiko_prefetch_invalidate(&pf);
+	pf.seq_valid = 1; pf.seq_last = 127;   // still sequential, nothing cached
+	check("async seq miss: served", akiko_prefetch_get(&pf, 128, out, fake_read, &disc), 0);
+	check("async seq miss: partial", pf.last_event, AKIKO_PF_PARTIAL);
+	check("async seq miss: one sector on the caller", pf.last_sync, 1);
+	check("async seq miss: data", holds(128), 1);
+}
+
+static void test_async_bad_sector(void)
+{
+	fresh_async();
+	akiko_prefetch_get(&pf, 0, out, fake_read, &disc);
+	akiko_prefetch_get(&pf, 1, out, fake_read, &disc);
+	disc.bad_lo = 130; disc.bad_hi = 131; disc.bad_reads_left = 1;
+	worker_run(1000);
+	check("async bad: counted", pf.failed_sectors, 1);
+	check("async bad: re-read on access", akiko_prefetch_get(&pf, 130, out, fake_read, &disc), 0);
+	check("async bad: data", holds(130), 1);
+}
+
 int main(void)
 {
 	test_sequential_from_window_start();
@@ -232,6 +393,13 @@ int main(void)
 	test_random_reader_stays_on_whole_windows();
 	test_bad_sector_retries();
 	test_invalidate_forgets();
+	test_async_get_never_reads_ahead();
+	test_async_sequential_never_waits();
+	test_async_waits_for_inflight_slot();
+	test_async_stale_completion_dropped();
+	test_async_reader_passes_worker();
+	test_async_seq_miss_reads_one();
+	test_async_bad_sector();
 	if (failures) { printf("%d FAILED\n", failures); return 1; }
 	printf("all akiko_prefetch tests passed\n");
 	return 0;
