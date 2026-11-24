@@ -10,6 +10,7 @@ void akiko_prefetch_invalidate(akiko_prefetch_t *pf)
 {
 	for (int i = 0; i < AKIKO_PREFETCH_WINDOWS; i++) {
 		pf->win[i].base_lba = -1;
+		pf->win[i].gen++;
 	}
 	pf->ahead = -1;
 	pf->cursor = 0;
@@ -72,6 +73,7 @@ static void begin_ahead(akiko_prefetch_t *pf, int wi, uint32_t base, int cursor)
 	prefetch_window_t *w = &pf->win[wi];
 	w->base_lba = (int32_t)base;
 	w->lru_tick = ++pf->lru_counter;
+	w->gen++;
 	memset(w->valid, AKIKO_SLOT_PENDING, sizeof(w->valid));
 	pf->ahead = wi;
 	pf->cursor = cursor;
@@ -120,6 +122,7 @@ int akiko_prefetch_get(akiko_prefetch_t *pf, uint32_t lba, uint8_t *out,
 		} else {
 			prefetch_window_t *w = &pf->win[wi];
 			w->base_lba = (int32_t)base;
+			w->gen++;   // drops any worker read still in flight for this window
 			int filled = 0;
 			for (int i = 0; i < AKIKO_PREFETCH_SECTORS; i++) {
 				w->valid[i] = AKIKO_SLOT_BAD;
@@ -137,6 +140,13 @@ int akiko_prefetch_get(akiko_prefetch_t *pf, uint32_t lba, uint8_t *out,
 	w->lru_tick = ++pf->lru_counter;
 	const int idx = (int)(lba - (uint32_t)w->base_lba);
 
+	// The worker is reading this very slot: waiting for it is never slower
+	// than reading it again, and it may be most of the way through the hunk.
+	// Only this thread rebases a window, so wi and idx still hold afterwards.
+	while (w->valid[idx] == AKIKO_SLOT_READING && pf->wait) {
+		pf->wait(pf->wait_ctx);
+	}
+
 	if (w->valid[idx] == AKIKO_SLOT_PENDING) {
 		// The reader is ahead of the fill, or the window was just started:
 		// read a few from here and leave the rest to the read-ahead.
@@ -145,9 +155,18 @@ int akiko_prefetch_get(akiko_prefetch_t *pf, uint32_t lba, uint8_t *out,
 			pf->last_win = wi;
 			pf->last_base = (uint32_t)w->base_lba;
 		}
-		pf->ahead = wi;
-		pf->cursor = idx;
-		pf->last_sync += ahead_step(pf, AKIKO_PREFETCH_LEAD, read, ctx);
+		if (pf->async) {
+			// Just this sector here; the worker carries on from the next one.
+			read_slot(pf, w, idx, read, ctx);
+			pf->last_sync++;
+			pf->ahead = wi;
+			pf->cursor = idx + 1;
+			if (pf->cursor >= AKIKO_PREFETCH_SECTORS) pf->ahead = -1;
+		} else {
+			pf->ahead = wi;
+			pf->cursor = idx;
+			pf->last_sync += ahead_step(pf, AKIKO_PREFETCH_LEAD, read, ctx);
+		}
 		if (pf->last_event == AKIKO_PF_PARTIAL && w->valid[idx] != AKIKO_SLOT_OK) {
 			// Nothing in the first lead read is a disc problem, not a cache
 			// one: report it the way a failed whole fill was reported.
@@ -168,13 +187,45 @@ int akiko_prefetch_get(akiko_prefetch_t *pf, uint32_t lba, uint8_t *out,
 	pf->seq_valid = 1;
 
 	if (pf->ahead >= 0) {
-		ahead_step(pf, AKIKO_PREFETCH_AHEAD_STEP, read, ctx);
+		if (!pf->async) ahead_step(pf, AKIKO_PREFETCH_AHEAD_STEP, read, ctx);
 	} else if (seq) {
 		uint32_t next = (uint32_t)w->base_lba + AKIKO_PREFETCH_SECTORS;
 		if (akiko_prefetch_find(pf, next) < 0) {
 			begin_ahead(pf, pick_evict(pf, wi), next, 0);
-			ahead_step(pf, AKIKO_PREFETCH_AHEAD_STEP, read, ctx);
+			if (!pf->async) ahead_step(pf, AKIKO_PREFETCH_AHEAD_STEP, read, ctx);
 		}
 	}
 	return 0;
+}
+
+int akiko_prefetch_claim(akiko_prefetch_t *pf, int *wi, int *idx, uint32_t *lba, uint32_t *gen)
+{
+	if (pf->ahead < 0) return 0;
+	prefetch_window_t *w = &pf->win[pf->ahead];
+	while (pf->cursor < AKIKO_PREFETCH_SECTORS && w->valid[pf->cursor] != AKIKO_SLOT_PENDING) pf->cursor++;
+	if (pf->cursor >= AKIKO_PREFETCH_SECTORS) {
+		pf->ahead = -1;
+		return 0;
+	}
+	*wi  = pf->ahead;
+	*idx = pf->cursor;
+	*lba = (uint32_t)w->base_lba + (uint32_t)pf->cursor;
+	*gen = w->gen;
+	w->valid[pf->cursor++] = AKIKO_SLOT_READING;
+	return 1;
+}
+
+void akiko_prefetch_complete(akiko_prefetch_t *pf, int wi, int idx, uint32_t gen,
+                             const uint8_t *data, int ok)
+{
+	if (wi < 0 || wi >= AKIKO_PREFETCH_WINDOWS || idx < 0 || idx >= AKIKO_PREFETCH_SECTORS) return;
+	prefetch_window_t *w = &pf->win[wi];
+	if (w->gen != gen || w->valid[idx] != AKIKO_SLOT_READING) return;
+	if (ok) {
+		memcpy(&w->buf[idx * AKIKO_PREFETCH_SECTOR_BYTES], data, AKIKO_PREFETCH_SECTOR_BYTES);
+		w->valid[idx] = AKIKO_SLOT_OK;
+	} else {
+		w->valid[idx] = AKIKO_SLOT_BAD;
+		pf->failed_sectors++;
+	}
 }

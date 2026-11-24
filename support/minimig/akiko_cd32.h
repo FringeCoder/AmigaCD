@@ -78,6 +78,11 @@ int akiko_cd32_disc_info(char *label, int labelsz, int *tracks, int *audio);
 // The block is versioned and self-describing. akiko_cd32_state_load refuses a
 // version it does not know rather than reinterpreting the bytes, because the
 // failure mode of guessing here is a drive seeking to a plausible wrong place.
+// Called before a CD drive's CHD is closed: stops the prefetch worker reading
+// from it and drops what it cached. Any drive; a no-op for one it never read.
+struct drive_t;
+void akiko_prefetch_release(struct drive_t *drv);
+
 int  akiko_cd32_state_size(void);
 void akiko_cd32_state_save(void *buf);
 bool akiko_cd32_state_load(const void *buf, int len);

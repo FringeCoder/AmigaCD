@@ -26,6 +26,8 @@
 #include <fcntl.h>        // open, O_RDONLY, posix_fadvise, POSIX_FADV_WILLNEED
 #include <time.h>         // clock_gettime for akiko_diag timestamp
 #include <byteswap.h>     // bswap_16 for CDDA big-endian → host conversion
+#include <pthread.h>      // prefetch read-ahead worker
+#include <sched.h>        // its CPU affinity
 
 #include "../../spi.h"
 #include "../../fpga_io.h"     // fpga_spi_fast / fpga_spi_fast_block_write
@@ -306,9 +308,124 @@ static int32_t  cd_data_lba_base    = -1;
 static akiko_prefetch_t cd_prefetch;
 static_assert(AKIKO_PREFETCH_SECTOR_BYTES == AKIKO_SECTOR_BYTES, "prefetch slot size");
 
+// The read-ahead worker. A CHD hunk decode is ~4 ms (5.7 ms at worst, James
+// Pond 3), and at 2x a sector is due every 6.67 ms, so a read-ahead step that
+// crossed a hunk inside user_io_poll could make a sector late on its own. The
+// worker does the read-ahead for a CHD-backed disc on CPU 0, where Main is not
+// (main.cpp pins Main to CPU 1). A cue/bin image keeps the inline read-ahead:
+// its reads share the track's file position with the main thread, and they
+// are cheap page-cache copies anyway. A physical drive never gets here.
+//
+// pf_mu guards cd_prefetch and the pf_worker_* state. The worker holds it only
+// to claim a slot and to file the result, never across a read. The CHD itself
+// is serialised by the lock in mister_chd_read_sector, and the worker has its
+// own hunk buffer, so main-thread reads keep theirs.
+static pthread_mutex_t pf_mu      = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  pf_cv_work = PTHREAD_COND_INITIALIZER;   // something to read
+static pthread_cond_t  pf_cv_done = PTHREAD_COND_INITIALIZER;   // a read was filed
+static drive_t  *pf_worker_drv   = NULL;   // the drive it reads for, NULL = none
+static uint32_t  pf_worker_epoch = 0;      // bumped when that drive is released
+static int       pf_worker_busy  = 0;      // a read is in flight
+static int       pf_worker_state = 0;      // 0 not started, 1 running, -1 failed
+static uint32_t  pf_worker_reads = 0, pf_worker_fails = 0;
+
+static void pf_wait(void *)
+{
+	pthread_cond_wait(&pf_cv_done, &pf_mu);
+}
+
+// Caller holds pf_mu.
+static void pf_worker_quiesce_locked(void)
+{
+	while (pf_worker_busy) pthread_cond_wait(&pf_cv_done, &pf_mu);
+}
+
+static void *pf_worker_main(void *)
+{
+	static uint8_t sec[AKIKO_PREFETCH_SECTOR_BYTES];
+	uint8_t  *hunkbuf   = NULL;
+	uint32_t  hunkbytes = 0;
+	int       hunknum   = -1;
+	uint32_t  epoch     = 0;
+	chd_file *chd       = NULL;
+
+	pthread_mutex_lock(&pf_mu);
+	for (;;) {
+		int wi, idx;
+		uint32_t lba, gen;
+		while (!(pf_worker_drv && akiko_prefetch_claim(&cd_prefetch, &wi, &idx, &lba, &gen))) {
+			pthread_cond_wait(&pf_cv_work, &pf_mu);
+		}
+		drive_t *drv = pf_worker_drv;
+		pf_worker_busy = 1;
+		// A released drive can come back at the same address with a different
+		// CHD in it, so the hunk cache is keyed on the epoch, not the pointer.
+		if (epoch != pf_worker_epoch || chd != drv->chd_f) {
+			epoch   = pf_worker_epoch;
+			chd     = drv->chd_f;
+			hunknum = -1;
+		}
+		pthread_mutex_unlock(&pf_mu);
+
+		int ok = 0;
+		if (chd) {
+			uint32_t need = chd_get_header(chd)->hunkbytes;
+			if (need > hunkbytes) {
+				free(hunkbuf);
+				hunkbuf   = (uint8_t *)malloc(need);
+				hunkbytes = hunkbuf ? need : 0;
+				hunknum   = -1;
+			}
+			if (hunkbuf) ok = cdrom_read_raw_sector_hb(drv, lba, sec, hunkbuf, &hunknum) == 0;
+		}
+
+		pthread_mutex_lock(&pf_mu);
+		akiko_prefetch_complete(&cd_prefetch, wi, idx, gen, sec, ok);
+		pf_worker_reads++;
+		if (!ok) pf_worker_fails++;
+		pf_worker_busy = 0;
+		pthread_cond_broadcast(&pf_cv_done);
+	}
+	return NULL;
+}
+
+// Starts the worker the first time a CHD is read. Returns 1 when it runs.
+static int pf_worker_start(void)
+{
+	if (pf_worker_state) return pf_worker_state > 0;
+
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+	pthread_attr_setaffinity_np(&attr, sizeof(set), &set);
+	pthread_t th;
+	pf_worker_state = pthread_create(&th, &attr, pf_worker_main, NULL) ? -1 : 1;
+	pthread_attr_destroy(&attr);
+	if (pf_worker_state > 0) pthread_detach(th);
+	akiko_diag("[akiko] prefetch worker %s", pf_worker_state > 0 ? "started on CPU 0" : "FAILED to start, read-ahead stays inline");
+	return pf_worker_state > 0;
+}
+
 static inline void akiko_prefetch_invalidate(void)
 {
+	pthread_mutex_lock(&pf_mu);
 	akiko_prefetch_invalidate(&cd_prefetch);
+	pf_worker_quiesce_locked();
+	pthread_mutex_unlock(&pf_mu);
+}
+
+void akiko_prefetch_release(drive_t *drv)
+{
+	pthread_mutex_lock(&pf_mu);
+	if (drv && pf_worker_drv == drv) {
+		akiko_prefetch_invalidate(&cd_prefetch);
+		pf_worker_drv = NULL;
+		pf_worker_epoch++;
+	}
+	pf_worker_quiesce_locked();
+	pthread_mutex_unlock(&pf_mu);
 }
 
 // Audio-play notification state (mirror of WinUAE cdrom_audiotimeout,
@@ -2853,16 +2970,34 @@ static int akiko_prefetch_get(drive_t *drv, uint32_t lba, uint8_t *out_buf)
 		return (cdrom_read_raw_sector(drv, lba, out_buf) == 0) ? 0 : -2;
 	}
 
+	const int async = drv->chd_f && pf_worker_start();
+
+	pthread_mutex_lock(&pf_mu);
+	if (async ? (pf_worker_drv != drv) : (pf_worker_drv != NULL)) {
+		pf_worker_quiesce_locked();
+		pf_worker_drv = async ? drv : NULL;
+	}
+	cd_prefetch.async    = async;
+	cd_prefetch.wait     = pf_wait;
+	cd_prefetch.wait_ctx = NULL;
 	int rc = akiko_prefetch_get(&cd_prefetch, lba, out_buf, akiko_prefetch_read, drv);
-	const akiko_prefetch_t *pf = &cd_prefetch;
-	if (pf->last_event == AKIKO_PF_FULL && rc == -1) {
+	if (async && cd_prefetch.ahead >= 0) pthread_cond_signal(&pf_cv_work);
+	const int      ev    = cd_prefetch.last_event;
+	const int      win   = cd_prefetch.last_win;
+	const uint32_t base  = cd_prefetch.last_base;
+	const int      sync  = cd_prefetch.last_sync;
+	const uint32_t hits  = cd_prefetch.hits, misses = cd_prefetch.misses;
+	const uint32_t fails = cd_prefetch.failed_sectors, wreads = pf_worker_reads;
+	pthread_mutex_unlock(&pf_mu);
+
+	if (ev == AKIKO_PF_FULL && rc == -1) {
 		akiko_diag("[akiko] prefetch fill TOTAL FAIL win=%d base=%u (req lba=%u)",
-		           pf->last_win, pf->last_base, lba);
-	} else if (pf->last_event != AKIKO_PF_HIT) {
+		           win, base, lba);
+	} else if (ev != AKIKO_PF_HIT) {
 		static const char *const kind[] = { "hit", "full", "partial", "catch-up" };
-		akiko_diag("[akiko] prefetch refill win=%d base=%u (req lba=%u %s sync=%d hits=%u misses=%u failed=%u)",
-		           pf->last_win, pf->last_base, lba, kind[pf->last_event], pf->last_sync,
-		           pf->hits, pf->misses, pf->failed_sectors);
+		akiko_diag("[akiko] prefetch refill win=%d base=%u (req lba=%u %s sync=%d hits=%u misses=%u failed=%u%s worker_reads=%u)",
+		           win, base, lba, kind[ev], sync, hits, misses, fails,
+		           async ? "" : " inline", wreads);
 	}
 	return rc;
 }

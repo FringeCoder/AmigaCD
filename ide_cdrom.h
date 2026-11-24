@@ -13,6 +13,12 @@ void ide_cdda_send_sector();
 // (akiko_cd32.cpp). Returns 0 on success, non-zero on error/no data; on error
 // the caller is expected to push zeros so the FPGA engine doesn't stall.
 int cdrom_read_raw_sector(struct drive_t *drive, uint32_t lba, uint8_t *buf);
+// The same read with the caller's own one-hunk CHD cache instead of the
+// drive's. For a thread other than the main one: the drive's cache is the main
+// thread's, and a second thread sharing it would hand out the wrong hunk.
+// hunkbuf must hold one hunk; *hunknum is -1 when it holds none.
+int cdrom_read_raw_sector_hb(struct drive_t *drive, uint32_t lba, uint8_t *buf,
+                             uint8_t *hunkbuf, int *hunknum);
 bool cdrom_read_track_raw(struct track_t *track, uint32_t lba, uint8_t *buf, int buflen);
 
 const char* cdrom_parse(uint32_t num, const char *filename);
