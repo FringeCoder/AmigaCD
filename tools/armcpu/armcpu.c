@@ -370,6 +370,12 @@ unsigned int m68k_read_memory_8(unsigned int a)
 unsigned int m68k_read_memory_16(unsigned int a)
 {
 	a &= 0xFFFFFF;
+	/* A 68020 reads a word at an odd address, which a 68000 traps: two byte
+	 * cycles, as its bus does. Taken as one 16-bit load it is an unaligned
+	 * access to the bridge's device memory, which killed armcpu (Super
+	 * Stardust run wild at an odd PC, 2026-11-26), and at a window's or the
+	 * board's last byte it reads past the end. */
+	if (a & 1) return (m68k_read_memory_8(a) << 8) | m68k_read_memory_8((a + 1) & 0xFFFFFF);
 	if (is_rom(a)) { n_rom++; return (rom[a & 0x7FFFF] << 8) | rom[(a + 1) & 0x7FFFF]; }
 	if (is_fast(a)) { n_fast++; return (fast[a - fast_base] << 8) | fast[a - fast_base + 1]; }
 	if (is_ac(a)) return (ac_read(a) << 8) | ac_read(a + 1);
@@ -400,6 +406,11 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
 void m68k_write_memory_16(unsigned int a, unsigned int v)
 {
 	a &= 0xFFFFFF;
+	if (a & 1) {                                  /* odd: two byte cycles, see the read */
+		m68k_write_memory_8(a, (v >> 8) & 0xFF);
+		m68k_write_memory_8((a + 1) & 0xFFFFFF, v & 0xFF);
+		return;
+	}
 	if (a >= 0xF80000) return;
 	if (is_fast(a)) {
 		n_fast++;
