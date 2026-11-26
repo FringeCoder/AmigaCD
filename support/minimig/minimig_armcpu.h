@@ -12,6 +12,12 @@ bool armcpu_core_has_proxy();
 // Whether minimig_config asks for the ARM CPU AND the core can run it.
 bool armcpu_wanted();
 
+// The memory byte the core is sent. With the ARM CPU on, the core's own
+// Zorro II fast RAM is left out: armcpu brings its own board, sized by the
+// same Fast RAM setting, and two boards do not fit in the 8 MB Zorro II
+// space (the CD32 Kickstart never gets out of its autoconfig loop).
+unsigned char armcpu_core_memory(unsigned char memory);
+
 // Start armcpu if it is wanted and not running, stop it if it is running and
 // not wanted. Cheap when nothing changes.
 void armcpu_sync();
