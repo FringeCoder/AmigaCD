@@ -9,8 +9,9 @@ The file is the bridge's 2 MB: armcpu_bridge's MAGIC and the 68000 bit set by
 hand at 0x080000, the 68k window at 0x100000 in the 68k's byte order (the
 bench keeps every address in bank 0 or banks that alias harmlessly). The ROM
 checks what only the emulator decides: the reset vectors and the overlay come
-from the ROM, a write lands big-endian, the overlay goes off when CIA-A's
-DDRA and PRA say so, RESET puts it back and pulses CTRL bit 3, and the bus is
+from the ROM, a write lands big-endian, the overlay goes off at the first
+CIA-A write and stays off whatever PRA says (only RESET puts it back, as
+minimig.v's ovl), RESET pulses CTRL bit 3, and the bus is
 given back at the end.
 """
 import mmap, os, struct, subprocess, sys, tempfile
@@ -49,6 +50,9 @@ code = (
     w(0x33FC, 0x5678, 0x0000, 0x0000) +           # move.w #$5678,$0    (chip RAM)
     w(0x3039, 0x0000, 0x0000) +                   # move.w $0,d0        (chip RAM now)
     w(0x33C0, 0x0000, 0x0200) +                   # move.w d0,$200
+    w(0x13FC, 0x00FD, 0x00BF, 0xE001) +           # move.b #$FD,$BFE001 (PA0 high, as the CD32 ROM writes)
+    w(0x3039, 0x0000, 0x0000) +                   # move.w $0,d0        (still chip RAM: only RESET sets OVL)
+    w(0x33C0, 0x0000, 0x0210) +                   # move.w d0,$210
     w(0x4E70) +                                   # reset               (overlay back on)
     w(0x2439, 0x0000, 0x0004) +                   # move.l $4,d2        (the ROM again)
     w(0x23C2, 0x0000, 0x0400) +                   # move.l d2,$400
@@ -76,6 +80,7 @@ checks = {
     "a word write lands big-endian": at(0x100, 2) == bytes([0x12, 0x34]),
     "overlay off: the write to $0 is chip RAM": at(0x000, 2) == bytes([0x56, 0x78]),
     "overlay off: the read of $0 is chip RAM": at(0x200, 2) == bytes([0x56, 0x78]),
+    "PA0 high again leaves the overlay off": at(0x210, 2) == bytes([0x56, 0x78]),
     "RESET puts the overlay back": at(0x400, 4) == bytes([0x00, 0xF8, 0x00, 0x08]),
     "the bus given back (CTRL 0)": struct.unpack_from("<I", mm, 0x80004)[0] == 0,
     "ran to the end": out.returncode == 0 and "bus given back" in out.stdout,
