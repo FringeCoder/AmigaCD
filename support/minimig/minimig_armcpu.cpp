@@ -24,6 +24,7 @@
 
 #include "minimig_armcpu.h"
 #include "minimig_config.h"
+#include "minimig_profile.h"
 #include "../../file_io.h"
 #include "../../user_io.h"
 #include "../../spi.h"
@@ -133,6 +134,11 @@ static void armcpu_start()
 	snprintf(rom, sizeof(rom), "%s", getFullPath(minimig_config.kickstart));
 	char fast_mb[8];
 	snprintf(fast_mb, sizeof(fast_mb), "%d", armcpu_fast_mb());
+	// Where armcpu's board goes in exec's memory list. Fast RAM first (-P)
+	// everywhere but on a CD32: its cd.device gives Akiko MEMF_PUBLIC
+	// buffers, which must be chip RAM for Akiko's DMA, so there the board
+	// goes behind chip RAM (-B) and only takes what chip RAM cannot.
+	const char *fast_order = amigacd_system() == AMIGACD_SYS_CD32 ? "-B" : "-P";
 
 	// Two forks, so the process armcpu runs in is no child of Main's to reap.
 	pid_t first = fork();
@@ -167,12 +173,12 @@ static void armcpu_start()
 		// -f: armcpu's own guard looks for "lwbridge" in the core's path.
 		// armcpu_core_has_proxy() has asked the core itself, which is the
 		// check that guard stands in for.
-		execl(ARMCPU_BIN, "armcpu", "-f", "-c", "0", "-R", "-P", "-m", "6", "-F", fast_mb,
+		execl(ARMCPU_BIN, "armcpu", "-f", "-c", "0", "-R", fast_order, "-m", "6", "-F", fast_mb,
 		      "-C", "68020", "-t", "0", "-q", "-r", rom, (char *)NULL);
 		_exit(127);
 	}
 	waitpid(first, NULL, 0);
-	printf("armcpu: started on %s, fast RAM %s MB\n", rom, fast_mb);
+	printf("armcpu: started on %s, fast RAM %s MB (%s)\n", rom, fast_mb, fast_order);
 }
 
 void armcpu_sync()
