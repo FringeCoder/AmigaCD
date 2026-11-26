@@ -24,6 +24,7 @@
 
 #include "minimig_armcpu.h"
 #include "minimig_config.h"
+#include "minimig_profile.h"
 #include "../../file_io.h"
 #include "../../user_io.h"
 #include "../../spi.h"
@@ -69,6 +70,25 @@ bool armcpu_wanted()
 	return minimig_config.armcpu == 1 && armcpu_core_has_proxy();
 }
 
+// Fast RAM row index: memory bits 5-4, and bit 7 as bit 2 (menu.cpp).
+static int fast_index(unsigned char memory)
+{
+	return ((memory >> 4) & 0x03) | ((memory & 0x80) >> 5);
+}
+
+unsigned char armcpu_core_memory(unsigned char memory)
+{
+	return armcpu_wanted() ? (unsigned char)(memory & ~0xB0) : memory;
+}
+
+// armcpu's board in MB, from the Fast RAM row: none, 2, 4, 8. The Zorro III
+// sizes become 8: the ARM CPU's address bus is 24 bits, as on an EC020.
+static int armcpu_fast_mb()
+{
+	static const int mb[8] = { 0, 2, 4, 8, 8, 8, 8, 8 };
+	return mb[fast_index(minimig_config.memory)];
+}
+
 static pid_t armcpu_pid()
 {
 	FILE *f = fopen(ARMCPU_PID, "r");
@@ -112,6 +132,13 @@ static void armcpu_start()
 {
 	char rom[1024];
 	snprintf(rom, sizeof(rom), "%s", getFullPath(minimig_config.kickstart));
+	char fast_mb[8];
+	snprintf(fast_mb, sizeof(fast_mb), "%d", armcpu_fast_mb());
+	// Where armcpu's board goes in exec's memory list. Fast RAM first (-P)
+	// everywhere but on a CD32: its cd.device gives Akiko MEMF_PUBLIC
+	// buffers, which must be chip RAM for Akiko's DMA, so there the board
+	// goes behind chip RAM (-B) and only takes what chip RAM cannot.
+	const char *fast_order = amigacd_system() == AMIGACD_SYS_CD32 ? "-B" : "-P";
 
 	// Two forks, so the process armcpu runs in is no child of Main's to reap.
 	pid_t first = fork();
@@ -124,17 +151,34 @@ static void armcpu_start()
 
 		FILE *p = fopen(ARMCPU_PID, "w");
 		if (p) { fprintf(p, "%d\n", getpid()); fclose(p); }
+
+		// Main has only just released the reset, and the core holds its own
+		// for four more frames (minimig_syscontrol counts sof), ~80 ms at
+		// 50 Hz. Kickstart on the ARM sizes chip RAM within that time, while
+		// the chip bus is still in reset, and found 512 KB of 2 MB on a CD32
+		// (2026-11-26): too little to boot. So wait well past it, here in the
+		// child, where Main is not held up.
+		struct timespec settle = { 0, 250 * 1000 * 1000 };
+		nanosleep(&settle, NULL);
+		// A stop or restart in the meantime cannot see this process (its
+		// command line is not armcpu's yet): it removes or rewrites the pid
+		// file instead, and this one then does not start.
+		int mine = 0;
+		p = fopen(ARMCPU_PID, "r");
+		if (p) { if (fscanf(p, "%d", &mine) != 1) mine = 0; fclose(p); }
+		if (mine != getpid()) _exit(0);
+
 		int fd = open(ARMCPU_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
 		// -f: armcpu's own guard looks for "lwbridge" in the core's path.
 		// armcpu_core_has_proxy() has asked the core itself, which is the
 		// check that guard stands in for.
-		execl(ARMCPU_BIN, "armcpu", "-f", "-c", "0", "-R", "-P", "-m", "6", "-F", "8",
+		execl(ARMCPU_BIN, "armcpu", "-f", "-c", "0", "-R", fast_order, "-m", "6", "-F", fast_mb,
 		      "-C", "68020", "-t", "0", "-q", "-r", rom, (char *)NULL);
 		_exit(127);
 	}
 	waitpid(first, NULL, 0);
-	printf("armcpu: started on %s\n", rom);
+	printf("armcpu: started on %s, fast RAM %s MB (%s)\n", rom, fast_mb, fast_order);
 }
 
 void armcpu_sync()

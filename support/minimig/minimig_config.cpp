@@ -2411,7 +2411,7 @@ void minimig_ConfigAudio(unsigned char audio)
 
 void minimig_ConfigMemory(unsigned char memory)
 {
-	spi_uio_cmd8(UIO_MM2_MEM, memory);
+	spi_uio_cmd8(UIO_MM2_MEM, armcpu_core_memory(memory));
 }
 
 void minimig_ConfigCPU(unsigned char cpu)

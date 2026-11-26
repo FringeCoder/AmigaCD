@@ -8833,6 +8833,10 @@ void HandleUI(void)
 					if (minimig_config.cpu & 0x2)
 						minimig_config.cpu = (minimig_config.cpu & 0x1c) | (minus ? 0x02 : 0x03);
 					minimig_ConfigCPU(minimig_config.cpu);
+					// The core's fast RAM goes while armcpu's board is in and comes
+					// back with the machine's own CPU (armcpu_core_memory): sent before
+					// the 68000 that is to run next starts from its reset vector.
+					minimig_ConfigMemory(minimig_config.memory);
 					armcpu_restart();
 				}
 				else if (minimig_config.cpu & 0x2)
@@ -8847,6 +8851,7 @@ void HandleUI(void)
 					{
 						minimig_config.armcpu = 1;
 						minimig_ConfigCPU(minimig_config.cpu);
+						minimig_ConfigMemory(minimig_config.memory);
 						armcpu_restart();
 					}
 					else
@@ -8860,6 +8865,7 @@ void HandleUI(void)
 				{
 					minimig_config.armcpu = 1;
 					minimig_ConfigCPU(minimig_config.cpu);
+					minimig_ConfigMemory(minimig_config.memory);
 					armcpu_restart();
 				}
 				menustate = MENU_AMIGACD_SETTINGS1;

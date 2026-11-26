@@ -22,6 +22,10 @@
  *     -C  the CPU Musashi plays: 68000 (default), 68010, 68EC020, 68020,
  *         68030 or 68040 (with its FPU). The address bus stays 24 bits wide,
  *         as on an EC020: the Amiga behind the proxy has no more.
+ *     -B  fast RAM last, for a CD32: the board goes into exec's list at
+ *         priority -20, behind chip RAM, so allocations land in chip RAM as
+ *         on a real CD32 (its cd.device gives Akiko MEMF_PUBLIC buffers,
+ *         which Akiko's DMA cannot reach in ARM memory); overrides -P
  *     -R  the ARM core to itself, for this run only: every interrupt that can
  *         move and every task that can move go to the other core, and the
  *         emulator runs SCHED_FIFO with its memory locked. All of it is put
@@ -196,11 +200,21 @@ static uint8_t  ac_lo;                   /* the nibble written to $4A */
 static uint64_t n_fast;
 static int      fast_first;              /* -P */
 
-/* -P: the MemHeader expansion.library builds at the board's base carries
- * ln_Pri at +9; give it 5 as it is written, before it is enqueued */
+/* The MemHeader expansion.library builds at the board's base carries ln_Pri
+ * at +9; set it as it is written, before it is enqueued:
+ *   -P: 5, ahead of slow RAM (fast RAM first).
+ *   -B: -20, behind chip RAM's -10, for a CD32. Its cd.device allocates
+ *       Akiko's DMA buffers as plain MEMF_PUBLIC (extended ROM $E00928),
+ *       which on a real CD32 can only be chip RAM. This board is in ARM
+ *       memory, where Akiko's DMA cannot reach: given it, Akiko read every
+ *       command as zeros and no disc was read (2026-11-26). Behind chip RAM,
+ *       it is used once chip RAM is full. */
+static int fast_behind;                  /* -B */
 static inline uint8_t fast_pri(uint32_t off, uint8_t v)
 {
-	return (fast_first && off == 9) ? 5 : v;
+	if (off != 9) return v;
+	if (fast_behind) return (uint8_t)-20;
+	return fast_first ? 5 : v;
 }
 
 /* er_Type (Zorro II, memory into the free list, size), er_Product, er_Flags
@@ -553,7 +567,7 @@ int main(int argc, char **argv)
 	const char *cpu_name = "68000";
 	unsigned mode = 6;
 
-	while ((opt = getopt(argc, argv, "r:t:m:c:C:F:M:PRd:qfwDh")) != -1) {
+	while ((opt = getopt(argc, argv, "r:t:m:c:C:F:M:PBRd:qfwDh")) != -1) {
 		switch (opt) {
 		case 'r': rom_path = optarg; break;
 		case 't': seconds = atof(optarg); break;
@@ -566,6 +580,7 @@ int main(int argc, char **argv)
 		case 'w': warm = 1; break;
 		case 'F': fast_mb = atoi(optarg); break;
 		case 'P': fast_first = 1; break;
+		case 'B': fast_behind = 1; break;
 		case 'R': rt = 1; break;
 		case 'C': {
 			static const struct { const char *n; unsigned t; } types[] = {
@@ -586,7 +601,7 @@ int main(int argc, char **argv)
 			else { fprintf(stderr, "-M t:x:y, at most %d\n", MAX_CLICKS); return 2; }
 			break;
 		default:
-			fprintf(stderr, "usage: %s [-r rom] [-t seconds] [-m mode] [-c cpu] [-C type] [-F MB] [-P] [-R] [-M t:x:y] [-q] [-d file] [-f] [-w] [-D]\n", argv[0]);
+			fprintf(stderr, "usage: %s [-r rom] [-t seconds] [-m mode] [-c cpu] [-C type] [-F MB] [-P] [-B] [-R] [-M t:x:y] [-q] [-d file] [-f] [-w] [-D]\n", argv[0]);
 			return 2;
 		}
 	}
