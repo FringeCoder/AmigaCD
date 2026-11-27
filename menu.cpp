@@ -8561,7 +8561,7 @@ void HandleUI(void)
 			// the row it belongs to.
 			static const char *const tips[] =
 			{
-				/* 0 FastRAM  */ "Zorro II and Zorro III fast RAM. Z3 and 68000 both stop save states working, and grey those rows out when selected.",
+				/* 0 FastRAM  */ "Zorro II and Zorro III fast RAM. Z3 and 68000 both stop save states working, and grey those rows out when selected. On a CD32, \"after chip\" puts it behind chip RAM, for games such as James Pond 3 that fail with fast RAM. Takes effect at the next reset.",
 				/* 1 CPU      */ "The machine's 68020, or a 68030 with its MMU: at 40MHz or 50MHz like a real card, or Fast. No FPU. Save states work on all of them. With the test core, ARM runs a 68020 on the ARM with 8 MB of its own fast RAM.",
 				/* 2 CPU Turbo*/ "Run the 68020 at full speed rather than throttled to the stock rate. Only available when the CPU is an 020.",
 				/* 3 Main ROM */ "The Kickstart. Amiga Forever ROMs work as they are, encrypted, as long as ROM.KEY sits beside them.",
@@ -8595,7 +8595,13 @@ void HandleUI(void)
 		OsdWrite(m++, "", 0, 0);
 
 		strcpy(s, " FastRAM  : ");
-		strcat(s, config_memory_fast_msg[minimig_fast_z3(minimig_config.cpu)][((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5)]);
+		{
+			const int fc = ((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5);
+			strcat(s, config_memory_fast_msg[minimig_fast_z3(minimig_config.cpu)][fc]);
+			// Behind chip RAM in exec's list (AMIGACD_FAST_LAST_STATUS_OPT).
+			// The ARM CPU's board is there on a CD32 anyway (armcpu -B).
+			if (fc && amigacd_fast_last() && !armcpu_wanted()) strcat(s, " after chip");
+		}
 		OsdWrite(m++, s, menusub == 0, 0);
 
 		// CPU, on the line D-Cache had: the core no longer reads that bit
@@ -8794,19 +8800,24 @@ void HandleUI(void)
 		{
 			if (menusub == 0) // FastRAM cycle (mirrors CHIPSET2 menusub 5)
 			{
-				// Upstream 60a868f's order: none 2M 4M 8M 256M 384M.
+				// Upstream 60a868f's order: none 2M 4M 8M 256M 384M. On a
+				// machine with Akiko the sizes come round a second time "after
+				// chip": the board goes into exec's list behind chip RAM
+				// (AMIGACD_FAST_LAST_STATUS_OPT), for the CD32 games that take
+				// MEMF_ANY memory where they need chip RAM. Not offered with
+				// the ARM CPU, whose board is behind chip RAM there already.
 				int fc = (((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5));
-				if (minus)
+				const int maxfc = minimig_fast_z3(minimig_config.cpu) ? 5 : 3;
+				const bool offer = amigacd_fast_last_offered() && !armcpu_wanted();
+				if (fc > maxfc) fc = maxfc;
+				const int nsteps = offer ? 2 * maxfc + 1 : maxfc + 1;
+				int step = (offer && fc && amigacd_fast_last()) ? maxfc + fc : fc;
+				step = minus ? (step + nsteps - 1) % nsteps : (step + 1) % nsteps;
+				fc = (step > maxfc) ? step - maxfc : step;
+				if (offer)
 				{
-					fc--;
-					if (fc < 0) fc = 5;
-					if (!minimig_fast_z3(minimig_config.cpu) && fc > 3) fc = 3;
-				}
-				else
-				{
-					fc++;
-					if (fc > 5) fc = 0;
-					if (!minimig_fast_z3(minimig_config.cpu) && fc > 3) fc = 0;
+					if (step > maxfc) minimig_config.hardfile[0].reserved |= AMIGACD_HF0_FAST_LAST;
+					else minimig_config.hardfile[0].reserved &= (unsigned char)~AMIGACD_HF0_FAST_LAST;
 				}
 				minimig_config.memory = ((fc << 4) & 0x30) | ((fc << 5) & 0x80) | (minimig_config.memory & ~0xB0);
 				menustate = MENU_AMIGACD_SETTINGS1;
