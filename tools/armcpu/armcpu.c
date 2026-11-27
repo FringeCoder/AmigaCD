@@ -60,7 +60,7 @@
  *
  * The bridge's 1 MB window is in the 68k's byte order, so a halfword or word
  * is byte-swapped here (latprobe -P does the same). The emulator follows the
- * ROM overlay itself -- CIA-A PRA bit 0 through DDRA, as Gary does -- and
+ * ROM overlay itself -- off at the first CIA-A write, as the core does -- and
  * reads $000000-$07FFFF from its own copy of the ROM while it is on, so the
  * reset vectors never depend on the bus. Interrupts: Paula's level is read
  * from armcpu_bridge STATUS every slice of 500 68000 cycles and handed to
@@ -121,7 +121,6 @@ static uint32_t ctrl_bits;         /* OWN plus the mode bits */
 
 static uint8_t  rom[0x80000];      /* $F80000-$FFFFFF */
 static int      ovl = 1;           /* ROM overlay on $000000 (after reset) */
-static uint8_t  cia_pra, cia_ddra;
 
 static uint64_t n_rom, n_bus_rd, n_bus_wr;
 
@@ -172,16 +171,18 @@ static inline uint16_t bus_rd16(uint32_t a) { set_bank(a); n_bus_rd++; return __
 static inline void bus_wr8(uint32_t a, uint8_t v)   { set_bank(a); n_bus_wr++; win[a & 0xFFFFF] = v; }
 static inline void bus_wr16(uint32_t a, uint16_t v) { set_bank(a); n_bus_wr++; *(volatile uint16_t *)(win + (a & 0xFFFFF)) = __builtin_bswap16(v); }
 
-/* CIA-A PRA bit 0 is OVL; with DDRA bit 0 an input the line is pulled up */
+/* The overlay as the core keeps it (minimig.v, reg ovl): on at reset, off at
+ * the first write to CIA-A, whatever the register or the value, and not on
+ * again until the next reset. Not as Gary does it, from PRA bit 0 through
+ * DDRA: the CD32 extended ROM writes $FD to PRA with DDRA $03 (PC $E5ABBE,
+ * 2026-11-27), which on Gary's reading puts the ROM back over chip RAM. The
+ * core ignores that write, so the fx68k ran on; armcpu read its ROM copy for
+ * $0-$7FFFF from then on, and Super Stardust went wild. armcpu has to see the
+ * memory map the core gives everything else on the bus. */
 static inline void cia_track(uint32_t a, uint8_t v)
 {
 	if ((a & 0xFF0000) != 0xBF0000 || (a & 0x1001) != 0x0001) return;   /* CIA-A, odd byte */
-	switch ((a >> 8) & 15) {
-	case 0: cia_pra  = v; break;
-	case 2: cia_ddra = v; break;
-	default: return;
-	}
-	ovl = !((cia_ddra & 1) && !(cia_pra & 1));
+	ovl = 0;
 	event("CIA-A write %06x = %02x", a, v);
 }
 
@@ -370,6 +371,12 @@ unsigned int m68k_read_memory_8(unsigned int a)
 unsigned int m68k_read_memory_16(unsigned int a)
 {
 	a &= 0xFFFFFF;
+	/* A 68020 reads a word at an odd address, which a 68000 traps: two byte
+	 * cycles, as its bus does. Taken as one 16-bit load it is an unaligned
+	 * access to the bridge's device memory, which killed armcpu (Super
+	 * Stardust run wild at an odd PC, 2026-11-26), and at a window's or the
+	 * board's last byte it reads past the end. */
+	if (a & 1) return (m68k_read_memory_8(a) << 8) | m68k_read_memory_8((a + 1) & 0xFFFFFF);
 	if (is_rom(a)) { n_rom++; return (rom[a & 0x7FFFF] << 8) | rom[(a + 1) & 0x7FFFF]; }
 	if (is_fast(a)) { n_fast++; return (fast[a - fast_base] << 8) | fast[a - fast_base + 1]; }
 	if (is_ac(a)) return (ac_read(a) << 8) | ac_read(a + 1);
@@ -400,6 +407,11 @@ void m68k_write_memory_8(unsigned int a, unsigned int v)
 void m68k_write_memory_16(unsigned int a, unsigned int v)
 {
 	a &= 0xFFFFFF;
+	if (a & 1) {                                  /* odd: two byte cycles, see the read */
+		m68k_write_memory_8(a, (v >> 8) & 0xFF);
+		m68k_write_memory_8((a + 1) & 0xFFFFFF, v & 0xFF);
+		return;
+	}
 	if (a >= 0xF80000) return;
 	if (is_fast(a)) {
 		n_fast++;
@@ -430,7 +442,6 @@ static void armcpu_reset_instr(void)
 	int64_t t0 = now_ns();
 	while (now_ns() - t0 < 20000) ;
 	ctl[1] = ctrl_bits;
-	cia_pra = cia_ddra = 0;
 	ovl = 1;
 	bank_cur = 0xFFFFFFFFu;
 	fast_reset();
