@@ -2167,6 +2167,18 @@ int amigacd_system(void)
 	         ? AMIGACD_SYS_CD32PLUS : AMIGACD_SYS_CD32;
 }
 
+bool amigacd_fast_last_offered(void)
+{
+	const int sys = amigacd_system();
+	return is_amigacd() && (sys == AMIGACD_SYS_CD32 || sys == AMIGACD_SYS_CD32PLUS);
+}
+
+bool amigacd_fast_last(void)
+{
+	return amigacd_fast_last_offered()
+	    && (minimig_config.hardfile[0].reserved & AMIGACD_HF0_FAST_LAST);
+}
+
 static char minimig_adjust = 0;
 
 typedef struct
@@ -2412,6 +2424,11 @@ void minimig_ConfigAudio(unsigned char audio)
 void minimig_ConfigMemory(unsigned char memory)
 {
 	spi_uio_cmd8(UIO_MM2_MEM, armcpu_core_memory(memory));
+
+	// Beside the memory byte, so every path that sends one sends the other
+	// before the reset that runs autoconfig.
+	if (is_amigacd())
+		user_io_status_set(AMIGACD_FAST_LAST_STATUS_OPT, amigacd_fast_last() ? 1 : 0);
 }
 
 void minimig_ConfigCPU(unsigned char cpu)

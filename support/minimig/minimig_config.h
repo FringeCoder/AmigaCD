@@ -107,6 +107,10 @@ typedef struct
 // the 2026-11-08 migration, so a 0 stored with it is the user's "Off" and not
 // the default this core handed out from 2026-10-08. See amigacd_migrate_cd_hold.
 #define AMIGACD_HF0_HOLD_V2  0x02
+// Bit 2 of hardfile[0].reserved: fast RAM behind chip RAM in exec's memory
+// list, on a machine with Akiko. The FastRAM row's "after chip" sizes; see
+// amigacd_fast_last().
+#define AMIGACD_HF0_FAST_LAST 0x04
 
 typedef struct
 {
@@ -478,6 +482,22 @@ int  amigacd_system(void);
 // reset that runs autoconfig. CD32+ keeps the boards: it is the machine for
 // Workbench use, where the network card is wanted.
 #define AMIGACD_CD32_STATUS_OPT "[65]"
+
+// status[66]: the core's fast RAM board goes into exec's memory list behind
+// chip RAM. AmigaCD.sv rewrites the ln_Pri byte expansion.library writes into
+// the board's MemHeader (base + 9) to -20, below chip RAM's -10, so MEMF_ANY
+// memory comes from chip RAM until it is full. James Pond 3 goes black after
+// its intro with any fast RAM in front of chip RAM, on Copperline too: it
+// takes MEMF_ANY memory for something that has to be chip RAM. Not what a
+// real CD32 with fast RAM does -- a workaround the user picks, the trick
+// armcpu -B plays on its own board. Sent with the memory config, so it is in
+// place before the reset that runs autoconfig. A core without the RTL side
+// ignores the bit.
+#define AMIGACD_FAST_LAST_STATUS_OPT "[66]"
+// The machine has Akiko (CD32 or CD32+), so the "after chip" sizes are offered.
+bool amigacd_fast_last_offered(void);
+// The setting is on and offered.
+bool amigacd_fast_last(void);
 // slot: 0 = cd32_drive, 1 = cdtv_drive
 int minimig_cd_drive_open(int slot, const char *filename);
 drive_t* minimig_cd_drive_get(int slot);
